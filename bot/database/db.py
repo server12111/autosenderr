@@ -92,6 +92,8 @@ class MailingTarget:
     id: int
     mailing_id: int
     chat_identifier: str
+    interval_seconds: Optional[int] = None
+    last_sent_at: Optional[datetime] = None
 
 
 @dataclass
@@ -190,6 +192,9 @@ class Database:
         # mailing_messages
         await _add_col("mailing_messages", "photo_path",  "TEXT")
         await _add_col("mailing_messages", "parse_mode",  "TEXT DEFAULT 'html'")
+        # mailing_targets
+        await _add_col("mailing_targets", "interval_seconds", "INTEGER")
+        await _add_col("mailing_targets", "last_sent_at",     "DATETIME")
         # payments
         await _add_col("payments", "payment_method", "TEXT DEFAULT 'cryptobot'")
         await _add_col("payments", "plan_days",       "INTEGER DEFAULT 30")
@@ -487,7 +492,7 @@ class Database:
     async def update_mailing_last_sent(self, mailing_id: int):
         await self._conn.execute(
             "UPDATE mailings SET last_sent_at = ? WHERE id = ?",
-            (datetime.now().isoformat(), mailing_id),
+            (datetime.utcnow().isoformat(), mailing_id),
         )
         await self._conn.commit()
 
@@ -566,7 +571,17 @@ class Database:
             "SELECT * FROM mailing_targets WHERE mailing_id = ?", (mailing_id,)
         ) as cur:
             rows = await cur.fetchall()
-            return [MailingTarget(id=r["id"], mailing_id=r["mailing_id"], chat_identifier=r["chat_identifier"]) for r in rows]
+            result = []
+            for r in rows:
+                keys = r.keys()
+                result.append(MailingTarget(
+                    id=r["id"],
+                    mailing_id=r["mailing_id"],
+                    chat_identifier=r["chat_identifier"],
+                    interval_seconds=r["interval_seconds"] if "interval_seconds" in keys else None,
+                    last_sent_at=self._parse_datetime(r["last_sent_at"]) if "last_sent_at" in keys else None,
+                ))
+            return result
 
     async def add_mailing_target(self, mailing_id: int, chat_identifier: str) -> int:
         normalized = chat_identifier.strip()
@@ -579,6 +594,20 @@ class Database:
         )
         await self._conn.commit()
         return cursor.lastrowid
+
+    async def update_target_interval(self, target_id: int, interval_seconds: Optional[int]):
+        await self._conn.execute(
+            "UPDATE mailing_targets SET interval_seconds = ? WHERE id = ?",
+            (interval_seconds, target_id),
+        )
+        await self._conn.commit()
+
+    async def update_target_last_sent(self, target_id: int):
+        await self._conn.execute(
+            "UPDATE mailing_targets SET last_sent_at = ? WHERE id = ?",
+            (datetime.utcnow().isoformat(), target_id),
+        )
+        await self._conn.commit()
 
     async def delete_mailing_target(self, target_id: int):
         await self._conn.execute("DELETE FROM mailing_targets WHERE id = ?", (target_id,))

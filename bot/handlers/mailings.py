@@ -3,10 +3,24 @@ import re
 import os
 import uuid
 import logging
+import pytz
+from datetime import datetime
 from aiogram import Router, F
 from aiogram.types import Message, CallbackQuery
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
+from aiogram.utils.text_decorations import html_decoration
+
+_KYIV_TZ = pytz.timezone('Europe/Kiev')
+
+
+def _fmt_dt(dt) -> str:
+    """Format datetime in Kyiv timezone."""
+    if dt is None:
+        return "никогда"
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=pytz.utc)
+    return dt.astimezone(_KYIV_TZ).strftime("%d.%m.%Y %H:%M")
 
 from ..database.db import Database
 from ..keyboards.inline import (
@@ -49,6 +63,13 @@ async def save_photo_from_message(message: Message) -> str | None:
     return file_path
 
 
+def _strip_html(text: str) -> str:
+    """Remove HTML tags from text for plain display."""
+    import html as _html
+    clean = re.sub(r'<[^>]+>', '', text)
+    return _html.unescape(clean)
+
+
 def message_preview(msg) -> str:
     """Generate preview text for a mailing message."""
     photo_count = len(msg.photo_paths)
@@ -58,8 +79,8 @@ def message_preview(msg) -> str:
         prefix = "[Фото] "
     else:
         prefix = ""
-    text = msg.text or ""
-    preview = text[:40] + "..." if len(text) > 40 else text
+    raw = _strip_html(msg.text or "")
+    preview = raw[:40] + "..." if len(raw) > 40 else raw
     return f"{prefix}{preview}" if (prefix or preview) else "[Фото]"
 
 
@@ -103,6 +124,7 @@ class EditMailingStates(StatesGroup):
     waiting_target = State()
     waiting_folder = State()
     waiting_hours = State()
+    waiting_target_interval = State()
 
 
 @router.callback_query(F.data.startswith("account_mailings:"))
@@ -162,7 +184,7 @@ async def callback_mailing_menu(callback: CallbackQuery, db: Database):
     targets = await db.get_mailing_targets(mailing_id)
 
     status = "🟢 Активна" if mailing.is_active else "🔴 Остановлена"
-    last_sent = mailing.last_sent_at.strftime("%d.%m.%Y %H:%M") if mailing.last_sent_at else "никогда"
+    last_sent = _fmt_dt(mailing.last_sent_at)
     active_hours = format_active_hours(mailing.active_hours_json)
 
     text = (
@@ -212,7 +234,7 @@ async def callback_toggle_mailing(
     targets = await db.get_mailing_targets(mailing_id)
 
     status = "🟢 Активна" if mailing.is_active else "🔴 Остановлена"
-    last_sent = mailing.last_sent_at.strftime("%d.%m.%Y %H:%M") if mailing.last_sent_at else "никогда"
+    last_sent = _fmt_dt(mailing.last_sent_at)
     active_hours = format_active_hours(mailing.active_hours_json)
 
     text = (
@@ -284,7 +306,7 @@ async def process_edit_message_photo(
         if photo_path:
             pending_photos.append(photo_path)
         if caption is None and msg.caption:
-            caption = msg.caption.strip()
+            caption = html_decoration.unparse(msg.caption, msg.caption_entities or []).strip()
 
     await state.update_data(pending_photos=pending_photos, pending_caption=caption)
 
@@ -304,7 +326,7 @@ async def process_edit_message_photo(
 
 @router.message(EditMailingStates.waiting_message_text)
 async def process_edit_message_text(message: Message, state: FSMContext, db: Database):
-    text = (message.text or "").strip()
+    text = (message.html_text if message.text else "").strip()
     if not text:
         await message.answer("❌ Отправьте текст или фото.")
         return
@@ -471,6 +493,58 @@ async def callback_delete_target(callback: CallbackQuery, db: Database):
     await callback.message.edit_text(
         text, reply_markup=mailing_targets_keyboard(mailing_id, targets)
     )
+
+
+# === Per-target interval (edit mode) ===
+@router.callback_query(F.data.startswith("edit_target_interval:"))
+async def callback_edit_target_interval(callback: CallbackQuery, state: FSMContext, db: Database):
+    parts = callback.data.split(":")
+    target_id = int(parts[1])
+    mailing_id = int(parts[2])
+
+    targets = await db.get_mailing_targets(mailing_id)
+    target = next((t for t in targets if t.id == target_id), None)
+    current = target.interval_seconds if target else None
+    current_str = f"{current} сек" if current else "по умолчанию (общий интервал рассылки)"
+
+    await state.update_data(target_id=target_id, mailing_id=mailing_id)
+    await state.set_state(EditMailingStates.waiting_target_interval)
+
+    await callback.message.edit_text(
+        f"⏱️ Интервал для чата: {target.chat_identifier if target else ''}\n\n"
+        f"Текущий: {current_str}\n\n"
+        "Введите интервал в секундах (минимум 30).\n"
+        "Отправьте 0 — использовать общий интервал рассылки.",
+        reply_markup=cancel_keyboard(),
+    )
+    await callback.answer()
+
+
+@router.message(EditMailingStates.waiting_target_interval)
+async def process_target_interval(message: Message, state: FSMContext, db: Database):
+    try:
+        interval = int(message.text.strip())
+        if interval != 0 and interval < 30:
+            await message.answer("❌ Минимальный интервал — 30 секунд (или 0 для использования общего интервала)")
+            return
+    except ValueError:
+        await message.answer("❌ Введите число (секунды) или 0")
+        return
+
+    data = await state.get_data()
+    target_id = data["target_id"]
+    mailing_id = data["mailing_id"]
+
+    await db.update_target_interval(target_id, interval if interval > 0 else None)
+    await state.clear()
+
+    targets = await db.get_mailing_targets(mailing_id)
+    text = f"✅ Интервал обновлён!\n\n🎯 Целевые чаты ({len(targets)} шт.):\n\n"
+    for i, t in enumerate(targets, 1):
+        iv = f" [{t.interval_seconds}с]" if t.interval_seconds else " [умолч.]"
+        text += f"{i}. {t.chat_identifier}{iv}\n"
+
+    await message.answer(text, reply_markup=mailing_targets_keyboard(mailing_id, targets))
 
 
 # === Folder targets (edit mode) ===
@@ -773,7 +847,7 @@ async def process_create_message_photo(
         if photo_path:
             pending_photos.append(photo_path)
         if caption is None and msg.caption:
-            caption = msg.caption.strip()
+            caption = html_decoration.unparse(msg.caption, msg.caption_entities or []).strip()
 
     await state.update_data(pending_photos=pending_photos, pending_caption=caption)
 
@@ -793,7 +867,7 @@ async def process_create_message_photo(
 
 @router.message(CreateMailingStates.waiting_message_text)
 async def process_create_message_text(message: Message, state: FSMContext, db: Database):
-    text = (message.text or "").strip()
+    text = (message.html_text if message.text else "").strip()
     if not text:
         await message.answer("❌ Отправьте текст или фото.")
         return
@@ -1153,7 +1227,7 @@ async def callback_set_mailing_account(callback: CallbackQuery, db: Database):
     targets = await db.get_mailing_targets(mailing_id)
 
     status = "🟢 Активна" if mailing.is_active else "🔴 Остановлена"
-    last_sent = mailing.last_sent_at.strftime("%d.%m.%Y %H:%M") if mailing.last_sent_at else "никогда"
+    last_sent = _fmt_dt(mailing.last_sent_at)
     active_hours = format_active_hours(mailing.active_hours_json)
 
     text = (

@@ -62,6 +62,8 @@ CREATE TABLE IF NOT EXISTS mailing_targets (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     mailing_id INTEGER NOT NULL,
     chat_identifier TEXT NOT NULL,
+    interval_seconds INTEGER,
+    last_sent_at DATETIME,
     FOREIGN KEY (mailing_id) REFERENCES mailings(id) ON DELETE CASCADE
 );
 

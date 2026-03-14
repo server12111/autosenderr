@@ -124,9 +124,7 @@ async def callback_add_account(callback: CallbackQuery, state: FSMContext, db: D
         "➕ Добавление аккаунта\n\n"
         f"📊 У вас {accounts_count}/{config.FREE_ACCOUNTS_LIMIT} бесплатных аккаунтов\n"
         f"Осталось бесплатных: {remaining}\n\n"
-        "Выберите способ добавления:\n\n"
-        "📱 <b>По номеру телефона</b> — простой способ, просто введите номер и код\n\n"
-        "🔑 <b>API ID и Hash</b> — если у вас есть свои ключи с my.telegram.org"
+        "Нажмите кнопку ниже, чтобы добавить аккаунт по номеру телефона:"
     )
 
     await callback.message.edit_text(text, reply_markup=add_account_method_keyboard())
@@ -244,9 +242,7 @@ async def callback_check_ton_account(
         "✅ Оплата получена!\n\n"
         "➕ Добавление аккаунта\n\n"
         f"📊 У вас {accounts_count} аккаунтов\n\n"
-        "Выберите способ добавления:\n\n"
-        "📱 <b>По номеру телефона</b> — простой способ\n\n"
-        "🔑 <b>API ID и Hash</b> — если есть свои ключи"
+        "Нажмите кнопку ниже, чтобы добавить аккаунт:"
     )
 
     await callback.message.edit_text(text, reply_markup=add_account_method_keyboard())
@@ -273,9 +269,7 @@ async def callback_check_account_payment(callback: CallbackQuery, db: Database):
         "✅ Оплата получена!\n\n"
         "➕ Добавление аккаунта\n\n"
         f"📊 У вас {accounts_count} аккаунтов\n\n"
-        "Выберите способ добавления:\n\n"
-        "📱 <b>По номеру телефона</b> — простой способ\n\n"
-        "🔑 <b>API ID и Hash</b> — если есть свои ключи"
+        "Нажмите кнопку ниже, чтобы добавить аккаунт:"
     )
 
     await callback.message.edit_text(text, reply_markup=add_account_method_keyboard())

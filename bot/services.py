@@ -385,27 +385,37 @@ class MailingService:
                             await asyncio.sleep(60)
                             continue
 
-                    msg = random.choice(messages)
-
-                    # Determine parse_mode for Telethon
-                    pm = msg.parse_mode or 'html'
-                    if pm == 'plain':
-                        pm = None
+                    now = datetime.utcnow()
+                    sent_any = False
 
                     for target_obj in targets:
+                        # Each target uses its own interval or falls back to mailing default
+                        target_interval = target_obj.interval_seconds or mailing.interval_seconds
+                        if target_obj.last_sent_at is not None:
+                            elapsed = (now - target_obj.last_sent_at).total_seconds()
+                            if elapsed < target_interval:
+                                continue  # Not due yet for this target
+
                         target = target_obj.chat_identifier
                         if not target.startswith('-') and not target.startswith('@') and not target.isdigit():
                             target = f"@{target}"
 
+                        msg = random.choice(messages)
+                        pm = msg.parse_mode or 'html'
+                        if pm == 'plain':
+                            pm = None
+
                         try:
                             photos = [p for p in msg.photo_paths if os.path.exists(p)]
                             if len(photos) > 1:
-                                await client.send_file(target, photos, caption=msg.text or None)
+                                await client.send_file(target, photos, caption=msg.text or None, parse_mode=pm)
                             elif len(photos) == 1:
-                                await client.send_file(target, photos[0], caption=msg.text or None)
+                                await client.send_file(target, photos[0], caption=msg.text or None, parse_mode=pm)
                             else:
                                 await client.send_message(target, msg.text, parse_mode=pm)
                             logger.info(f"Mailing {mailing_id} sent to {target}")
+                            await self.db.update_target_last_sent(target_obj.id)
+                            sent_any = True
                         except _BAN_ERRORS as e:
                             await self._handle_mailing_ban(mailing_id, mailing.account_id, e)
                             return
@@ -417,8 +427,15 @@ class MailingService:
 
                         await asyncio.sleep(3)
 
-                    await self.db.update_mailing_last_sent(mailing_id)
-                    await asyncio.sleep(mailing.interval_seconds)
+                    if sent_any:
+                        await self.db.update_mailing_last_sent(mailing_id)
+
+                    # Sleep until next possible send (min 30s, max 60s)
+                    min_interval = min(
+                        t.interval_seconds or mailing.interval_seconds for t in targets
+                    )
+                    sleep_time = max(30, min(60, min_interval // 10))
+                    await asyncio.sleep(sleep_time)
 
                 except asyncio.CancelledError:
                     raise
