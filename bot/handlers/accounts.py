@@ -25,6 +25,10 @@ from ..services import CryptoBotService, TonPaymentService
 router = Router()
 
 
+class RenameAccountStates(StatesGroup):
+    waiting_name = State()
+
+
 class AddAccountStates(StatesGroup):
     waiting_api_id = State()
     waiting_api_hash = State()
@@ -48,8 +52,9 @@ async def callback_accounts(callback: CallbackQuery, db: Database):
     if accounts:
         for acc in accounts:
             status = "🟢" if acc.is_active else "🔴"
-            autoresponder = "✅" if acc.autoresponder_enabled else "❌"
-            text += f"{status} {acc.phone} (Автоответчик: {autoresponder})\n"
+            ar = "✅" if acc.autoresponder_enabled else "❌"
+            gr = "✅" if acc.group_autoresponder_enabled else "❌"
+            text += f"{status} {acc.display_name}\n  └ Личный автоответ: {ar}  Групповой: {gr}\n"
     else:
         text += "У вас пока нет добавленных аккаунтов.\n"
 
@@ -68,12 +73,15 @@ async def callback_account_menu(callback: CallbackQuery, db: Database):
         await callback.answer("Аккаунт не найден", show_alert=True)
         return
 
-    autoresponder_status = "✅ Включён" if account.autoresponder_enabled else "❌ Выключен"
+    ar_status = "✅ Включён" if account.autoresponder_enabled else "❌ Выключен"
+    gr_status = "✅ Включён" if account.group_autoresponder_enabled else "❌ Выключен"
 
     text = (
-        f"📱 Аккаунт: {account.phone}\n\n"
-        f"Автоответчик: {autoresponder_status}\n"
-        f"Добавлен: {account.created_at.strftime('%d.%m.%Y')}\n\n"
+        f"📱 Аккаунт: {account.display_name}\n"
+        f"📞 Номер: {account.phone}\n\n"
+        f"🤖 Личный автоответчик: {ar_status}\n"
+        f"💬 Групповой автоответчик: {gr_status}\n"
+        f"📅 Добавлен: {account.created_at.strftime('%d.%m.%Y')}\n\n"
         "Выберите действие:"
     )
 
@@ -740,6 +748,37 @@ async def callback_confirm_delete_account(
         reply_markup=main_menu_keyboard(),
     )
     await callback.answer()
+
+
+@router.callback_query(F.data.startswith("rename_account:"))
+async def callback_rename_account(callback: CallbackQuery, state: FSMContext):
+    account_id = int(callback.data.split(":")[1])
+    await state.update_data(account_id=account_id)
+    await state.set_state(RenameAccountStates.waiting_name)
+    await callback.message.edit_text(
+        "✏️ Введите новое название для аккаунта:\n\n"
+        "(Например: Основной, Рабочий, Спам и т.д.)",
+        reply_markup=cancel_keyboard(),
+    )
+    await callback.answer()
+
+
+@router.message(RenameAccountStates.waiting_name)
+async def process_rename_account(message: Message, state: FSMContext, db: Database):
+    name = message.text.strip()
+    if not name:
+        await message.answer("❌ Название не может быть пустым.", reply_markup=cancel_keyboard())
+        return
+    data = await state.get_data()
+    account_id = data["account_id"]
+    await db.update_account_name(account_id, name)
+    await state.clear()
+
+    account = await db.get_account(account_id)
+    await message.answer(
+        f"✅ Аккаунт переименован: <b>{name}</b>",
+        reply_markup=account_menu_keyboard(account_id),
+    )
 
 
 @router.callback_query(F.data == "pay_account_card")

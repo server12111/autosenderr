@@ -23,6 +23,8 @@ from ..keyboards.inline import (
     cancel_keyboard,
     main_menu_keyboard,
     photo_collection_keyboard,
+    parse_mode_keyboard,
+    select_account_for_mailing_keyboard,
 )
 from ..utils.time_utils import format_active_hours, parse_time_range, create_active_hours_json
 from ..services import MailingService
@@ -101,6 +103,30 @@ class EditMailingStates(StatesGroup):
     waiting_target = State()
     waiting_folder = State()
     waiting_hours = State()
+
+
+@router.callback_query(F.data.startswith("account_mailings:"))
+async def callback_account_mailings(callback: CallbackQuery, db: Database):
+    """Show mailings for a specific account."""
+    account_id = int(callback.data.split(":")[1])
+    user = await db.get_user(callback.from_user.id)
+    all_mailings = await db.get_user_mailings(user.id)
+    mailings = [m for m in all_mailings if m.account_id == account_id]
+
+    account = await db.get_account(account_id)
+    name = account.display_name if account else "аккаунт"
+
+    text = f"📋 Рассылки аккаунта {name}:\n\n"
+    if mailings:
+        for m in mailings:
+            status = "🟢 Активна" if m.is_active else "🔴 Остановлена"
+            text += f"• {m.name} - {status}\n"
+    else:
+        text += "Рассылок для этого аккаунта нет.\n"
+
+    text += "\nВыберите рассылку или создайте новую:"
+    await callback.message.edit_text(text, reply_markup=mailings_keyboard(mailings))
+    await callback.answer()
 
 
 @router.callback_query(F.data == "mailings")
@@ -1093,6 +1119,94 @@ async def callback_launch_mailing(
             "❌ Не удалось запустить. Проверьте аккаунт.",
             show_alert=True,
         )
+
+
+@router.callback_query(F.data.startswith("change_mailing_account:"))
+async def callback_change_mailing_account(callback: CallbackQuery, db: Database):
+    mailing_id = int(callback.data.split(":")[1])
+    user = await db.get_user(callback.from_user.id)
+    accounts = await db.get_user_accounts(user.id)
+
+    if not accounts:
+        await callback.answer("У вас нет аккаунтов", show_alert=True)
+        return
+
+    await callback.message.edit_text(
+        "🔄 Выберите аккаунт для рассылки:",
+        reply_markup=select_account_for_mailing_keyboard(accounts, mailing_id),
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("set_mailing_account:"))
+async def callback_set_mailing_account(callback: CallbackQuery, db: Database):
+    parts = callback.data.split(":")
+    account_id = int(parts[1])
+    mailing_id = int(parts[2])
+
+    await db.update_mailing_account(mailing_id, account_id)
+    await callback.answer("✅ Аккаунт изменён")
+
+    mailing = await db.get_mailing(mailing_id)
+    account = await db.get_account(mailing.account_id)
+    messages = await db.get_mailing_messages(mailing_id)
+    targets = await db.get_mailing_targets(mailing_id)
+
+    status = "🟢 Активна" if mailing.is_active else "🔴 Остановлена"
+    last_sent = mailing.last_sent_at.strftime("%d.%m.%Y %H:%M") if mailing.last_sent_at else "никогда"
+    active_hours = format_active_hours(mailing.active_hours_json)
+
+    text = (
+        f"📋 Рассылка: {mailing.name}\n\n"
+        f"Статус: {status}\n"
+        f"Аккаунт: {account.display_name if account else 'не найден'}\n"
+        f"Интервал: {mailing.interval_seconds} сек\n"
+        f"Время активности: {active_hours}\n"
+        f"Сообщений: {len(messages)}\n"
+        f"Целевых чатов: {len(targets)}\n"
+        f"Последняя отправка: {last_sent}\n\n"
+        "Выберите действие:"
+    )
+
+    await callback.message.edit_text(text, reply_markup=mailing_menu_keyboard(mailing))
+
+
+@router.callback_query(F.data.startswith("change_msg_format:"))
+async def callback_change_msg_format(callback: CallbackQuery, db: Database):
+    parts = callback.data.split(":")
+    message_id = int(parts[1])
+    mailing_id = int(parts[2])
+
+    await callback.message.edit_text(
+        "🔤 Выберите формат текста сообщения:",
+        reply_markup=parse_mode_keyboard(message_id, mailing_id),
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("set_parse_mode:"))
+async def callback_set_parse_mode(callback: CallbackQuery, db: Database):
+    parts = callback.data.split(":")
+    mode = parts[1]
+    message_id = int(parts[2])
+    mailing_id = int(parts[3])
+
+    await db.update_message_parse_mode(message_id, mode)
+    await callback.answer(f"✅ Формат изменён на {mode}")
+
+    messages = await db.get_mailing_messages(mailing_id)
+
+    text = f"📝 Сообщения рассылки ({len(messages)} шт.):\n\n"
+    if messages:
+        for i, msg in enumerate(messages, 1):
+            fmt = f"[{msg.parse_mode or 'html'}]"
+            text += f"{i}. {fmt} {message_preview(msg)}\n"
+    else:
+        text += "Сообщений пока нет.\n"
+
+    await callback.message.edit_text(
+        text, reply_markup=mailing_messages_keyboard(mailing_id, messages)
+    )
 
 
 @router.callback_query(F.data.startswith("cancel_creation:"))

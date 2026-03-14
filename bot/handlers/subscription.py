@@ -8,6 +8,7 @@ from aiogram.fsm.state import State, StatesGroup
 from ..database.db import Database
 from ..keyboards.inline import (
     subscription_keyboard,
+    subscription_plan_keyboard,
     payment_keyboard,
     payment_method_keyboard,
     ton_payment_keyboard,
@@ -24,6 +25,7 @@ router = Router()
 
 class SubscriptionStates(StatesGroup):
     waiting_promocode = State()
+    choosing_plan = State()
 
 
 @router.callback_query(F.data == "subscription")
@@ -32,20 +34,28 @@ async def callback_subscription(callback: CallbackQuery, db: Database):
 
     if user.subscription_end and user.subscription_end > datetime.now():
         days_left = (user.subscription_end - datetime.now()).days
+        price_7d = await db.get_price(7)
+        price_30d = await db.get_price(30)
         text = (
             f"💳 Ваша подписка\n\n"
             f"✅ Подписка активна\n"
             f"Действует до: {user.subscription_end.strftime('%d.%m.%Y %H:%M')}\n"
             f"Осталось дней: {days_left}\n\n"
-            f"Стоимость продления: {config.SUBSCRIPTION_PRICE} {config.SUBSCRIPTION_CURRENCY}/мес"
+            f"Стоимость продления:\n"
+            f"• 7 дней — {price_7d} USDT\n"
+            f"• 30 дней — {price_30d} USDT"
         )
         has_subscription = True
     else:
+        price_7d = await db.get_price(7)
+        price_30d = await db.get_price(30)
         text = (
             f"💳 Ваша подписка\n\n"
             f"❌ Подписка не активна\n\n"
             f"Для использования всех функций бота необходима подписка.\n\n"
-            f"Стоимость: {config.SUBSCRIPTION_PRICE} {config.SUBSCRIPTION_CURRENCY}/мес"
+            f"Стоимость:\n"
+            f"• 7 дней — {price_7d} USDT\n"
+            f"• 30 дней — {price_30d} USDT"
         )
         has_subscription = False
 
@@ -56,56 +66,76 @@ async def callback_subscription(callback: CallbackQuery, db: Database):
 
 
 @router.callback_query(F.data == "buy_subscription")
-async def callback_buy_subscription(callback: CallbackQuery, db: Database, ton_service: TonPaymentService = None):
+async def callback_buy_subscription(callback: CallbackQuery, state: FSMContext, db: Database):
+    price_7d = await db.get_price(7)
+    price_30d = await db.get_price(30)
+    await callback.message.edit_text(
+        f"💳 Выберите план подписки:\n\n"
+        f"📅 7 дней — {price_7d} USDT\n"
+        f"📅 30 дней — {price_30d} USDT",
+        reply_markup=subscription_plan_keyboard(),
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("sub_plan:"))
+async def callback_sub_plan(callback: CallbackQuery, state: FSMContext, db: Database, ton_service: TonPaymentService = None):
+    plan_days = int(callback.data.split(":")[1])
+    await state.update_data(plan_days=plan_days)
+
+    price = await db.get_price(plan_days)
+
     if config.TON_WALLET_ADDRESS and ton_service:
-        ton_amount = await ton_service.calculate_ton_amount(config.SUBSCRIPTION_PRICE)
+        ton_amount = await ton_service.calculate_ton_amount(price)
         if ton_amount:
-            ton_text = f"💠 TON — ~{ton_amount} TON (≈ {config.SUBSCRIPTION_PRICE} USDT)"
+            ton_text = f"💠 TON — ~{ton_amount} TON (≈ {price} USDT)"
         else:
-            ton_text = f"💠 TON — ≈ {config.SUBSCRIPTION_PRICE} USDT в TON"
+            ton_text = f"💠 TON — ≈ {price} USDT в TON"
         text = (
-            "💳 Выберите способ оплаты:\n\n"
-            f"💎 CryptoBot — {config.SUBSCRIPTION_PRICE} {config.SUBSCRIPTION_CURRENCY}\n"
+            f"💳 Способ оплаты ({plan_days} дней):\n\n"
+            f"💎 CryptoBot — {price} USDT\n"
             f"{ton_text}"
         )
         await callback.message.edit_text(text, reply_markup=payment_method_keyboard())
     else:
-        # No TON configured, go directly to CryptoBot
-        await _create_cryptobot_subscription(callback, db)
+        await _create_cryptobot_subscription(callback, db, plan_days=plan_days)
     await callback.answer()
 
 
 @router.callback_query(F.data == "pay_cryptobot")
 async def callback_pay_cryptobot(
-    callback: CallbackQuery, db: Database, cryptobot: CryptoBotService
+    callback: CallbackQuery, state: FSMContext, db: Database, cryptobot: CryptoBotService
 ):
-    await _create_cryptobot_subscription(callback, db, cryptobot)
+    data = await state.get_data()
+    plan_days = data.get("plan_days", 30)
+    await _create_cryptobot_subscription(callback, db, cryptobot, plan_days=plan_days)
     await callback.answer()
 
 
 async def _create_cryptobot_subscription(
-    callback: CallbackQuery, db: Database, cryptobot: CryptoBotService = None
+    callback: CallbackQuery, db: Database, cryptobot: CryptoBotService = None, plan_days: int = 30
 ):
-    """Create CryptoBot invoice for subscription."""
     if cryptobot is None:
         cryptobot = CryptoBotService(config.CRYPTOBOT_TOKEN, config.CRYPTOBOT_TESTNET)
 
     user = await db.get_user(callback.from_user.id)
+    price = await db.get_price(plan_days)
+
     await callback.message.edit_text("⏳ Создаём платёж...")
 
     invoice = await cryptobot.create_invoice(
-        amount=config.SUBSCRIPTION_PRICE,
+        amount=price,
         currency=config.SUBSCRIPTION_CURRENCY,
-        description="Подписка на бота рассылок (30 дней)",
+        description=f"Подписка на бота рассылок ({plan_days} дней)",
         expires_in=3600,
     )
 
     if not invoice:
-        error_msg = "Невідома помилка"
+        error_msg = "Неизвестная ошибка"
         if cryptobot.last_error:
             error_msg = cryptobot.last_error.message
         await callback.message.edit_text(
-            f"❌ Помилка створення платежу:\n{error_msg}",
+            f"❌ Ошибка создания платежа:\n{error_msg}",
             reply_markup=main_menu_keyboard(),
         )
         return
@@ -115,12 +145,13 @@ async def _create_cryptobot_subscription(
         invoice_id=invoice.invoice_id,
         amount=invoice.amount,
         currency=invoice.currency,
+        plan_days=plan_days,
     )
 
     text = (
         f"💳 Оплата подписки\n\n"
         f"Сумма: {invoice.amount} {invoice.currency}\n"
-        f"Срок: 30 дней\n\n"
+        f"Срок: {plan_days} дней\n\n"
         f"Нажмите «Оплатить» для перехода к оплате через CryptoBot.\n"
         f"После оплаты нажмите «Проверить оплату»."
     )
@@ -132,14 +163,18 @@ async def _create_cryptobot_subscription(
 
 @router.callback_query(F.data == "pay_ton")
 async def callback_pay_ton(
-    callback: CallbackQuery, db: Database, ton_service: TonPaymentService
+    callback: CallbackQuery, state: FSMContext, db: Database, ton_service: TonPaymentService
 ):
+    data = await state.get_data()
+    plan_days = data.get("plan_days", 30)
+
     user = await db.get_user(callback.from_user.id)
     comment = f"sub_{user.telegram_id}_{int(time.time())}"
 
     await callback.message.edit_text("⏳ Получаем курс TON...")
 
-    amount = await ton_service.calculate_ton_amount(config.SUBSCRIPTION_PRICE)
+    price = await db.get_price(plan_days)
+    amount = await ton_service.calculate_ton_amount(price)
     if not amount:
         await callback.message.edit_text(
             "❌ Не удалось получить курс TON. Попробуйте позже.",
@@ -153,14 +188,15 @@ async def callback_pay_ton(
         invoice_id=comment,
         amount=amount,
         currency="TON",
+        plan_days=plan_days,
     )
 
     pay_url = ton_service.generate_payment_link(amount, comment)
 
     text = (
         f"💠 Оплата подписки через TON\n\n"
-        f"Сумма: <b>{amount} TON</b> (≈ {config.SUBSCRIPTION_PRICE} USDT)\n"
-        f"Срок: 30 дней\n\n"
+        f"Сумма: <b>{amount} TON</b> (≈ {price} USDT)\n"
+        f"Срок: {plan_days} дней\n\n"
         f"Кошелёк: <code>{config.TON_WALLET_ADDRESS}</code>\n"
         f"Комментарий: <code>{comment}</code>\n\n"
         f"Нажмите кнопку ниже для оплаты через Tonkeeper.\n"
@@ -193,15 +229,16 @@ async def callback_check_ton_payment(
 
     if is_paid:
         await db.update_payment_status(comment, "paid")
-
         user = await db.get_user(callback.from_user.id)
+        plan_days = getattr(payment, "plan_days", 30) or 30
 
         if user.subscription_end and user.subscription_end > datetime.now():
-            new_end = user.subscription_end + timedelta(days=30)
+            new_end = user.subscription_end + timedelta(days=plan_days)
         else:
-            new_end = datetime.now() + timedelta(days=30)
+            new_end = datetime.now() + timedelta(days=plan_days)
 
         await db.update_subscription(user.id, new_end)
+        await _pay_referral(user, db, payment.amount)
 
         await callback.message.edit_text(
             f"✅ Оплата получена!\n\n"
@@ -235,15 +272,16 @@ async def callback_check_payment(
 
     if is_paid:
         await db.update_payment_status(invoice_id, "paid")
-
         user = await db.get_user(callback.from_user.id)
+        plan_days = getattr(payment, "plan_days", 30) or 30
 
         if user.subscription_end and user.subscription_end > datetime.now():
-            new_end = user.subscription_end + timedelta(days=30)
+            new_end = user.subscription_end + timedelta(days=plan_days)
         else:
-            new_end = datetime.now() + timedelta(days=30)
+            new_end = datetime.now() + timedelta(days=plan_days)
 
         await db.update_subscription(user.id, new_end)
+        await _pay_referral(user, db, payment.amount)
 
         await callback.message.edit_text(
             f"✅ Оплата получена!\n\n"
@@ -256,6 +294,19 @@ async def callback_check_payment(
             "⏳ Оплата ещё не поступила. Попробуйте позже.",
             show_alert=True,
         )
+
+
+async def _pay_referral(user, db: Database, payment_amount: float):
+    """Pay referral reward to the user's referrer."""
+    if not user.referred_by:
+        return
+    try:
+        ref_percent = await db.get_ref_percent()
+        reward = round(payment_amount * ref_percent / 100, 4)
+        if reward > 0:
+            await db.add_ref_balance(user.referred_by, reward)
+    except Exception:
+        pass
 
 
 @router.callback_query(F.data == "enter_promocode")
@@ -316,12 +367,13 @@ async def process_promocode(message: Message, state: FSMContext, db: Database):
 
 
 @router.callback_query(F.data == "pay_card")
-async def callback_pay_card(callback: CallbackQuery):
+async def callback_pay_card(callback: CallbackQuery, db: Database):
+    manager = await db.get_setting("card_manager_username") or "autosenderkarta"
     await callback.message.edit_text(
         "💳 Оплата банковской картой\n\n"
-        "Для оплаты подписки банковской картой (Visa/MasterCard) "
-        "напишите нашему менеджеру:\n\n"
-        "👤 Менеджер: @autosenderkarta\n\n"
+        "Принимаем оплату в гривнах и рублях.\n"
+        "Напишите нашему менеджеру:\n\n"
+        f"👤 Менеджер: @{manager}\n\n"
         "📌 Как это работает:\n"
         "1. Напишите менеджеру, что хотите оплатить подписку\n"
         "2. Менеджер отправит вам реквизиты для перевода\n"

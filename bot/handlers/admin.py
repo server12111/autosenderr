@@ -1,3 +1,4 @@
+from datetime import datetime, timedelta
 from aiogram import Router, F
 from aiogram.types import Message, CallbackQuery
 from aiogram.filters import Command
@@ -9,6 +10,9 @@ from ..keyboards.inline import (
     admin_keyboard,
     admin_promocodes_keyboard,
     admin_promo_list_keyboard,
+    admin_settings_keyboard,
+    admin_channels_keyboard,
+    admin_withdrawals_keyboard,
     cancel_keyboard,
     main_menu_keyboard,
 )
@@ -22,6 +26,12 @@ class AdminStates(StatesGroup):
     waiting_promo_code = State()
     waiting_promo_days = State()
     waiting_promo_max_uses = State()
+    waiting_price_7d = State()
+    waiting_price_30d = State()
+    waiting_ref_percent = State()
+    waiting_min_withdraw = State()
+    waiting_channel_id = State()
+    waiting_card_manager = State()
 
 
 def is_admin(user_id: int) -> bool:
@@ -32,10 +42,8 @@ def is_admin(user_id: int) -> bool:
 async def cmd_admin(message: Message, db: Database):
     if not is_admin(message.from_user.id):
         return
-
     await message.answer(
-        "🔧 Админ-панель\n\n"
-        "Выберите действие:",
+        "🔧 Админ-панель\n\nВыберите действие:",
         reply_markup=admin_keyboard(),
     )
 
@@ -48,25 +56,40 @@ async def callback_admin_stats(callback: CallbackQuery, db: Database):
 
     users = await db.get_all_users()
     total_users = len(users)
+    now = datetime.now()
 
-    from datetime import datetime
-    active_subs = sum(
-        1 for u in users
-        if u.subscription_end and u.subscription_end > datetime.now()
-    )
+    active_subs = sum(1 for u in users if u.subscription_end and u.subscription_end > now)
+
+    # New users by period
+    day_ago = now - timedelta(days=1)
+    week_ago = now - timedelta(days=7)
+    month_ago = now - timedelta(days=30)
+    new_today = sum(1 for u in users if u.created_at and u.created_at > day_ago)
+    new_week = sum(1 for u in users if u.created_at and u.created_at > week_ago)
+    new_month = sum(1 for u in users if u.created_at and u.created_at > month_ago)
 
     accounts = await db.get_all_active_accounts()
     total_accounts = len(accounts)
 
     mailings = await db.get_active_mailings()
     active_mailings = len(mailings)
+    total_mailings = await db.count_all_mailings()
+
+    total_revenue = await db.get_total_revenue()
+    paid_subs = await db.count_paid_subscriptions()
 
     text = (
         "📊 Статистика бота\n\n"
         f"👥 Всего пользователей: {total_users}\n"
+        f"  • За сегодня: +{new_today}\n"
+        f"  • За 7 дней: +{new_week}\n"
+        f"  • За 30 дней: +{new_month}\n\n"
         f"✅ Активных подписок: {active_subs}\n"
+        f"💰 Всего продано подписок: {paid_subs}\n"
+        f"💵 Общий доход: {total_revenue:.2f} USDT\n\n"
         f"📱 Аккаунтов: {total_accounts}\n"
         f"📋 Активных рассылок: {active_mailings}\n"
+        f"📋 Всего рассылок: {total_mailings}\n"
     )
 
     await callback.message.edit_text(text, reply_markup=admin_keyboard())
@@ -80,10 +103,8 @@ async def callback_admin_broadcast(callback: CallbackQuery, state: FSMContext):
         return
 
     await state.set_state(AdminStates.waiting_broadcast)
-
     await callback.message.edit_text(
-        "📢 Рассылка всем пользователям\n\n"
-        "Введите текст сообщения:",
+        "📢 Рассылка всем пользователям\n\nВведите текст сообщения или отправьте фото с подписью:",
         reply_markup=cancel_keyboard(),
     )
     await callback.answer()
@@ -95,40 +116,46 @@ async def process_broadcast(message: Message, state: FSMContext, db: Database):
         await state.clear()
         return
 
-    text = message.text.strip()
-    users = await db.get_all_users()
+    has_photo = bool(message.photo)
+    if not has_photo and not message.text:
+        await message.answer("❌ Отправьте текст или фото.", reply_markup=cancel_keyboard())
+        return
 
+    users = await db.get_all_users()
     sent = 0
     failed = 0
 
     status_msg = await message.answer("⏳ Рассылка...")
-
     for user in users:
         try:
-            await message.bot.send_message(user.telegram_id, text)
+            if has_photo:
+                await message.bot.send_photo(
+                    user.telegram_id,
+                    message.photo[-1].file_id,
+                    caption=message.caption or None,
+                )
+            else:
+                await message.bot.send_message(user.telegram_id, message.text)
             sent += 1
         except Exception:
             failed += 1
 
     await state.clear()
-
     await status_msg.edit_text(
-        f"✅ Рассылка завершена\n\n"
-        f"Отправлено: {sent}\n"
-        f"Ошибок: {failed}",
+        f"✅ Рассылка завершена\n\nОтправлено: {sent}\nОшибок: {failed}",
         reply_markup=admin_keyboard(),
     )
 
+
+# === Promocodes ===
 
 @router.callback_query(F.data == "admin_promocodes")
 async def callback_admin_promocodes(callback: CallbackQuery):
     if not is_admin(callback.from_user.id):
         await callback.answer("Нет доступа", show_alert=True)
         return
-
     await callback.message.edit_text(
-        "🎟 Управление промокодами\n\n"
-        "Выберите действие:",
+        "🎟 Управление промокодами\n\nВыберите действие:",
         reply_markup=admin_promocodes_keyboard(),
     )
     await callback.answer()
@@ -139,11 +166,9 @@ async def callback_admin_create_promo(callback: CallbackQuery, state: FSMContext
     if not is_admin(callback.from_user.id):
         await callback.answer("Нет доступа", show_alert=True)
         return
-
     await state.set_state(AdminStates.waiting_promo_code)
     await callback.message.edit_text(
-        "➕ Создание промокода\n\n"
-        "Введите текст промокода:",
+        "➕ Создание промокода\n\nВведите текст промокода:",
         reply_markup=cancel_keyboard(),
     )
     await callback.answer()
@@ -154,14 +179,11 @@ async def process_promo_code(message: Message, state: FSMContext):
     if not is_admin(message.from_user.id):
         await state.clear()
         return
-
     code = message.text.strip()
     await state.update_data(promo_code=code)
     await state.set_state(AdminStates.waiting_promo_days)
-
     await message.answer(
-        f"Промокод: <b>{code}</b>\n\n"
-        "Введите количество дней подписки:",
+        f"Промокод: <b>{code}</b>\n\nВведите количество дней подписки:",
         reply_markup=cancel_keyboard(),
     )
 
@@ -171,33 +193,21 @@ async def process_promo_days(message: Message, state: FSMContext, db: Database):
     if not is_admin(message.from_user.id):
         await state.clear()
         return
-
     try:
         days = int(message.text.strip())
     except ValueError:
-        await message.answer(
-            "❌ Введите число. Попробуйте снова:",
-            reply_markup=cancel_keyboard(),
-        )
+        await message.answer("❌ Введите число. Попробуйте снова:", reply_markup=cancel_keyboard())
         return
-
     if days <= 0:
-        await message.answer(
-            "❌ Количество дней должно быть больше 0. Попробуйте снова:",
-            reply_markup=cancel_keyboard(),
-        )
+        await message.answer("❌ Количество дней должно быть больше 0.", reply_markup=cancel_keyboard())
         return
-
     await state.update_data(promo_days=days)
     await state.set_state(AdminStates.waiting_promo_max_uses)
-
     data = await state.get_data()
-    code = data["promo_code"]
-
     await message.answer(
-        f"Промокод: <b>{code}</b>\n"
+        f"Промокод: <b>{data['promo_code']}</b>\n"
         f"Дней подписки: {days}\n\n"
-        "Введите количество использований (например, 1 — одноразовый, 10 — на 10 человек):",
+        "Введите количество использований:",
         reply_markup=cancel_keyboard(),
     )
 
@@ -207,37 +217,24 @@ async def process_promo_max_uses(message: Message, state: FSMContext, db: Databa
     if not is_admin(message.from_user.id):
         await state.clear()
         return
-
     try:
         max_uses = int(message.text.strip())
     except ValueError:
-        await message.answer(
-            "❌ Введите число. Попробуйте снова:",
-            reply_markup=cancel_keyboard(),
-        )
+        await message.answer("❌ Введите число. Попробуйте снова:", reply_markup=cancel_keyboard())
         return
-
     if max_uses <= 0:
-        await message.answer(
-            "❌ Количество использований должно быть больше 0. Попробуйте снова:",
-            reply_markup=cancel_keyboard(),
-        )
+        await message.answer("❌ Количество использований должно быть больше 0.", reply_markup=cancel_keyboard())
         return
 
     data = await state.get_data()
     code = data["promo_code"]
     days = data["promo_days"]
-
     await db.create_promocode(code, days, max_uses)
     await state.clear()
 
     uses_text = f"{max_uses}x" if max_uses > 1 else "одноразовый"
-
     await message.answer(
-        f"✅ Промокод создан!\n\n"
-        f"Код: <b>{code}</b>\n"
-        f"Дней подписки: {days}\n"
-        f"Использований: {uses_text}",
+        f"✅ Промокод создан!\n\nКод: <b>{code}</b>\nДней подписки: {days}\nИспользований: {uses_text}",
         reply_markup=admin_promocodes_keyboard(),
     )
 
@@ -247,13 +244,10 @@ async def callback_admin_list_promos(callback: CallbackQuery, db: Database):
     if not is_admin(callback.from_user.id):
         await callback.answer("Нет доступа", show_alert=True)
         return
-
     promocodes = await db.get_all_promocodes()
-
     if not promocodes:
         await callback.message.edit_text(
-            "🎟 Список промокодов\n\n"
-            "Промокодов пока нет.",
+            "🎟 Список промокодов\n\nПромокодов пока нет.",
             reply_markup=admin_promocodes_keyboard(),
         )
         await callback.answer()
@@ -261,16 +255,10 @@ async def callback_admin_list_promos(callback: CallbackQuery, db: Database):
 
     text = "🎟 Список промокодов:\n\n"
     for promo in promocodes:
-        if promo.uses_count >= promo.max_uses:
-            status = "✅ Исчерпан"
-        else:
-            status = f"🟢 {promo.uses_count}/{promo.max_uses}"
+        status = "✅ Исчерпан" if promo.uses_count >= promo.max_uses else f"🟢 {promo.uses_count}/{promo.max_uses}"
         text += f"<b>{promo.code}</b> — {promo.duration_days} дн. — {status}\n"
 
-    await callback.message.edit_text(
-        text,
-        reply_markup=admin_promo_list_keyboard(promocodes),
-    )
+    await callback.message.edit_text(text, reply_markup=admin_promo_list_keyboard(promocodes))
     await callback.answer()
 
 
@@ -279,35 +267,394 @@ async def callback_admin_delete_promo(callback: CallbackQuery, db: Database):
     if not is_admin(callback.from_user.id):
         await callback.answer("Нет доступа", show_alert=True)
         return
-
     promo_id = int(callback.data.split(":")[1])
     await db.delete_promocode(promo_id)
-
     await callback.answer("✅ Промокод удалён")
 
-    # Refresh the list
     promocodes = await db.get_all_promocodes()
-
     if not promocodes:
         await callback.message.edit_text(
-            "🎟 Список промокодов\n\n"
-            "Промокодов пока нет.",
+            "🎟 Список промокодов\n\nПромокодов пока нет.",
             reply_markup=admin_promocodes_keyboard(),
         )
         return
 
     text = "🎟 Список промокодов:\n\n"
     for promo in promocodes:
-        if promo.uses_count >= promo.max_uses:
-            status = "✅ Исчерпан"
-        else:
-            status = f"🟢 {promo.uses_count}/{promo.max_uses}"
+        status = "✅ Исчерпан" if promo.uses_count >= promo.max_uses else f"🟢 {promo.uses_count}/{promo.max_uses}"
         text += f"<b>{promo.code}</b> — {promo.duration_days} дн. — {status}\n"
+    await callback.message.edit_text(text, reply_markup=admin_promo_list_keyboard(promocodes))
 
-    await callback.message.edit_text(
-        text,
-        reply_markup=admin_promo_list_keyboard(promocodes),
+
+# === Settings panel ===
+
+@router.callback_query(F.data == "admin_settings")
+async def callback_admin_settings(callback: CallbackQuery, db: Database):
+    if not is_admin(callback.from_user.id):
+        await callback.answer("Нет доступа", show_alert=True)
+        return
+    price_7d = await db.get_price(7)
+    price_30d = await db.get_price(30)
+    ref_percent = await db.get_ref_percent()
+    min_withdraw = await db.get_ref_min_withdraw()
+    card_manager = await db.get_setting("card_manager_username") or "autosenderkarta"
+    text = (
+        "⚙️ Настройки бота\n\n"
+        f"💰 Цена подписки 7 дней: {price_7d} USDT\n"
+        f"💰 Цена подписки 30 дней: {price_30d} USDT\n"
+        f"🤝 Реферальный процент: {ref_percent}%\n"
+        f"📤 Минимум вывода реф. баланса: {min_withdraw} USDT\n"
+        f"💳 Менеджер (оплата картой): @{card_manager}\n"
     )
+    await callback.message.edit_text(text, reply_markup=admin_settings_keyboard())
+    await callback.answer()
+
+
+@router.callback_query(F.data == "admin_set_price_7d")
+async def callback_admin_set_price_7d(callback: CallbackQuery, state: FSMContext):
+    if not is_admin(callback.from_user.id):
+        await callback.answer("Нет доступа", show_alert=True)
+        return
+    await state.set_state(AdminStates.waiting_price_7d)
+    await callback.message.edit_text(
+        "💰 Введите новую цену подписки на 7 дней (USDT):",
+        reply_markup=cancel_keyboard(),
+    )
+    await callback.answer()
+
+
+@router.message(AdminStates.waiting_price_7d)
+async def process_price_7d(message: Message, state: FSMContext, db: Database):
+    if not is_admin(message.from_user.id):
+        await state.clear()
+        return
+    try:
+        price = float(message.text.strip().replace(",", "."))
+        if price <= 0:
+            raise ValueError
+    except ValueError:
+        await message.answer("❌ Введите корректную сумму:", reply_markup=cancel_keyboard())
+        return
+    await db.set_price(7, price)
+    await state.clear()
+    await message.answer(f"✅ Цена на 7 дней обновлена: {price} USDT", reply_markup=admin_settings_keyboard())
+
+
+@router.callback_query(F.data == "admin_set_price_30d")
+async def callback_admin_set_price_30d(callback: CallbackQuery, state: FSMContext):
+    if not is_admin(callback.from_user.id):
+        await callback.answer("Нет доступа", show_alert=True)
+        return
+    await state.set_state(AdminStates.waiting_price_30d)
+    await callback.message.edit_text(
+        "💰 Введите новую цену подписки на 30 дней (USDT):",
+        reply_markup=cancel_keyboard(),
+    )
+    await callback.answer()
+
+
+@router.message(AdminStates.waiting_price_30d)
+async def process_price_30d(message: Message, state: FSMContext, db: Database):
+    if not is_admin(message.from_user.id):
+        await state.clear()
+        return
+    try:
+        price = float(message.text.strip().replace(",", "."))
+        if price <= 0:
+            raise ValueError
+    except ValueError:
+        await message.answer("❌ Введите корректную сумму:", reply_markup=cancel_keyboard())
+        return
+    await db.set_price(30, price)
+    await state.clear()
+    await message.answer(f"✅ Цена на 30 дней обновлена: {price} USDT", reply_markup=admin_settings_keyboard())
+
+
+@router.callback_query(F.data == "admin_set_ref_percent")
+async def callback_admin_set_ref_percent(callback: CallbackQuery, state: FSMContext):
+    if not is_admin(callback.from_user.id):
+        await callback.answer("Нет доступа", show_alert=True)
+        return
+    await state.set_state(AdminStates.waiting_ref_percent)
+    await callback.message.edit_text(
+        "🤝 Введите реферальный процент (например: 10):",
+        reply_markup=cancel_keyboard(),
+    )
+    await callback.answer()
+
+
+@router.message(AdminStates.waiting_ref_percent)
+async def process_ref_percent(message: Message, state: FSMContext, db: Database):
+    if not is_admin(message.from_user.id):
+        await state.clear()
+        return
+    try:
+        pct = float(message.text.strip().replace(",", "."))
+        if pct < 0 or pct > 100:
+            raise ValueError
+    except ValueError:
+        await message.answer("❌ Введите число от 0 до 100:", reply_markup=cancel_keyboard())
+        return
+    await db.set_setting("ref_percent", str(pct))
+    await state.clear()
+    await message.answer(f"✅ Реферальный процент обновлён: {pct}%", reply_markup=admin_settings_keyboard())
+
+
+@router.callback_query(F.data == "admin_set_min_withdraw")
+async def callback_admin_set_min_withdraw(callback: CallbackQuery, state: FSMContext):
+    if not is_admin(callback.from_user.id):
+        await callback.answer("Нет доступа", show_alert=True)
+        return
+    await state.set_state(AdminStates.waiting_min_withdraw)
+    await callback.message.edit_text(
+        "📤 Введите минимальную сумму для вывода реферального баланса (USDT):",
+        reply_markup=cancel_keyboard(),
+    )
+    await callback.answer()
+
+
+@router.message(AdminStates.waiting_min_withdraw)
+async def process_min_withdraw(message: Message, state: FSMContext, db: Database):
+    if not is_admin(message.from_user.id):
+        await state.clear()
+        return
+    try:
+        amount = float(message.text.strip().replace(",", "."))
+        if amount <= 0:
+            raise ValueError
+    except ValueError:
+        await message.answer("❌ Введите корректную сумму:", reply_markup=cancel_keyboard())
+        return
+    await db.set_setting("ref_min_withdraw", str(amount))
+    await state.clear()
+    await message.answer(f"✅ Минимум для вывода обновлён: {amount} USDT", reply_markup=admin_settings_keyboard())
+
+
+@router.callback_query(F.data == "admin_set_card_manager")
+async def callback_admin_set_card_manager(callback: CallbackQuery, state: FSMContext, db: Database):
+    if not is_admin(callback.from_user.id):
+        await callback.answer("Нет доступа", show_alert=True)
+        return
+    current = await db.get_setting("card_manager_username") or "autosenderkarta"
+    await state.set_state(AdminStates.waiting_card_manager)
+    await callback.message.edit_text(
+        f"💳 Текущий менеджер для оплаты картой: @{current}\n\n"
+        "Введите новый юзернейм (без @):",
+        reply_markup=cancel_keyboard(),
+    )
+    await callback.answer()
+
+
+@router.message(AdminStates.waiting_card_manager)
+async def process_card_manager(message: Message, state: FSMContext, db: Database):
+    if not is_admin(message.from_user.id):
+        await state.clear()
+        return
+    username = message.text.strip().lstrip("@")
+    if not username:
+        await message.answer("❌ Введите корректный юзернейм:", reply_markup=cancel_keyboard())
+        return
+    await db.set_setting("card_manager_username", username)
+    await state.clear()
+    await message.answer(
+        f"✅ Менеджер обновлён: @{username}",
+        reply_markup=admin_settings_keyboard(),
+    )
+
+
+# === Required channels management ===
+
+@router.callback_query(F.data == "admin_channels")
+async def callback_admin_channels(callback: CallbackQuery, db: Database):
+    if not is_admin(callback.from_user.id):
+        await callback.answer("Нет доступа", show_alert=True)
+        return
+    channels = await db.get_required_channels()
+    text = "📡 Обязательные каналы\n\n"
+    if channels:
+        for ch in channels:
+            text += f"• {ch.channel_title} (@{ch.channel_username or ch.channel_id})\n"
+    else:
+        text += "Обязательных каналов нет.\n"
+    text += "\nДобавьте каналы, на которые пользователи должны подписаться."
+    await callback.message.edit_text(text, reply_markup=admin_channels_keyboard(channels))
+    await callback.answer()
+
+
+@router.callback_query(F.data == "admin_add_channel")
+async def callback_admin_add_channel(callback: CallbackQuery, state: FSMContext):
+    if not is_admin(callback.from_user.id):
+        await callback.answer("Нет доступа", show_alert=True)
+        return
+    await state.set_state(AdminStates.waiting_channel_id)
+    await callback.message.edit_text(
+        "📡 Добавление канала\n\n"
+        "Перешлите любое сообщение из канала или введите данные в формате:\n"
+        "<code>ID|@username|Название</code>\n\n"
+        "Пример: <code>-1001234567890|@mychannel|Мой канал</code>\n\n"
+        "Или просто добавьте бота в канал как администратора и введите:\n"
+        "<code>ID канала</code>",
+        reply_markup=cancel_keyboard(),
+    )
+    await callback.answer()
+
+
+@router.message(AdminStates.waiting_channel_id)
+async def process_channel_id(message: Message, state: FSMContext, db: Database):
+    if not is_admin(message.from_user.id):
+        await state.clear()
+        return
+
+    # Handle forwarded message from channel
+    if message.forward_from_chat:
+        chat = message.forward_from_chat
+        channel_id = chat.id
+        channel_username = chat.username or ""
+        channel_title = chat.title or str(channel_id)
+        await db.add_required_channel(channel_id, channel_username, channel_title)
+        await state.clear()
+        channels = await db.get_required_channels()
+        await message.answer(
+            f"✅ Канал добавлен: {channel_title}",
+            reply_markup=admin_channels_keyboard(channels),
+        )
+        return
+
+    # Handle manual input: ID|@username|Title
+    text = message.text.strip()
+    parts = text.split("|")
+    if len(parts) >= 3:
+        try:
+            channel_id = int(parts[0].strip())
+            channel_username = parts[1].strip().lstrip("@")
+            channel_title = parts[2].strip()
+            await db.add_required_channel(channel_id, channel_username, channel_title)
+            await state.clear()
+            channels = await db.get_required_channels()
+            await message.answer(
+                f"✅ Канал добавлен: {channel_title}",
+                reply_markup=admin_channels_keyboard(channels),
+            )
+            return
+        except ValueError:
+            pass
+
+    # Try just ID
+    try:
+        channel_id = int(text)
+        try:
+            chat = await message.bot.get_chat(channel_id)
+            channel_username = chat.username or ""
+            channel_title = chat.title or str(channel_id)
+        except Exception:
+            channel_username = ""
+            channel_title = str(channel_id)
+        await db.add_required_channel(channel_id, channel_username, channel_title)
+        await state.clear()
+        channels = await db.get_required_channels()
+        await message.answer(
+            f"✅ Канал добавлен: {channel_title}",
+            reply_markup=admin_channels_keyboard(channels),
+        )
+    except ValueError:
+        await message.answer(
+            "❌ Неверный формат. Перешлите сообщение из канала или введите ID канала:",
+            reply_markup=cancel_keyboard(),
+        )
+
+
+@router.callback_query(F.data.startswith("admin_del_channel:"))
+async def callback_admin_del_channel(callback: CallbackQuery, db: Database):
+    if not is_admin(callback.from_user.id):
+        await callback.answer("Нет доступа", show_alert=True)
+        return
+    channel_id = int(callback.data.split(":")[1])
+    await db.remove_required_channel(channel_id)
+    await callback.answer("✅ Канал удалён")
+    channels = await db.get_required_channels()
+    text = "📡 Обязательные каналы\n\n"
+    if channels:
+        for ch in channels:
+            text += f"• {ch.channel_title} (@{ch.channel_username or ch.channel_id})\n"
+    else:
+        text += "Обязательных каналов нет.\n"
+    await callback.message.edit_text(text, reply_markup=admin_channels_keyboard(channels))
+
+
+# === Withdrawal requests ===
+
+@router.callback_query(F.data == "admin_withdrawals")
+async def callback_admin_withdrawals(callback: CallbackQuery, db: Database):
+    if not is_admin(callback.from_user.id):
+        await callback.answer("Нет доступа", show_alert=True)
+        return
+    requests = await db.get_withdrawal_requests("pending")
+    text = "💸 Запросы на вывод\n\n"
+    if requests:
+        for req in requests:
+            user = await db.get_user_by_id(req.user_id)
+            username = f"@{user.username}" if user and user.username else str(req.user_id)
+            text += f"• {username} — {req.amount:.2f} USDT\n  Кошелёк: <code>{req.wallet}</code>\n\n"
+    else:
+        text += "Активных запросов нет."
+    await callback.message.edit_text(text, reply_markup=admin_withdrawals_keyboard(requests))
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("admin_approve_withdraw:"))
+async def callback_approve_withdraw(callback: CallbackQuery, db: Database):
+    if not is_admin(callback.from_user.id):
+        await callback.answer("Нет доступа", show_alert=True)
+        return
+    req_id = int(callback.data.split(":")[1])
+    await db.update_withdrawal_status(req_id, "approved")
+    await callback.answer("✅ Заявка одобрена")
+
+    requests = await db.get_withdrawal_requests("pending")
+    text = "💸 Запросы на вывод\n\n"
+    if requests:
+        for req in requests:
+            user = await db.get_user_by_id(req.user_id)
+            username = f"@{user.username}" if user and user.username else str(req.user_id)
+            text += f"• {username} — {req.amount:.2f} USDT\n  Кошелёк: <code>{req.wallet}</code>\n\n"
+    else:
+        text += "Активных запросов нет."
+    await callback.message.edit_text(text, reply_markup=admin_withdrawals_keyboard(requests))
+
+
+@router.callback_query(F.data.startswith("admin_decline_withdraw:"))
+async def callback_decline_withdraw(callback: CallbackQuery, db: Database):
+    if not is_admin(callback.from_user.id):
+        await callback.answer("Нет доступа", show_alert=True)
+        return
+    req_id = int(callback.data.split(":")[1])
+
+    # Get request details to refund balance
+    req = None
+    all_requests = await db.get_withdrawal_requests("pending")
+    for r in all_requests:
+        if r.id == req_id:
+            req = r
+            break
+
+    await db.update_withdrawal_status(req_id, "declined")
+
+    # Refund the balance if request found
+    if req:
+        await db.add_ref_balance(req.user_id, req.amount)
+
+    await callback.answer("❌ Заявка отклонена, баланс возвращён")
+
+    requests = await db.get_withdrawal_requests("pending")
+    text = "💸 Запросы на вывод\n\n"
+    if requests:
+        for r in requests:
+            user = await db.get_user_by_id(r.user_id)
+            username = f"@{user.username}" if user and user.username else str(r.user_id)
+            text += f"• {username} — {r.amount:.2f} USDT\n  Кошелёк: <code>{r.wallet}</code>\n\n"
+    else:
+        text += "Активных запросов нет."
+    await callback.message.edit_text(text, reply_markup=admin_withdrawals_keyboard(requests))
 
 
 @router.callback_query(F.data == "admin_back")
@@ -315,10 +662,8 @@ async def callback_admin_back(callback: CallbackQuery):
     if not is_admin(callback.from_user.id):
         await callback.answer("Нет доступа", show_alert=True)
         return
-
     await callback.message.edit_text(
-        "🔧 Админ-панель\n\n"
-        "Выберите действие:",
+        "🔧 Админ-панель\n\nВыберите действие:",
         reply_markup=admin_keyboard(),
     )
     await callback.answer()

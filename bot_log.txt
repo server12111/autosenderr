@@ -1,0 +1,15 @@
+2026-03-14 12:14:17,156 - __main__ - INFO - Database connected
+2026-03-14 12:14:17,156 - __main__ - INFO - TON payment service initialized
+2026-03-14 12:14:17,156 - __main__ - INFO - Userbot clients started
+2026-03-14 12:14:17,156 - bot.userbot.manager - INFO - Account monitor started
+2026-03-14 12:14:17,156 - __main__ - INFO - Account monitor started
+2026-03-14 12:14:17,156 - bot.services - INFO - Mailing service started with 0 active mailings
+2026-03-14 12:14:17,156 - __main__ - INFO - Mailing service started
+2026-03-14 12:14:17,156 - bot.services - INFO - Subscription checker started
+2026-03-14 12:14:17,156 - __main__ - INFO - Subscription checker started
+2026-03-14 12:14:17,156 - __main__ - INFO - Starting bot polling...
+2026-03-14 12:14:17,156 - aiogram.dispatcher - INFO - Start polling
+2026-03-14 12:14:19,717 - aiogram.dispatcher - INFO - Run polling for bot @Serverkskssk_bot id=7795921940 - 'Server'
+2026-03-14 12:23:55,338 - aiogram.event - INFO - Update id=158369945 is not handled. Duration 15 ms by bot id=7795921940
+2026-03-14 12:26:41,808 - aiogram.event - INFO - Update id=158369946 is not handled. Duration 15 ms by bot id=7795921940
+2026-03-14 12:30:16,776 - aiogram.event - INFO - Update id=158369947 is not handled. Duration 16 ms by bot id=7795921940

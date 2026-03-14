@@ -5,10 +5,28 @@ from typing import Optional, Callable, Any
 from telethon import TelegramClient
 from telethon.sessions import StringSession
 from telethon.events import NewMessage
+from telethon.errors import (
+    UserDeactivatedBanError,
+    UserDeactivatedError,
+    AuthKeyUnregisteredError,
+    SessionRevokedError,
+    AuthKeyDuplicatedError,
+)
 
 from ..database.db import Database, Account
 
 logger = logging.getLogger(__name__)
+
+# Exceptions that mean the account is banned/deactivated/session killed
+_BAN_ERRORS = (
+    UserDeactivatedBanError,
+    UserDeactivatedError,
+    AuthKeyUnregisteredError,
+    SessionRevokedError,
+    AuthKeyDuplicatedError,
+)
+
+_MONITOR_INTERVAL = 600  # seconds between health checks
 
 
 class UserbotManager:
@@ -16,19 +34,22 @@ class UserbotManager:
         self.db = db
         self.sessions_path = sessions_path
         self._clients: dict[int, TelegramClient] = {}
+        self._me_ids: dict[int, int] = {}  # account_id -> telegram user id
         self._message_handler: Optional[Callable] = None
+        self._group_reply_handler: Optional[Callable] = None
         self._bot_notify_callback: Optional[Callable] = None
+        self._monitor_task: Optional[asyncio.Task] = None
 
     def set_message_handler(self, handler: Callable):
-        """Set handler for incoming messages (autoresponder)."""
         self._message_handler = handler
 
+    def set_group_reply_handler(self, handler: Callable):
+        self._group_reply_handler = handler
+
     def set_bot_notify_callback(self, callback: Callable):
-        """Set callback to notify bot owner about new messages."""
         self._bot_notify_callback = callback
 
     async def start_client(self, account: Account) -> Optional[TelegramClient]:
-        """Start a Telethon client for an account."""
         if account.id in self._clients:
             client = self._clients[account.id]
             if client.is_connected():
@@ -40,28 +61,36 @@ class UserbotManager:
                 account.api_id,
                 account.api_hash,
             )
-
             await client.connect()
 
             if not await client.is_user_authorized():
                 logger.warning(f"Account {account.phone} is not authorized")
                 return None
 
+            me = await client.get_me()
+            self._me_ids[account.id] = me.id
             self._clients[account.id] = client
 
             account_id = account.id
+            me_id = me.id
 
             @client.on(NewMessage(incoming=True))
             async def handler(event):
-                if self._message_handler:
-                    try:
-                        fresh_account = await self.db.get_account(account_id)
-                        if fresh_account:
-                            await self._message_handler(event, fresh_account, self._bot_notify_callback)
-                        else:
-                            logger.warning(f"Account {account_id} not found when handling message")
-                    except Exception as e:
-                        logger.error(f"Error in message handler for account {account_id}: {e}", exc_info=True)
+                try:
+                    fresh_account = await self.db.get_account(account_id)
+                    if not fresh_account:
+                        return
+
+                    # Handle private message autoresponder
+                    if self._message_handler and event.is_private:
+                        await self._message_handler(event, fresh_account, self._bot_notify_callback)
+
+                    # Handle group reply autoresponder
+                    if self._group_reply_handler and not event.is_private and event.reply_to:
+                        await self._group_reply_handler(event, fresh_account, me_id, self._bot_notify_callback)
+
+                except Exception as e:
+                    logger.error(f"Error in message handler for account {account_id}: {e}", exc_info=True)
 
             logger.info(f"Started client for account {account.phone} (ID: {account.id})")
             return client
@@ -71,15 +100,14 @@ class UserbotManager:
             return None
 
     async def stop_client(self, account_id: int):
-        """Stop a Telethon client (disconnect without logging out to preserve session)."""
         if account_id in self._clients:
             client = self._clients[account_id]
             await client.disconnect()
             del self._clients[account_id]
+            self._me_ids.pop(account_id, None)
             logger.info(f"Stopped client for account {account_id}")
 
     async def logout_and_stop(self, account):
-        """Log out and stop a client, creating a temp client if needed."""
         if account.id in self._clients:
             client = self._clients[account.id]
             try:
@@ -88,91 +116,106 @@ class UserbotManager:
                 pass
             await client.disconnect()
             del self._clients[account.id]
-            logger.info(f"Logged out and stopped client for account {account.id}")
+            self._me_ids.pop(account.id, None)
         else:
             try:
                 client = TelegramClient(
-                    StringSession(account.session_string),
-                    account.api_id,
-                    account.api_hash,
+                    StringSession(account.session_string), account.api_id, account.api_hash
                 )
                 await client.connect()
                 await client.log_out()
                 await client.disconnect()
-                logger.info(f"Logged out temp client for account {account.id}")
             except Exception as e:
                 logger.warning(f"Failed to log out account {account.id}: {e}")
 
     async def get_client(self, account_id: int) -> Optional[TelegramClient]:
-        """Get an active client for an account."""
         if account_id in self._clients:
             client = self._clients[account_id]
             if client.is_connected():
                 return client
-
         account = await self.db.get_account(account_id)
         if account and account.is_active:
             return await self.start_client(account)
-
         return None
 
+    def start_monitor(self):
+        """Start background health-check loop for all connected accounts."""
+        self._monitor_task = asyncio.create_task(self._monitor_loop())
+        logger.info("Account monitor started")
+
+    async def _monitor_loop(self):
+        while True:
+            await asyncio.sleep(_MONITOR_INTERVAL)
+            for account_id in list(self._clients.keys()):
+                try:
+                    client = self._clients[account_id]
+                    if not client.is_connected():
+                        try:
+                            await client.connect()
+                        except _BAN_ERRORS as e:
+                            await self._handle_account_problem(account_id, e)
+                            continue
+                    await client.get_me()
+                except _BAN_ERRORS as e:
+                    await self._handle_account_problem(account_id, e)
+                except Exception as e:
+                    logger.warning(f"Monitor check failed for account {account_id}: {e}")
+
+    async def _handle_account_problem(self, account_id: int, error: Exception):
+        """Mark account inactive and notify owner."""
+        error_name = type(error).__name__
+
+        if isinstance(error, (UserDeactivatedBanError,)):
+            reason = "⛔️ аккаунт заблокирован Telegram"
+        elif isinstance(error, UserDeactivatedError):
+            reason = "❌ аккаунт деактивирован"
+        elif isinstance(error, (AuthKeyUnregisteredError, SessionRevokedError, AuthKeyDuplicatedError)):
+            reason = "🔑 сессия сброшена (аккаунт вышел или заморожен)"
+        else:
+            reason = f"неизвестная ошибка: {error_name}"
+
+        logger.warning(f"Account {account_id} problem detected: {reason}")
+
+        # Mark inactive in DB
+        try:
+            await self.db.deactivate_account(account_id)
+        except Exception as e:
+            logger.error(f"Failed to deactivate account {account_id}: {e}")
+
+        # Remove from active clients
+        self._clients.pop(account_id, None)
+        self._me_ids.pop(account_id, None)
+
+        # Notify owner
+        if self._bot_notify_callback:
+            try:
+                account = await self.db.get_account(account_id)
+                if account:
+                    user = await self.db.get_user_by_id(account.user_id)
+                    if user:
+                        await self._bot_notify_callback(
+                            user.telegram_id,
+                            f"⚠️ <b>Проблема с аккаунтом!</b>\n\n"
+                            f"📱 Аккаунт: <b>{account.display_name}</b>\n"
+                            f"❗️ Причина: {reason}\n\n"
+                            f"Аккаунт отключён. Добавьте его заново в разделе «Аккаунты».",
+                        )
+            except Exception as e:
+                logger.error(f"Failed to notify about account {account_id} problem: {e}")
+
     async def start_all_clients(self):
-        """Start clients for all active accounts."""
         accounts = await self.db.get_all_active_accounts()
         for account in accounts:
             await self.start_client(account)
 
     async def stop_all_clients(self):
-        """Stop all active clients."""
         for account_id in list(self._clients.keys()):
             await self.stop_client(account_id)
 
-    async def create_new_session(
-        self,
-        phone: str,
-        api_id: int,
-        api_hash: str,
-        code_callback: Callable[[], Any],
-        password_callback: Optional[Callable[[], Any]] = None,
-    ) -> Optional[str]:
-        """Create a new session by logging in with phone code."""
-        client = TelegramClient(StringSession(), api_id, api_hash)
-
-        try:
-            await client.connect()
-
-            await client.sign_in(phone)
-
-            code = await code_callback()
-            try:
-                await client.sign_in(phone, code)
-            except Exception as e:
-                if "Two-step" in str(e) or "password" in str(e).lower():
-                    if password_callback:
-                        password = await password_callback()
-                        await client.sign_in(password=password)
-                    else:
-                        raise ValueError("2FA required but no password callback provided")
-                else:
-                    raise
-
-            session_string = client.session.save()
-            return session_string
-
-        except Exception as e:
-            logger.error(f"Error creating session for {phone}: {e}")
-            raise
-        finally:
-            await client.disconnect()
-
-    async def send_message(
-        self, account_id: int, chat_identifier: str, text: str
-    ) -> bool:
-        """Send a message using an account."""
+    async def send_message(self, account_id: int, chat_identifier: str, text: str) -> bool:
         client = await self.get_client(account_id)
         if not client:
             return False
-
         try:
             await client.send_message(chat_identifier, text)
             return True
@@ -181,8 +224,4 @@ class UserbotManager:
             return False
 
     def is_client_active(self, account_id: int) -> bool:
-        """Check if client is active and connected."""
-        return (
-            account_id in self._clients
-            and self._clients[account_id].is_connected()
-        )
+        return account_id in self._clients and self._clients[account_id].is_connected()

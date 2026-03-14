@@ -6,13 +6,18 @@ CREATE TABLE IF NOT EXISTS users (
     username TEXT,
     subscription_end DATETIME,
     is_admin BOOLEAN DEFAULT FALSE,
-    created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    ref_code TEXT UNIQUE,
+    referred_by INTEGER,
+    ref_balance REAL DEFAULT 0,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (referred_by) REFERENCES users(id) ON DELETE SET NULL
 );
 
 -- Telegram аккаунты (userbot)
 CREATE TABLE IF NOT EXISTS accounts (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     user_id INTEGER NOT NULL,
+    name TEXT,
     phone TEXT NOT NULL,
     session_string TEXT,
     api_id INTEGER NOT NULL,
@@ -20,6 +25,8 @@ CREATE TABLE IF NOT EXISTS accounts (
     autoresponder_enabled BOOLEAN DEFAULT FALSE,
     autoresponder_text TEXT,
     notify_messages BOOLEAN DEFAULT FALSE,
+    group_autoresponder_enabled BOOLEAN DEFAULT FALSE,
+    group_autoresponder_text TEXT,
     is_active BOOLEAN DEFAULT TRUE,
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
     FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
@@ -46,6 +53,7 @@ CREATE TABLE IF NOT EXISTS mailing_messages (
     mailing_id INTEGER NOT NULL,
     text TEXT NOT NULL,
     photo_path TEXT,
+    parse_mode TEXT DEFAULT 'html',
     FOREIGN KEY (mailing_id) REFERENCES mailings(id) ON DELETE CASCADE
 );
 
@@ -76,6 +84,7 @@ CREATE TABLE IF NOT EXISTS payments (
     amount REAL NOT NULL,
     currency TEXT DEFAULT 'USDT',
     payment_method TEXT DEFAULT 'cryptobot',
+    plan_days INTEGER DEFAULT 30,
     status TEXT DEFAULT 'pending',
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
     paid_at DATETIME,
@@ -102,7 +111,7 @@ CREATE TABLE IF NOT EXISTS promocodes (
     FOREIGN KEY (used_by) REFERENCES users(id) ON DELETE SET NULL
 );
 
--- Історія використання промокодів (хто який використав)
+-- История использования промокодов
 CREATE TABLE IF NOT EXISTS promocode_uses (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     promocode_id INTEGER NOT NULL,
@@ -111,5 +120,25 @@ CREATE TABLE IF NOT EXISTS promocode_uses (
     FOREIGN KEY (promocode_id) REFERENCES promocodes(id) ON DELETE CASCADE,
     FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
     UNIQUE(promocode_id, user_id)
+);
+
+-- Запросы на вывод реферального баланса
+CREATE TABLE IF NOT EXISTS withdrawal_requests (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER NOT NULL,
+    amount REAL NOT NULL,
+    wallet TEXT,
+    status TEXT DEFAULT 'pending',
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+);
+
+-- Обязательные каналы для подписки
+CREATE TABLE IF NOT EXISTS required_channels (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    channel_id INTEGER NOT NULL UNIQUE,
+    channel_username TEXT,
+    channel_title TEXT NOT NULL,
+    added_at DATETIME DEFAULT CURRENT_TIMESTAMP
 );
 """

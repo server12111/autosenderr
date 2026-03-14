@@ -8,6 +8,7 @@ from aiogram.fsm.context import FSMContext
 from ..database.db import Database
 from ..config import config
 from ..handlers.subscription import SubscriptionStates
+from ..handlers.referral import ReferralStates
 
 
 class SubscriptionMiddleware(BaseMiddleware):
@@ -23,6 +24,9 @@ class SubscriptionMiddleware(BaseMiddleware):
         "pay_account_ton",
         "pay_account_card",
         "enter_promocode",
+        "referral",
+        "withdraw_ref_balance",
+        "check_channels",
     }
 
     EXEMPT_CALLBACK_PREFIXES = (
@@ -30,10 +34,12 @@ class SubscriptionMiddleware(BaseMiddleware):
         "check_ton_payment:",
         "check_ton_account:",
         "check_account_payment:",
+        "sub_plan:",
     )
 
     EXEMPT_FSM_STATES = {
         SubscriptionStates.waiting_promocode,
+        ReferralStates.waiting_wallet,
     }
 
     def __init__(self, db: Database):

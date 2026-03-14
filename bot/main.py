@@ -3,6 +3,11 @@ import logging
 import os
 import sys
 
+# Allow running as `python bot/main.py` directly
+if __name__ == "__main__" and __package__ is None:
+    sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    __package__ = "bot"
+
 from aiogram import Bot, Dispatcher
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
@@ -14,7 +19,7 @@ from .handlers import setup_routers
 from .middlewares.subscription import SubscriptionMiddleware
 from .middlewares.album import AlbumMiddleware
 from .userbot.manager import UserbotManager
-from .services import CryptoBotService, TonPaymentService, AutoresponderService, MailingService
+from .services import CryptoBotService, TonPaymentService, AutoresponderService, MailingService, SubscriptionCheckerService
 
 
 logging.basicConfig(
@@ -60,6 +65,8 @@ async def main():
 
     mailing_service = MailingService(db, userbot_manager)
 
+    subscription_checker = SubscriptionCheckerService(db, mailing_service)
+
     async def notify_user(user_id: int, text: str):
         try:
             await bot.send_message(user_id, text)
@@ -68,6 +75,7 @@ async def main():
             logger.error(f"Failed to notify user {user_id}: {e}", exc_info=True)
 
     userbot_manager.set_message_handler(autoresponder_service.handle_message)
+    userbot_manager.set_group_reply_handler(autoresponder_service.handle_group_reply)
     userbot_manager.set_bot_notify_callback(notify_user)
 
     dp = Dispatcher(storage=MemoryStorage())
@@ -89,8 +97,14 @@ async def main():
         await userbot_manager.start_all_clients()
         logger.info("Userbot clients started")
 
+        userbot_manager.start_monitor()
+        logger.info("Account monitor started")
+
         await mailing_service.start()
         logger.info("Mailing service started")
+
+        subscription_checker.start(bot)
+        logger.info("Subscription checker started")
 
         logger.info("Starting bot polling...")
         await dp.start_polling(bot)
