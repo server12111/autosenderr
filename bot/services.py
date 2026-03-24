@@ -3,6 +3,7 @@ import logging
 import json
 import os
 import random
+import re
 import ssl
 from dataclasses import dataclass
 from datetime import datetime
@@ -15,7 +16,14 @@ from telethon.errors import (
     SessionRevokedError,
     AuthKeyDuplicatedError,
     FloodWaitError,
+    UserNotParticipantError,
+    ChatWriteForbiddenError,
+    UserBannedInChannelError,
+    UserAlreadyParticipantError,
 )
+from telethon.tl.functions.channels import JoinChannelRequest
+from telethon.tl.functions.messages import ImportChatInviteRequest
+from telethon.tl.types import KeyboardButtonUrl
 
 _BAN_ERRORS = (
     UserDeactivatedBanError,
@@ -23,6 +31,16 @@ _BAN_ERRORS = (
     AuthKeyUnregisteredError,
     SessionRevokedError,
     AuthKeyDuplicatedError,
+)
+
+_CHAT_BAN_ERRORS = (
+    UserBannedInChannelError,
+)
+
+# Errors that may mean "not a member" — try to join first
+_NOT_MEMBER_ERRORS = (
+    UserNotParticipantError,
+    ChatWriteForbiddenError,
 )
 
 import aiohttp
@@ -291,6 +309,111 @@ class AutoresponderService:
         except Exception as e:
             logger.error(f"Group autoresponder error: {e}")
 
+    async def handle_sponsor_check(self, event, account):
+        """
+        Detect messages in groups that mention this account and contain
+        URL buttons with t.me/ links (sponsor subscription gates). Auto-join those channels.
+        """
+        if not account.auto_subscribe_sponsors:
+            return
+
+        try:
+            # 1. Check buttons FIRST — fast exit if none
+            if not event.message.buttons:
+                return
+
+            # 2. Collect channel links from buttons (public @username and private invite hashes)
+            channel_usernames = []   # @username → JoinChannelRequest
+            invite_hashes = []       # hash → ImportChatInviteRequest
+
+            for row in event.message.buttons:
+                for button in row:
+                    url = getattr(button, 'url', None) or ""
+                    if not url:
+                        continue
+
+                    # Format 1: t.me/+HASH or t.me/joinchat/HASH (private invite)
+                    m = re.search(r't\.me/(?:joinchat/|\+)([A-Za-z0-9_\-]+)', url)
+                    if m:
+                        h = m.group(1)
+                        if h not in invite_hashes:
+                            invite_hashes.append(h)
+                        continue
+
+                    # Format 2: t.me/username (public channel)
+                    m = re.search(r't\.me/([A-Za-z0-9_]+)', url)
+                    if m:
+                        username = m.group(1)
+                        if username not in channel_usernames:
+                            channel_usernames.append(username)
+                        continue
+
+                    # Format 3: tg://resolve?domain=username
+                    m = re.search(r'tg://resolve\?domain=([A-Za-z0-9_]+)', url)
+                    if m:
+                        username = m.group(1)
+                        if username not in channel_usernames:
+                            channel_usernames.append(username)
+
+            if not channel_usernames and not invite_hashes:
+                return
+
+            # 3. Check if message is relevant to our account
+            me = await event.client.get_me()
+            msg_text = (event.message.text or event.message.message or "").lower()
+            me_username = (me.username or "").lower()
+            is_relevant = False
+
+            # 3a. @username present in text
+            if me_username and f"@{me_username}" in msg_text:
+                is_relevant = True
+
+            # 3b. Entity mentions: MessageEntityMentionName (by user_id) or MessageEntityMention (@username in text)
+            if not is_relevant and event.message.entities:
+                from telethon.tl.types import MessageEntityMentionName, MessageEntityMention
+                for entity in event.message.entities:
+                    if isinstance(entity, MessageEntityMentionName) and entity.user_id == me.id:
+                        is_relevant = True
+                        break
+                    if isinstance(entity, MessageEntityMention):
+                        raw = (event.message.text or "")[entity.offset:entity.offset + entity.length]
+                        if me_username and raw.lstrip('@').lower() == me_username:
+                            is_relevant = True
+                            break
+
+            # 3c. Fallback: if sender is a bot, consider relevant anyway
+            if not is_relevant:
+                try:
+                    sender = await event.get_sender()
+                    if sender and getattr(sender, 'bot', False):
+                        is_relevant = True
+                except Exception:
+                    pass
+
+            if not is_relevant:
+                return
+
+            # 4. Subscribe to detected channels
+            logger.info(f"Account {account.phone}: sponsor gate detected, public={channel_usernames} invites={invite_hashes}")
+            for username in channel_usernames:
+                try:
+                    await event.client(JoinChannelRequest(f"@{username}"))
+                    logger.info(f"Account {account.phone} auto-joined sponsor @{username}")
+                    await asyncio.sleep(1)
+                except Exception as e:
+                    logger.warning(f"Account {account.phone} failed to join @{username}: {e}")
+
+            for h in invite_hashes:
+                try:
+                    await event.client(ImportChatInviteRequest(h))
+                    logger.info(f"Account {account.phone} auto-joined sponsor via invite hash {h}")
+                    await asyncio.sleep(1)
+                except Exception as e:
+                    logger.warning(f"Account {account.phone} failed to join invite {h}: {e}")
+
+        except Exception as e:
+            logger.error(f"Sponsor check error for account {account.phone}: {e}")
+
 
 class MailingService:
     def __init__(self, db: Database, userbot_manager):
@@ -419,6 +542,13 @@ class MailingService:
                         except _BAN_ERRORS as e:
                             await self._handle_mailing_ban(mailing_id, mailing.account_id, e)
                             return
+                        except _CHAT_BAN_ERRORS as e:
+                            await self._handle_chat_ban(mailing_id, mailing.account_id, target_obj, e)
+                        except _NOT_MEMBER_ERRORS:
+                            logger.info(f"Mailing {mailing_id}: not participant/forbidden in '{target}', attempting auto-join")
+                            joined = await self._try_join_and_send(client, target, target_obj, msg, pm, mailing_id, mailing.account_id)
+                            if joined:
+                                sent_any = True
                         except FloodWaitError as e:
                             logger.warning(f"FloodWait {e.seconds}s for mailing {mailing_id}")
                             await asyncio.sleep(e.seconds)
@@ -483,6 +613,79 @@ class MailingService:
 
     def _is_active_hours(self, active_hours_json: Optional[str]) -> bool:
         return is_within_active_hours(active_hours_json)
+
+    async def _handle_chat_ban(self, mailing_id: int, account_id: int, target_obj, error: Exception):
+        """Notify owner about chat-specific ban/mute, remove target from mailing."""
+        from .database.db import MailingTarget
+        chat = target_obj.chat_identifier
+        error_name = type(error).__name__
+
+        if isinstance(error, UserBannedInChannelError):
+            reason = "🚫 аккаунт забанен в этом чате"
+        else:
+            reason = "🔇 аккаунт замьючен или нет прав писать"
+
+        logger.warning(f"Mailing {mailing_id}: chat ban on '{chat}': {error_name}")
+
+        try:
+            await self.db.delete_mailing_target(target_obj.id)
+        except Exception as e:
+            logger.error(f"Failed to delete banned target {target_obj.id}: {e}")
+
+        notify = getattr(self.userbot_manager, '_bot_notify_callback', None)
+        if notify:
+            try:
+                account = await self.db.get_account(account_id)
+                if account:
+                    user = await self.db.get_user_by_id(account.user_id)
+                    if user:
+                        await notify(
+                            user.telegram_id,
+                            f"⚠️ <b>Проблема с рассылкой!</b>\n\n"
+                            f"📱 Аккаунт: <b>{account.display_name}</b>\n"
+                            f"💬 Чат: <code>{chat}</code>\n"
+                            f"❗️ {reason}\n\n"
+                            f"Цель автоматически удалена из рассылки.",
+                        )
+            except Exception as e:
+                logger.error(f"Failed to notify about chat ban for account {account_id}: {e}")
+
+    async def _try_join_and_send(self, client, target: str, target_obj, msg, pm, mailing_id: int, account_id: Optional[int] = None) -> bool:
+        """Try to join target channel/group, then retry sending. Returns True if message was sent."""
+        try:
+            await client(JoinChannelRequest(target))
+            logger.info(f"Mailing {mailing_id}: auto-joined '{target}'")
+            await asyncio.sleep(2)
+        except UserAlreadyParticipantError as e:
+            # Account IS already a member but can't write → muted/restricted
+            logger.warning(f"Mailing {mailing_id}: already participant in '{target}' but write forbidden — muted/restricted")
+            if account_id is not None:
+                await self._handle_chat_ban(mailing_id, account_id, target_obj, e)
+            return False
+        except Exception as e:
+            logger.warning(f"Mailing {mailing_id}: failed to join '{target}': {e}")
+            return False
+
+        try:
+            photos = [p for p in msg.photo_paths if os.path.exists(p)]
+            if len(photos) > 1:
+                await client.send_file(target, photos, caption=msg.text or None, parse_mode=pm)
+            elif len(photos) == 1:
+                await client.send_file(target, photos[0], caption=msg.text or None, parse_mode=pm)
+            else:
+                await client.send_message(target, msg.text, parse_mode=pm)
+            await self.db.update_target_last_sent(target_obj.id)
+            logger.info(f"Mailing {mailing_id}: sent to '{target}' after auto-join")
+            return True
+        except ChatWriteForbiddenError as e:
+            # Joined successfully but still can't write → muted/restricted
+            logger.warning(f"Mailing {mailing_id}: still can't write to '{target}' after join — muted/restricted")
+            if account_id is not None:
+                await self._handle_chat_ban(mailing_id, account_id, target_obj, e)
+            return False
+        except Exception as e:
+            logger.error(f"Mailing {mailing_id}: retry send to '{target}' failed after join: {e}")
+            return False
 
 
 class SubscriptionCheckerService:

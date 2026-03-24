@@ -45,12 +45,17 @@ def accounts_keyboard(accounts: list[Account]) -> InlineKeyboardMarkup:
     return builder.as_markup()
 
 
-def account_menu_keyboard(account_id: int) -> InlineKeyboardMarkup:
+def account_menu_keyboard(account_id: int, auto_subscribe: bool = False) -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
     builder.row(InlineKeyboardButton(text="✉️ Рассылки аккаунта", callback_data=f"account_mailings:{account_id}"))
     builder.row(
         InlineKeyboardButton(text="🤖 Автоответ (личные)", callback_data=f"autoresponder:{account_id}"),
         InlineKeyboardButton(text="💬 Автоответ (группы)", callback_data=f"group_autoresponder:{account_id}"),
+    )
+    sub_text = "🔔 Авто-подписка: ВКЛ" if auto_subscribe else "🔕 Авто-подписка: ВЫКЛ"
+    builder.row(
+        InlineKeyboardButton(text=sub_text, callback_data=f"toggle_auto_subscribe:{account_id}"),
+        InlineKeyboardButton(text="🌐 Прокси", callback_data=f"set_proxy:{account_id}"),
     )
     builder.row(
         InlineKeyboardButton(text="✏️ Переименовать", callback_data=f"rename_account:{account_id}"),
@@ -82,6 +87,7 @@ def account_payment_keyboard(pay_url: str, invoice_id: str) -> InlineKeyboardMar
 def add_account_method_keyboard() -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
     builder.row(InlineKeyboardButton(text="📱 Добавить по номеру телефона", callback_data="add_account_phone"))
+    builder.row(InlineKeyboardButton(text="🌐 Добавить с прокси SOCKS5", callback_data="add_account_with_proxy"))
     builder.row(InlineKeyboardButton(text="◀️ Назад", callback_data="accounts"))
     return builder.as_markup()
 

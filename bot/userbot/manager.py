@@ -1,6 +1,7 @@
 import asyncio
 import logging
 from typing import Optional, Callable, Any
+from urllib.parse import urlparse
 
 from telethon import TelegramClient
 from telethon.sessions import StringSession
@@ -14,6 +15,27 @@ from telethon.errors import (
 )
 
 from ..database.db import Database, Account
+
+
+def _parse_proxy(proxy_str: Optional[str]) -> Optional[tuple]:
+    """Parse 'socks5://[user:pass@]host:port' into Telethon proxy tuple."""
+    if not proxy_str:
+        return None
+    try:
+        import socks
+        p = urlparse(proxy_str)
+        host = p.hostname
+        port = p.port
+        username = p.username or None
+        password = p.password or None
+        if not host or not port:
+            return None
+        if username and password:
+            return (socks.SOCKS5, host, port, True, username, password)
+        return (socks.SOCKS5, host, port)
+    except Exception as e:
+        logger.warning(f"Failed to parse proxy '{proxy_str}': {e}")
+        return None
 
 logger = logging.getLogger(__name__)
 
@@ -39,6 +61,7 @@ class UserbotManager:
         self._group_reply_handler: Optional[Callable] = None
         self._bot_notify_callback: Optional[Callable] = None
         self._monitor_task: Optional[asyncio.Task] = None
+        self._sponsor_check_handler: Optional[Callable] = None
 
     def set_message_handler(self, handler: Callable):
         self._message_handler = handler
@@ -49,6 +72,9 @@ class UserbotManager:
     def set_bot_notify_callback(self, callback: Callable):
         self._bot_notify_callback = callback
 
+    def set_sponsor_check_handler(self, handler: Callable):
+        self._sponsor_check_handler = handler
+
     async def start_client(self, account: Account) -> Optional[TelegramClient]:
         if account.id in self._clients:
             client = self._clients[account.id]
@@ -56,10 +82,12 @@ class UserbotManager:
                 return client
 
         try:
+            proxy = _parse_proxy(account.proxy)
             client = TelegramClient(
                 StringSession(account.session_string),
                 account.api_id,
                 account.api_hash,
+                proxy=proxy,
             )
             await client.connect()
 
@@ -88,6 +116,10 @@ class UserbotManager:
                     # Handle group reply autoresponder
                     if self._group_reply_handler and not event.is_private and event.reply_to:
                         await self._group_reply_handler(event, fresh_account, me_id, self._bot_notify_callback)
+
+                    # Auto-subscribe to sponsor channels
+                    if self._sponsor_check_handler and not event.is_private:
+                        await self._sponsor_check_handler(event, fresh_account)
 
                 except Exception as e:
                     logger.error(f"Error in message handler for account {account_id}: {e}", exc_info=True)
@@ -119,8 +151,10 @@ class UserbotManager:
             self._me_ids.pop(account.id, None)
         else:
             try:
+                proxy = _parse_proxy(account.proxy)
                 client = TelegramClient(
-                    StringSession(account.session_string), account.api_id, account.api_hash
+                    StringSession(account.session_string), account.api_id, account.api_hash,
+                    proxy=proxy,
                 )
                 await client.connect()
                 await client.log_out()

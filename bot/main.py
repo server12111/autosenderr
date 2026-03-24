@@ -76,6 +76,7 @@ async def main():
 
     userbot_manager.set_message_handler(autoresponder_service.handle_message)
     userbot_manager.set_group_reply_handler(autoresponder_service.handle_group_reply)
+    userbot_manager.set_sponsor_check_handler(autoresponder_service.handle_sponsor_check)
     userbot_manager.set_bot_notify_callback(notify_user)
 
     dp = Dispatcher(storage=MemoryStorage())

@@ -47,6 +47,8 @@ class Account:
     is_active: bool
     created_at: datetime
     name: Optional[str] = None
+    proxy: Optional[str] = None
+    auto_subscribe_sponsors: bool = False
 
     @property
     def display_name(self) -> str:
@@ -189,6 +191,8 @@ class Database:
         await _add_col("accounts", "group_autoresponder_text",     "TEXT")
         await _add_col("accounts", "autoresponder_photo",          "TEXT")
         await _add_col("accounts", "group_autoresponder_photo",    "TEXT")
+        await _add_col("accounts", "proxy",                        "TEXT")
+        await _add_col("accounts", "auto_subscribe_sponsors",      "BOOLEAN DEFAULT FALSE")
         # mailing_messages
         await _add_col("mailing_messages", "photo_path",  "TEXT")
         await _add_col("mailing_messages", "parse_mode",  "TEXT DEFAULT 'html'")
@@ -249,6 +253,8 @@ class Database:
             is_active=bool(row["is_active"]),
             created_at=self._parse_datetime(row["created_at"]),
             name=row["name"] if "name" in keys else None,
+            proxy=row["proxy"] if "proxy" in keys else None,
+            auto_subscribe_sponsors=bool(row["auto_subscribe_sponsors"]) if "auto_subscribe_sponsors" in keys and row["auto_subscribe_sponsors"] is not None else False,
         )
 
     # === Users ===
@@ -406,6 +412,18 @@ class Database:
     async def update_notify_messages(self, account_id: int, enabled: bool):
         await self._conn.execute(
             "UPDATE accounts SET notify_messages = ? WHERE id = ?", (enabled, account_id)
+        )
+        await self._conn.commit()
+
+    async def update_account_proxy(self, account_id: int, proxy: Optional[str]):
+        await self._conn.execute(
+            "UPDATE accounts SET proxy = ? WHERE id = ?", (proxy, account_id)
+        )
+        await self._conn.commit()
+
+    async def update_auto_subscribe_sponsors(self, account_id: int, enabled: bool):
+        await self._conn.execute(
+            "UPDATE accounts SET auto_subscribe_sponsors = ? WHERE id = ?", (enabled, account_id)
         )
         await self._conn.commit()
 

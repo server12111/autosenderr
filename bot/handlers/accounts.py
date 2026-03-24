@@ -18,7 +18,7 @@ from ..keyboards.inline import (
     code_input_keyboard,
     back_to_menu_keyboard,
 )
-from ..userbot.manager import UserbotManager
+from ..userbot.manager import UserbotManager, _parse_proxy
 from ..config import config
 from ..services import CryptoBotService, TonPaymentService
 
@@ -27,6 +27,10 @@ router = Router()
 
 class RenameAccountStates(StatesGroup):
     waiting_name = State()
+
+
+class SetProxyStates(StatesGroup):
+    waiting_proxy = State()
 
 
 class AddAccountStates(StatesGroup):
@@ -38,6 +42,7 @@ class AddAccountStates(StatesGroup):
 
 
 class AddAccountSimpleStates(StatesGroup):
+    waiting_proxy = State()
     waiting_phone = State()
     waiting_code = State()
     waiting_password = State()
@@ -75,18 +80,20 @@ async def callback_account_menu(callback: CallbackQuery, db: Database):
 
     ar_status = "✅ Включён" if account.autoresponder_enabled else "❌ Выключен"
     gr_status = "✅ Включён" if account.group_autoresponder_enabled else "❌ Выключен"
+    proxy_status = f"🌐 {account.proxy}" if account.proxy else "🌐 Прокси: не настроен"
 
     text = (
         f"📱 Аккаунт: {account.display_name}\n"
         f"📞 Номер: {account.phone}\n\n"
         f"🤖 Личный автоответчик: {ar_status}\n"
         f"💬 Групповой автоответчик: {gr_status}\n"
+        f"{proxy_status}\n"
         f"📅 Добавлен: {account.created_at.strftime('%d.%m.%Y')}\n\n"
         "Выберите действие:"
     )
 
     await callback.message.edit_text(
-        text, reply_markup=account_menu_keyboard(account_id)
+        text, reply_markup=account_menu_keyboard(account_id, account.auto_subscribe_sponsors)
     )
     await callback.answer()
 
@@ -289,6 +296,53 @@ async def callback_add_account_phone(callback: CallbackQuery, state: FSMContext)
     await callback.answer()
 
 
+@router.callback_query(F.data == "add_account_with_proxy")
+async def callback_add_account_with_proxy(callback: CallbackQuery, state: FSMContext):
+    await callback.message.edit_text(
+        "🌐 <b>Добавление аккаунта с прокси SOCKS5</b>\n\n"
+        "Введите прокси в формате:\n"
+        "<code>socks5://host:port</code>\n"
+        "или с авторизацией:\n"
+        "<code>socks5://user:pass@host:port</code>",
+        reply_markup=cancel_keyboard(),
+    )
+    await state.set_state(AddAccountSimpleStates.waiting_proxy)
+    await callback.answer()
+
+
+@router.message(AddAccountSimpleStates.waiting_proxy)
+async def process_simple_proxy(message: Message, state: FSMContext):
+    text = message.text.strip() if message.text else ""
+
+    if not text.startswith("socks5://"):
+        await message.answer(
+            "❌ Неверный формат. Введите прокси:\n"
+            "<code>socks5://host:port</code>\n"
+            "или <code>socks5://user:pass@host:port</code>",
+            reply_markup=cancel_keyboard(),
+        )
+        return
+
+    from urllib.parse import urlparse
+    parsed = urlparse(text)
+    if not parsed.hostname or not parsed.port:
+        await message.answer(
+            "❌ Не удалось распознать хост или порт.\n"
+            "Проверьте формат: <code>socks5://host:port</code>",
+            reply_markup=cancel_keyboard(),
+        )
+        return
+
+    await state.update_data(proxy=text)
+    await message.answer(
+        f"✅ Прокси сохранён: <code>{text}</code>\n\n"
+        "Теперь введите номер телефона в международном формате:\n"
+        "Например: +380991234567",
+        reply_markup=cancel_keyboard(),
+    )
+    await state.set_state(AddAccountSimpleStates.waiting_phone)
+
+
 @router.callback_query(F.data == "add_account_api")
 async def callback_add_account_api(callback: CallbackQuery, state: FSMContext):
     text = (
@@ -460,7 +514,9 @@ async def process_simple_phone(
     from telethon import TelegramClient
     from telethon.sessions import StringSession
 
-    client = TelegramClient(StringSession(), config.DEFAULT_API_ID, config.DEFAULT_API_HASH)
+    proxy_str = data.get("proxy")
+    proxy = _parse_proxy(proxy_str)
+    client = TelegramClient(StringSession(), config.DEFAULT_API_ID, config.DEFAULT_API_HASH, proxy=proxy)
 
     try:
         await client.connect()
@@ -521,13 +577,16 @@ async def process_simple_password(message: Message, state: FSMContext, db: Datab
         await client.disconnect()
 
         user = await db.get_user(message.from_user.id)
-        await db.create_account(
+        account_id = await db.create_account(
             user_id=user.id,
             phone=data["phone"],
             api_id=data["api_id"],
             api_hash=data["api_hash"],
             session_string=session_string,
         )
+        proxy_str = data.get("proxy")
+        if proxy_str and account_id:
+            await db.update_account_proxy(account_id, proxy_str)
 
         await message.answer(
             f"✅ Аккаунт {data['phone']} успешно добавлен!",
@@ -670,13 +729,16 @@ async def callback_code_confirm(callback: CallbackQuery, state: FSMContext, db: 
         await client.disconnect()
 
         user = await db.get_user(callback.from_user.id)
-        await db.create_account(
+        account_id = await db.create_account(
             user_id=user.id,
             phone=data["phone"],
             api_id=data["api_id"],
             api_hash=data["api_hash"],
             session_string=session_string,
         )
+        proxy_str = data.get("proxy")
+        if proxy_str and account_id:
+            await db.update_account_proxy(account_id, proxy_str)
 
         await callback.message.edit_text(
             f"✅ Аккаунт {data['phone']} успешно добавлен!",
@@ -771,7 +833,7 @@ async def process_rename_account(message: Message, state: FSMContext, db: Databa
     account = await db.get_account(account_id)
     await message.answer(
         f"✅ Аккаунт переименован: <b>{name}</b>",
-        reply_markup=account_menu_keyboard(account_id),
+        reply_markup=account_menu_keyboard(account_id, account.auto_subscribe_sponsors if account else False),
     )
 
 
@@ -791,3 +853,106 @@ async def callback_pay_account_card(callback: CallbackQuery):
         reply_markup=account_payment_method_keyboard(),
     )
     await callback.answer()
+
+
+# === Proxy settings ===
+
+@router.callback_query(F.data.startswith("set_proxy:"))
+async def callback_set_proxy(callback: CallbackQuery, state: FSMContext, db: Database):
+    account_id = int(callback.data.split(":")[1])
+    account = await db.get_account(account_id)
+    if not account:
+        await callback.answer("Аккаунт не найден", show_alert=True)
+        return
+
+    await state.update_data(account_id=account_id)
+    await state.set_state(SetProxyStates.waiting_proxy)
+
+    current = f"<code>{account.proxy}</code>" if account.proxy else "не настроен"
+    await callback.message.edit_text(
+        f"🌐 <b>Настройка прокси SOCKS5</b>\n\n"
+        f"Текущий прокси: {current}\n\n"
+        f"Введите прокси в формате:\n"
+        f"<code>socks5://host:port</code>\n"
+        f"или с авторизацией:\n"
+        f"<code>socks5://user:pass@host:port</code>\n\n"
+        f"Чтобы <b>удалить</b> прокси — отправьте: <code>удалить</code>",
+        reply_markup=cancel_keyboard(),
+    )
+    await callback.answer()
+
+
+@router.message(SetProxyStates.waiting_proxy)
+async def process_set_proxy(message: Message, state: FSMContext, db: Database, userbot_manager: UserbotManager):
+    text = message.text.strip() if message.text else ""
+    data = await state.get_data()
+    account_id = data["account_id"]
+
+    if text.lower() in ("удалить", "remove", "delete"):
+        await db.update_account_proxy(account_id, None)
+        await state.clear()
+        account = await db.get_account(account_id)
+        # Restart client without proxy
+        await userbot_manager.stop_client(account_id)
+        if account:
+            await userbot_manager.start_client(account)
+        await message.answer(
+            "✅ Прокси удалён. Аккаунт переподключён без прокси.",
+            reply_markup=account_menu_keyboard(account_id, account.auto_subscribe_sponsors if account else False),
+        )
+        return
+
+    if not text.startswith("socks5://"):
+        await message.answer(
+            "❌ Неверный формат. Введите прокси в формате:\n"
+            "<code>socks5://host:port</code>\n"
+            "или <code>socks5://user:pass@host:port</code>\n\n"
+            "Чтобы удалить прокси — отправьте: <code>удалить</code>",
+            reply_markup=cancel_keyboard(),
+        )
+        return
+
+    from urllib.parse import urlparse
+    parsed = urlparse(text)
+    if not parsed.hostname or not parsed.port:
+        await message.answer(
+            "❌ Не удалось распознать хост или порт.\n"
+            "Проверьте формат: <code>socks5://host:port</code>",
+            reply_markup=cancel_keyboard(),
+        )
+        return
+
+    await db.update_account_proxy(account_id, text)
+    await state.clear()
+
+    account = await db.get_account(account_id)
+    # Restart client with new proxy
+    await userbot_manager.stop_client(account_id)
+    if account:
+        await userbot_manager.start_client(account)
+
+    await message.answer(
+        f"✅ Прокси сохранён: <code>{text}</code>\nАккаунт переподключён.",
+        reply_markup=account_menu_keyboard(account_id, account.auto_subscribe_sponsors if account else False),
+    )
+
+
+# === Auto-subscribe sponsors toggle ===
+
+@router.callback_query(F.data.startswith("toggle_auto_subscribe:"))
+async def callback_toggle_auto_subscribe(callback: CallbackQuery, db: Database):
+    account_id = int(callback.data.split(":")[1])
+    account = await db.get_account(account_id)
+    if not account:
+        await callback.answer("Аккаунт не найден", show_alert=True)
+        return
+
+    new_val = not account.auto_subscribe_sponsors
+    await db.update_auto_subscribe_sponsors(account_id, new_val)
+    status = "включена" if new_val else "выключена"
+    await callback.answer(f"Авто-подписка на спонсоров {status}")
+
+    account = await db.get_account(account_id)
+    await callback.message.edit_reply_markup(
+        reply_markup=account_menu_keyboard(account_id, account.auto_subscribe_sponsors if account else False)
+    )
