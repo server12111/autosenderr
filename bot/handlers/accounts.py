@@ -514,6 +514,7 @@ async def process_simple_phone(
     from telethon import TelegramClient
     from telethon.sessions import StringSession
 
+    data = await state.get_data()
     proxy_str = data.get("proxy")
     proxy = _parse_proxy(proxy_str)
     client = TelegramClient(StringSession(), config.DEFAULT_API_ID, config.DEFAULT_API_HASH, proxy=proxy)
