@@ -17,6 +17,15 @@ from telethon.errors import (
 from ..database.db import Database, Account
 
 
+_DEVICE_POOL = [
+    {"device_model": "Samsung Galaxy A54",   "system_version": "Android 13", "app_version": "10.14.5"},
+    {"device_model": "Xiaomi Redmi Note 12", "system_version": "Android 12", "app_version": "10.13.2"},
+    {"device_model": "Samsung Galaxy S23",   "system_version": "Android 13", "app_version": "10.14.5"},
+    {"device_model": "OPPO A78",             "system_version": "Android 12", "app_version": "10.12.4"},
+    {"device_model": "Xiaomi 13T",           "system_version": "Android 13", "app_version": "10.14.5"},
+]
+
+
 def _parse_proxy(proxy_str: Optional[str]) -> Optional[tuple]:
     """Parse 'socks5://[user:pass@]host:port' into Telethon proxy tuple."""
     if not proxy_str:
@@ -83,11 +92,17 @@ class UserbotManager:
 
         try:
             proxy = _parse_proxy(account.proxy)
+            device = _DEVICE_POOL[account.id % len(_DEVICE_POOL)]
             client = TelegramClient(
                 StringSession(account.session_string),
                 account.api_id,
                 account.api_hash,
                 proxy=proxy,
+                device_model=device["device_model"],
+                system_version=device["system_version"],
+                app_version=device["app_version"],
+                lang_code="uk",
+                system_lang_code="uk-UA",
             )
             await client.connect()
 

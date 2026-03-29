@@ -48,6 +48,17 @@ async def cmd_admin(message: Message, db: Database):
     )
 
 
+def _build_hourly_chart(data: list) -> str:
+    max_val = max((cnt for _, cnt in data), default=0) or 1
+    bar_max = 10
+    lines = []
+    for h, cnt in data:
+        filled = round(cnt / max_val * bar_max)
+        bar = "█" * filled + "░" * (bar_max - filled)
+        lines.append(f"{h:02d}:00 {bar} {cnt}")
+    return "\n".join(lines)
+
+
 @router.callback_query(F.data == "admin_stats")
 async def callback_admin_stats(callback: CallbackQuery, db: Database):
     if not is_admin(callback.from_user.id):
@@ -75,8 +86,13 @@ async def callback_admin_stats(callback: CallbackQuery, db: Database):
     active_mailings = len(mailings)
     total_mailings = await db.count_all_mailings()
 
-    total_revenue = await db.get_total_revenue()
+    revenue = await db.get_revenue_by_currency()
     paid_subs = await db.count_paid_subscriptions()
+    hourly = await db.get_hourly_activity(24)
+    chart = _build_hourly_chart(hourly)
+
+    revenue_parts = [f"{amt:.2f} {cur}" for cur, amt in revenue.items() if amt > 0]
+    revenue_line = " | ".join(revenue_parts) if revenue_parts else "0.00 USDT"
 
     text = (
         "📊 Статистика бота\n\n"
@@ -86,13 +102,14 @@ async def callback_admin_stats(callback: CallbackQuery, db: Database):
         f"  • За 30 дней: +{new_month}\n\n"
         f"✅ Активных подписок: {active_subs}\n"
         f"💰 Всего продано подписок: {paid_subs}\n"
-        f"💵 Общий доход: {total_revenue:.2f} USDT\n\n"
+        f"💵 Общий доход: {revenue_line}\n\n"
         f"📱 Аккаунтов: {total_accounts}\n"
         f"📋 Активных рассылок: {active_mailings}\n"
-        f"📋 Всего рассылок: {total_mailings}\n"
+        f"📋 Всего рассылок: {total_mailings}\n\n"
+        f"📊 Активность по часам (24ч):\n<code>{chart}</code>\n"
     )
 
-    await callback.message.edit_text(text, reply_markup=admin_keyboard())
+    await callback.message.edit_text(text, parse_mode="HTML", reply_markup=admin_keyboard())
     await callback.answer()
 
 
@@ -506,8 +523,9 @@ async def process_channel_id(message: Message, state: FSMContext, db: Database):
         return
 
     # Handle forwarded message from channel
-    if message.forward_from_chat:
-        chat = message.forward_from_chat
+    origin = message.forward_origin
+    if origin and hasattr(origin, "chat"):
+        chat = origin.chat
         channel_id = chat.id
         channel_username = chat.username or ""
         channel_title = chat.title or str(channel_id)

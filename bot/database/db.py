@@ -23,6 +23,7 @@ class User:
     referred_by: Optional[int]
     ref_balance: float
     created_at: datetime
+    last_activity: Optional[datetime] = None
 
     @property
     def display_name(self) -> str:
@@ -75,6 +76,9 @@ class MailingMessage:
     text: str
     photo_path: Optional[str] = None
     parse_mode: str = 'html'
+    entities_json: Optional[str] = None
+    forward_peer: Optional[str] = None
+    forward_msg_id: Optional[int] = None
 
     @property
     def photo_paths(self) -> list[str]:
@@ -87,6 +91,10 @@ class MailingMessage:
         except (json.JSONDecodeError, TypeError):
             pass
         return [self.photo_path]
+
+    @property
+    def is_forward(self) -> bool:
+        return bool(self.forward_peer and self.forward_msg_id)
 
 
 @dataclass
@@ -194,8 +202,11 @@ class Database:
         await _add_col("accounts", "proxy",                        "TEXT")
         await _add_col("accounts", "auto_subscribe_sponsors",      "BOOLEAN DEFAULT FALSE")
         # mailing_messages
-        await _add_col("mailing_messages", "photo_path",  "TEXT")
-        await _add_col("mailing_messages", "parse_mode",  "TEXT DEFAULT 'html'")
+        await _add_col("mailing_messages", "photo_path",    "TEXT")
+        await _add_col("mailing_messages", "parse_mode",    "TEXT DEFAULT 'html'")
+        await _add_col("mailing_messages", "entities_json", "TEXT")
+        await _add_col("mailing_messages", "forward_peer",  "TEXT")
+        await _add_col("mailing_messages", "forward_msg_id","INTEGER")
         # mailing_targets
         await _add_col("mailing_targets", "interval_seconds", "INTEGER")
         await _add_col("mailing_targets", "last_sent_at",     "DATETIME")
@@ -206,9 +217,10 @@ class Database:
         await _add_col("promocodes", "max_uses",   "INTEGER NOT NULL DEFAULT 1")
         await _add_col("promocodes", "uses_count", "INTEGER NOT NULL DEFAULT 0")
         # users
-        await _add_col("users", "ref_code",     "TEXT")
-        await _add_col("users", "referred_by",  "INTEGER")
-        await _add_col("users", "ref_balance",  "REAL DEFAULT 0")
+        await _add_col("users", "ref_code",       "TEXT")
+        await _add_col("users", "referred_by",    "INTEGER")
+        await _add_col("users", "ref_balance",    "REAL DEFAULT 0")
+        await _add_col("users", "last_activity",  "DATETIME")
 
     async def close(self):
         if self._conn:
@@ -232,6 +244,7 @@ class Database:
             referred_by=row["referred_by"] if "referred_by" in row.keys() else None,
             ref_balance=float(row["ref_balance"]) if "ref_balance" in row.keys() and row["ref_balance"] else 0.0,
             created_at=self._parse_datetime(row["created_at"]),
+            last_activity=self._parse_datetime(row["last_activity"]) if "last_activity" in row.keys() else None,
         )
 
     def _row_to_account(self, row) -> "Account":
@@ -542,15 +555,28 @@ class Database:
                     id=r["id"], mailing_id=r["mailing_id"], text=r["text"],
                     photo_path=r["photo_path"] if "photo_path" in keys else None,
                     parse_mode=r["parse_mode"] if "parse_mode" in keys and r["parse_mode"] else 'html',
+                    entities_json=r["entities_json"] if "entities_json" in keys else None,
+                    forward_peer=r["forward_peer"] if "forward_peer" in keys else None,
+                    forward_msg_id=r["forward_msg_id"] if "forward_msg_id" in keys else None,
                 ))
             return result
 
     async def add_mailing_message(self, mailing_id: int, text: str, photo_path: Optional[str] = None,
-                                   photo_paths: Optional[list[str]] = None, parse_mode: str = 'html') -> int:
+                                   photo_paths: Optional[list[str]] = None, parse_mode: str = 'html',
+                                   entities_json: Optional[str] = None) -> int:
         stored = json.dumps(photo_paths) if photo_paths else photo_path
         cursor = await self._conn.execute(
-            "INSERT INTO mailing_messages (mailing_id, text, photo_path, parse_mode) VALUES (?, ?, ?, ?)",
-            (mailing_id, text, stored, parse_mode),
+            "INSERT INTO mailing_messages (mailing_id, text, photo_path, parse_mode, entities_json) VALUES (?, ?, ?, ?, ?)",
+            (mailing_id, text, stored, parse_mode, entities_json),
+        )
+        await self._conn.commit()
+        return cursor.lastrowid
+
+    async def add_mailing_forward(self, mailing_id: int, forward_peer: str, forward_msg_id: int) -> int:
+        """Save a forward-type mailing message (no text/photo, just source ref)."""
+        cursor = await self._conn.execute(
+            "INSERT INTO mailing_messages (mailing_id, text, parse_mode, forward_peer, forward_msg_id) VALUES (?, ?, ?, ?, ?)",
+            (mailing_id, "", 'html', forward_peer, forward_msg_id),
         )
         await self._conn.commit()
         return cursor.lastrowid
@@ -693,12 +719,34 @@ class Database:
                 paid_at=self._parse_datetime(r["paid_at"]),
             ) for r in rows]
 
-    async def get_total_revenue(self) -> float:
+    async def get_revenue_by_currency(self) -> dict:
         async with self._conn.execute(
-            "SELECT COALESCE(SUM(amount), 0) as total FROM payments WHERE status='paid' AND currency='USDT'"
+            "SELECT currency, COALESCE(SUM(amount), 0) as total FROM payments WHERE status='paid' GROUP BY currency"
         ) as cur:
-            row = await cur.fetchone()
-            return float(row["total"]) if row else 0.0
+            rows = await cur.fetchall()
+        return {r["currency"]: float(r["total"]) for r in rows}
+
+    async def update_last_activity(self, telegram_id: int) -> None:
+        await self._conn.execute(
+            "UPDATE users SET last_activity=? WHERE telegram_id=?",
+            (datetime.now(), telegram_id),
+        )
+        await self._conn.commit()
+
+    async def get_hourly_activity(self, hours: int = 24) -> list:
+        """Returns list of (hour 0-23, count) for the last N hours."""
+        async with self._conn.execute(
+            """
+            SELECT CAST(strftime('%H', last_activity) AS INTEGER) as h, COUNT(*) as cnt
+            FROM users
+            WHERE last_activity >= datetime('now', ?)
+            GROUP BY h
+            """,
+            (f"-{hours} hours",),
+        ) as cur:
+            rows = await cur.fetchall()
+        by_hour = {r["h"]: r["cnt"] for r in rows}
+        return [(h, by_hour.get(h, 0)) for h in range(24)]
 
     async def count_paid_subscriptions(self) -> int:
         async with self._conn.execute(

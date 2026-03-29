@@ -11,14 +11,15 @@ from ..keyboards.inline import (
     delete_account_confirm_keyboard,
     cancel_keyboard,
     main_menu_keyboard,
-    add_account_method_keyboard,
+    add_account_proxy_keyboard,
+    add_account_api_keyboard,
     account_payment_keyboard,
     account_payment_method_keyboard,
     ton_account_payment_keyboard,
     code_input_keyboard,
     back_to_menu_keyboard,
 )
-from ..userbot.manager import UserbotManager, _parse_proxy
+from ..userbot.manager import UserbotManager, _parse_proxy, _DEVICE_POOL
 from ..config import config
 from ..services import CryptoBotService, TonPaymentService
 
@@ -34,18 +35,12 @@ class SetProxyStates(StatesGroup):
 
 
 class AddAccountStates(StatesGroup):
-    waiting_api_id = State()
-    waiting_api_hash = State()
-    waiting_phone = State()
-    waiting_code = State()
-    waiting_password = State()
-
-
-class AddAccountSimpleStates(StatesGroup):
-    waiting_proxy = State()
-    waiting_phone = State()
-    waiting_code = State()
-    waiting_password = State()
+    waiting_proxy    = State()   # крок 1 (опційно)
+    waiting_api_id   = State()   # крок 2a (опційно)
+    waiting_api_hash = State()   # крок 2b (опційно)
+    waiting_phone    = State()   # крок 3
+    waiting_code     = State()   # крок 4
+    waiting_password = State()   # 2FA
 
 
 @router.callback_query(F.data == "accounts")
@@ -131,10 +126,15 @@ async def callback_add_account(callback: CallbackQuery, state: FSMContext, db: D
         "➕ Добавление аккаунта\n\n"
         f"📊 У вас {accounts_count}/{config.FREE_ACCOUNTS_LIMIT} бесплатных аккаунтов\n"
         f"Осталось бесплатных: {remaining}\n\n"
-        "Нажмите кнопку ниже, чтобы добавить аккаунт по номеру телефона:"
+        "<b>Шаг 1 из 3</b>\n\n"
+        "Хотите использовать прокси SOCKS5?\n\n"
+        "Если да — введите в формате:\n"
+        "<code>socks5://host:port</code>\n"
+        "или <code>socks5://user:pass@host:port</code>"
     )
 
-    await callback.message.edit_text(text, reply_markup=add_account_method_keyboard())
+    await state.clear()
+    await callback.message.edit_text(text, reply_markup=add_account_proxy_keyboard())
     await callback.answer()
 
 
@@ -221,7 +221,7 @@ async def callback_pay_account_ton(
 
 @router.callback_query(F.data.startswith("check_ton_account:"))
 async def callback_check_ton_account(
-    callback: CallbackQuery, db: Database, ton_service: TonPaymentService
+    callback: CallbackQuery, state: FSMContext, db: Database, ton_service: TonPaymentService
 ):
     comment = callback.data.split(":", 1)[1]
 
@@ -249,15 +249,20 @@ async def callback_check_ton_account(
         "✅ Оплата получена!\n\n"
         "➕ Добавление аккаунта\n\n"
         f"📊 У вас {accounts_count} аккаунтов\n\n"
-        "Нажмите кнопку ниже, чтобы добавить аккаунт:"
+        "<b>Шаг 1 из 3</b>\n\n"
+        "Хотите использовать прокси SOCKS5?\n\n"
+        "Если да — введите в формате:\n"
+        "<code>socks5://host:port</code>\n"
+        "или <code>socks5://user:pass@host:port</code>"
     )
 
-    await callback.message.edit_text(text, reply_markup=add_account_method_keyboard())
+    await state.clear()
+    await callback.message.edit_text(text, reply_markup=add_account_proxy_keyboard())
     await callback.answer()
 
 
 @router.callback_query(F.data.startswith("check_account_payment:"))
-async def callback_check_account_payment(callback: CallbackQuery, db: Database):
+async def callback_check_account_payment(callback: CallbackQuery, state: FSMContext, db: Database):
     invoice_id = callback.data.split(":")[1]
     crypto_service = CryptoBotService(config.CRYPTOBOT_TOKEN, config.CRYPTOBOT_TESTNET)
     paid = await crypto_service.check_invoice_paid(invoice_id)
@@ -276,42 +281,40 @@ async def callback_check_account_payment(callback: CallbackQuery, db: Database):
         "✅ Оплата получена!\n\n"
         "➕ Добавление аккаунта\n\n"
         f"📊 У вас {accounts_count} аккаунтов\n\n"
-        "Нажмите кнопку ниже, чтобы добавить аккаунт:"
+        "<b>Шаг 1 из 3</b>\n\n"
+        "Хотите использовать прокси SOCKS5?\n\n"
+        "Если да — введите в формате:\n"
+        "<code>socks5://host:port</code>\n"
+        "или <code>socks5://user:pass@host:port</code>"
     )
 
-    await callback.message.edit_text(text, reply_markup=add_account_method_keyboard())
+    await state.clear()
+    await callback.message.edit_text(text, reply_markup=add_account_proxy_keyboard())
     await callback.answer()
 
 
-@router.callback_query(F.data == "add_account_phone")
-async def callback_add_account_phone(callback: CallbackQuery, state: FSMContext):
-    text = (
-        "📱 Добавление по номеру телефона\n\n"
-        "Введите номер телефона в международном формате:\n"
-        "Например: +380991234567"
-    )
-
-    await callback.message.edit_text(text, reply_markup=cancel_keyboard())
-    await state.set_state(AddAccountSimpleStates.waiting_phone)
-    await callback.answer()
-
-
-@router.callback_query(F.data == "add_account_with_proxy")
-async def callback_add_account_with_proxy(callback: CallbackQuery, state: FSMContext):
+@router.callback_query(F.data == "add_account_set_proxy")
+async def callback_add_account_set_proxy(callback: CallbackQuery, state: FSMContext):
     await callback.message.edit_text(
-        "🌐 <b>Добавление аккаунта с прокси SOCKS5</b>\n\n"
-        "Введите прокси в формате:\n"
+        "🌐 Введите прокси в формате:\n"
         "<code>socks5://host:port</code>\n"
         "или с авторизацией:\n"
         "<code>socks5://user:pass@host:port</code>",
         reply_markup=cancel_keyboard(),
     )
-    await state.set_state(AddAccountSimpleStates.waiting_proxy)
+    await state.set_state(AddAccountStates.waiting_proxy)
     await callback.answer()
 
 
-@router.message(AddAccountSimpleStates.waiting_proxy)
-async def process_simple_proxy(message: Message, state: FSMContext):
+@router.callback_query(F.data == "add_account_skip_proxy")
+async def callback_add_account_skip_proxy(callback: CallbackQuery, state: FSMContext):
+    await state.update_data(proxy=None)
+    await _ask_api_step(callback.message, can_edit=True)
+    await callback.answer()
+
+
+@router.message(AddAccountStates.waiting_proxy)
+async def process_proxy(message: Message, state: FSMContext):
     text = message.text.strip() if message.text else ""
 
     if not text.startswith("socks5://"):
@@ -334,28 +337,49 @@ async def process_simple_proxy(message: Message, state: FSMContext):
         return
 
     await state.update_data(proxy=text)
-    await message.answer(
-        f"✅ Прокси сохранён: <code>{text}</code>\n\n"
-        "Теперь введите номер телефона в международном формате:\n"
-        "Например: +380991234567",
+    await state.set_state(None)
+    await _ask_api_step(message, can_edit=False)
+
+
+async def _ask_api_step(target, can_edit: bool = False):
+    text = (
+        "➕ Добавление аккаунта\n\n"
+        "<b>Шаг 2 из 3</b>\n\n"
+        "Хотите использовать собственный API ID и Hash?\n\n"
+        "Получить: https://my.telegram.org\n\n"
+        "Если нет — используются стандартные настройки."
+    )
+    if can_edit:
+        await target.edit_text(text, reply_markup=add_account_api_keyboard())
+    else:
+        await target.answer(text, reply_markup=add_account_api_keyboard())
+
+
+@router.callback_query(F.data == "add_account_set_api")
+async def callback_add_account_set_api(callback: CallbackQuery, state: FSMContext):
+    await callback.message.edit_text(
+        "🔑 Введите API ID (число):\n\n"
+        "Получить: https://my.telegram.org",
         reply_markup=cancel_keyboard(),
     )
-    await state.set_state(AddAccountSimpleStates.waiting_phone)
-
-
-@router.callback_query(F.data == "add_account_api")
-async def callback_add_account_api(callback: CallbackQuery, state: FSMContext):
-    text = (
-        "🔑 Добавление с API ключами\n\n"
-        "Для добавления аккаунта вам понадобятся:\n"
-        "1. API ID\n"
-        "2. API Hash\n\n"
-        "Получить их можно на https://my.telegram.org\n\n"
-        "Введите API ID:"
-    )
-
-    await callback.message.edit_text(text, reply_markup=cancel_keyboard())
     await state.set_state(AddAccountStates.waiting_api_id)
+    await callback.answer()
+
+
+@router.callback_query(F.data == "add_account_skip_api")
+async def callback_add_account_skip_api(callback: CallbackQuery, state: FSMContext):
+    await state.update_data(
+        api_id=config.DEFAULT_API_ID,
+        api_hash=config.DEFAULT_API_HASH,
+    )
+    await callback.message.edit_text(
+        "➕ Добавление аккаунта\n\n"
+        "<b>Шаг 3 из 3</b>\n\n"
+        "Введите номер телефона в международном формате:\n"
+        "Например: <code>+380991234567</code>",
+        reply_markup=cancel_keyboard(),
+    )
+    await state.set_state(AddAccountStates.waiting_phone)
     await callback.answer()
 
 
@@ -382,7 +406,10 @@ async def process_api_hash(message: Message, state: FSMContext):
 
     await state.update_data(api_hash=api_hash)
     await message.answer(
-        "Введите номер телефона (в международном формате, например +380991234567):",
+        "➕ Добавление аккаунта\n\n"
+        "<b>Шаг 3 из 3</b>\n\n"
+        "Введите номер телефона в международном формате:\n"
+        "Например: <code>+380991234567</code>",
         reply_markup=cancel_keyboard(),
     )
     await state.set_state(AddAccountStates.waiting_phone)
@@ -406,12 +433,21 @@ async def process_phone(
     from telethon import TelegramClient
     from telethon.sessions import StringSession
 
-    client = TelegramClient(StringSession(), data["api_id"], data["api_hash"])
+    device = _DEVICE_POOL[abs(hash(phone)) % len(_DEVICE_POOL)]
+    client = TelegramClient(
+        StringSession(), data["api_id"], data["api_hash"],
+        proxy=_parse_proxy(data.get("proxy")),
+        device_model=device["device_model"],
+        system_version=device["system_version"],
+        app_version=device["app_version"],
+        lang_code="uk",
+        system_lang_code="uk-UA",
+    )
 
     try:
         await client.connect()
         await client.send_code_request(phone)
-        await state.update_data(client=client, entered_code="", code_type="api")
+        await state.update_data(client=client, entered_code="")
 
         await message.answer(
             "📱 Код отправлен!\n\n"
@@ -425,7 +461,7 @@ async def process_phone(
         await client.disconnect()
         await message.answer(
             f"❌ Ошибка при отправке кода: {e}\n\n"
-            "Проверьте API ID, API Hash и номер телефона.",
+            "Проверьте номер телефона.",
             reply_markup=main_menu_keyboard(),
         )
         await state.clear()
@@ -433,7 +469,6 @@ async def process_phone(
 
 @router.message(AddAccountStates.waiting_code)
 async def process_code(message: Message, state: FSMContext, db: Database):
-    # Ask user to use keyboard instead of text input
     data = await state.get_data()
     current_code = data.get("entered_code", "")
     display = _format_code_display(current_code)
@@ -448,117 +483,6 @@ async def process_code(message: Message, state: FSMContext, db: Database):
 
 @router.message(AddAccountStates.waiting_password)
 async def process_password(message: Message, state: FSMContext, db: Database):
-    password = message.text.strip()
-    data = await state.get_data()
-    client = data.get("client")
-
-    if not client:
-        await message.answer(
-            "❌ Сессия истекла. Начните заново.",
-            reply_markup=main_menu_keyboard(),
-        )
-        await state.clear()
-        return
-
-    try:
-        await client.sign_in(password=password)
-
-        session_string = client.session.save()
-        await client.disconnect()
-
-        user = await db.get_user(message.from_user.id)
-        account_id = await db.create_account(
-            user_id=user.id,
-            phone=data["phone"],
-            api_id=data["api_id"],
-            api_hash=data["api_hash"],
-            session_string=session_string,
-        )
-
-        await message.answer(
-            f"✅ Аккаунт {data['phone']} успешно добавлен!",
-            reply_markup=main_menu_keyboard(),
-        )
-        await state.clear()
-
-    except Exception as e:
-        await client.disconnect()
-        await message.answer(
-            f"❌ Ошибка авторизации: {e}",
-            reply_markup=main_menu_keyboard(),
-        )
-        await state.clear()
-
-
-# === Simple registration (phone only) ===
-
-
-@router.message(AddAccountSimpleStates.waiting_phone)
-async def process_simple_phone(
-    message: Message, state: FSMContext, userbot_manager: UserbotManager
-):
-    phone = message.text.strip()
-
-    if not phone.startswith("+"):
-        await message.answer("❌ Номер должен начинаться с +. Попробуйте снова:")
-        return
-
-    await state.update_data(
-        phone=phone,
-        api_id=config.DEFAULT_API_ID,
-        api_hash=config.DEFAULT_API_HASH,
-    )
-
-    await message.answer("⏳ Отправляем код на телефон...")
-
-    from telethon import TelegramClient
-    from telethon.sessions import StringSession
-
-    data = await state.get_data()
-    proxy_str = data.get("proxy")
-    proxy = _parse_proxy(proxy_str)
-    client = TelegramClient(StringSession(), config.DEFAULT_API_ID, config.DEFAULT_API_HASH, proxy=proxy)
-
-    try:
-        await client.connect()
-        await client.send_code_request(phone)
-        await state.update_data(client=client, entered_code="", code_type="simple")
-
-        await message.answer(
-            "📱 Код отправлен!\n\n"
-            "🔢 Введите код с помощью кнопок:\n\n"
-            "Код: ▫️▫️▫️▫️▫️",
-            reply_markup=code_input_keyboard(),
-        )
-        await state.set_state(AddAccountSimpleStates.waiting_code)
-
-    except Exception as e:
-        await client.disconnect()
-        await message.answer(
-            f"❌ Ошибка при отправке кода: {e}\n\n"
-            "Проверьте номер телефона.",
-            reply_markup=main_menu_keyboard(),
-        )
-        await state.clear()
-
-
-@router.message(AddAccountSimpleStates.waiting_code)
-async def process_simple_code(message: Message, state: FSMContext, db: Database):
-    # Ask user to use keyboard instead of text input
-    data = await state.get_data()
-    current_code = data.get("entered_code", "")
-    display = _format_code_display(current_code)
-
-    await message.answer(
-        "⚠️ Используйте кнопки для ввода кода!\n\n"
-        f"🔢 Введите код с помощью кнопок:\n\n"
-        f"Код: {display}",
-        reply_markup=code_input_keyboard(),
-    )
-
-
-@router.message(AddAccountSimpleStates.waiting_password)
-async def process_simple_password(message: Message, state: FSMContext, db: Database):
     password = message.text.strip()
     data = await state.get_data()
     client = data.get("client")
@@ -617,7 +541,7 @@ def _format_code_display(code: str, length: int = 5) -> str:
 @router.callback_query(F.data.startswith("code_digit:"))
 async def callback_code_digit(callback: CallbackQuery, state: FSMContext):
     current_state = await state.get_state()
-    valid_states = [AddAccountStates.waiting_code.state, AddAccountSimpleStates.waiting_code.state]
+    valid_states = [AddAccountStates.waiting_code.state]
     if current_state not in valid_states:
         await callback.answer("Сессия ввода кода истекла", show_alert=True)
         return
@@ -646,7 +570,7 @@ async def callback_code_digit(callback: CallbackQuery, state: FSMContext):
 @router.callback_query(F.data == "code_backspace")
 async def callback_code_backspace(callback: CallbackQuery, state: FSMContext):
     current_state = await state.get_state()
-    valid_states = [AddAccountStates.waiting_code.state, AddAccountSimpleStates.waiting_code.state]
+    valid_states = [AddAccountStates.waiting_code.state]
     if current_state not in valid_states:
         await callback.answer("Сессия ввода кода истекла", show_alert=True)
         return
@@ -674,7 +598,7 @@ async def callback_code_backspace(callback: CallbackQuery, state: FSMContext):
 @router.callback_query(F.data == "code_clear")
 async def callback_code_clear(callback: CallbackQuery, state: FSMContext):
     current_state = await state.get_state()
-    valid_states = [AddAccountStates.waiting_code.state, AddAccountSimpleStates.waiting_code.state]
+    valid_states = [AddAccountStates.waiting_code.state]
     if current_state not in valid_states:
         await callback.answer("Сессия ввода кода истекла", show_alert=True)
         return
@@ -694,14 +618,13 @@ async def callback_code_clear(callback: CallbackQuery, state: FSMContext):
 @router.callback_query(F.data == "code_confirm")
 async def callback_code_confirm(callback: CallbackQuery, state: FSMContext, db: Database):
     current_state = await state.get_state()
-    valid_states = [AddAccountStates.waiting_code.state, AddAccountSimpleStates.waiting_code.state]
+    valid_states = [AddAccountStates.waiting_code.state]
     if current_state not in valid_states:
         await callback.answer("Сессия ввода кода истекла", show_alert=True)
         return
 
     data = await state.get_data()
     code = data.get("entered_code", "")
-    code_type = data.get("code_type", "simple")
     client = data.get("client")
 
     if not code:
@@ -750,11 +673,7 @@ async def callback_code_confirm(callback: CallbackQuery, state: FSMContext, db: 
     except Exception as e:
         error_str = str(e).lower()
         if "two-step" in error_str or "password" in error_str:
-            if code_type == "api":
-                await state.set_state(AddAccountStates.waiting_password)
-            else:
-                await state.set_state(AddAccountSimpleStates.waiting_password)
-
+            await state.set_state(AddAccountStates.waiting_password)
             await callback.message.edit_text(
                 "🔐 Требуется пароль двухфакторной аутентификации.\n\n"
                 "Введите пароль:",

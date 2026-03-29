@@ -9,7 +9,6 @@ from aiogram import Router, F
 from aiogram.types import Message, CallbackQuery
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
-from aiogram.utils.text_decorations import html_decoration
 
 _KYIV_TZ = pytz.timezone('Europe/Kiev')
 
@@ -70,8 +69,27 @@ def _strip_html(text: str) -> str:
     return _html.unescape(clean)
 
 
+def serialize_entities(entities) -> str | None:
+    """Serialize aiogram message entities to JSON for storage."""
+    if not entities:
+        return None
+    result = []
+    for e in entities:
+        d = {"type": e.type, "offset": e.offset, "length": e.length}
+        if e.type == "custom_emoji":
+            d["custom_emoji_id"] = e.custom_emoji_id
+        elif e.type == "text_link":
+            d["url"] = e.url
+        elif e.type == "pre":
+            d["language"] = getattr(e, "language", "") or ""
+        result.append(d)
+    return json.dumps(result, ensure_ascii=False) if result else None
+
+
 def message_preview(msg) -> str:
     """Generate preview text for a mailing message."""
+    if msg.is_forward:
+        return f"[Переслано] из {msg.forward_peer} #{msg.forward_msg_id}"
     photo_count = len(msg.photo_paths)
     if photo_count > 1:
         prefix = f"[{photo_count} Фото] "
@@ -113,6 +131,7 @@ class CreateMailingStates(StatesGroup):
     waiting_interval = State()
     adding_messages = State()
     waiting_message_text = State()
+    waiting_forward_message = State()
     adding_targets = State()
     waiting_target = State()
     waiting_folder = State()
@@ -121,6 +140,7 @@ class CreateMailingStates(StatesGroup):
 
 class EditMailingStates(StatesGroup):
     waiting_message_text = State()
+    waiting_forward_message = State()
     waiting_target = State()
     waiting_folder = State()
     waiting_hours = State()
@@ -288,6 +308,48 @@ async def callback_add_mailing_message(callback: CallbackQuery, state: FSMContex
     await callback.answer()
 
 
+@router.callback_query(F.data.startswith("add_mailing_forward:"))
+async def callback_add_mailing_forward(callback: CallbackQuery, state: FSMContext):
+    mailing_id = int(callback.data.split(":")[1])
+    await state.update_data(mailing_id=mailing_id)
+    await state.set_state(EditMailingStates.waiting_forward_message)
+    await callback.message.edit_text(
+        "📨 Перешлите любое сообщение из канала или группы.\n"
+        "Бот збереже посилання на оригінал і при розсилці буде пересилати його.",
+        reply_markup=cancel_keyboard(),
+    )
+    await callback.answer()
+
+
+@router.message(EditMailingStates.waiting_forward_message)
+async def process_edit_forward_message(message: Message, state: FSMContext, db: Database):
+    from aiogram.types import MessageOriginChannel, MessageOriginChat
+    origin = message.forward_origin
+    if isinstance(origin, MessageOriginChannel):
+        peer = str(origin.chat.id)
+        msg_id = origin.message_id
+    elif isinstance(origin, MessageOriginChat):
+        peer = str(origin.sender_chat.id)
+        msg_id = origin.message_id
+    else:
+        await message.answer(
+            "❌ Не удалось определить источник. Перешлите сообщение из канала или группы."
+        )
+        return
+
+    data = await state.get_data()
+    mailing_id = data["mailing_id"]
+    await db.add_mailing_forward(mailing_id, peer, msg_id)
+    await state.clear()
+
+    messages = await db.get_mailing_messages(mailing_id)
+    await message.answer(
+        f"✅ Пересылка сохранена!\n📌 Источник: {peer} / сообщение #{msg_id}\n"
+        f"Всього записів: {len(messages)}",
+        reply_markup=mailing_messages_keyboard(mailing_id, messages),
+    )
+
+
 @router.message(EditMailingStates.waiting_message_text, F.photo)
 async def process_edit_message_photo(
     message: Message, state: FSMContext, db: Database, album: list[Message] = None
@@ -298,6 +360,7 @@ async def process_edit_message_photo(
 
     messages_to_process = album or [message]
     caption = data.get("pending_caption")
+    caption_entities_json = data.get("pending_caption_entities")
 
     for msg in messages_to_process:
         if len(pending_photos) >= 10:
@@ -306,9 +369,11 @@ async def process_edit_message_photo(
         if photo_path:
             pending_photos.append(photo_path)
         if caption is None and msg.caption:
-            caption = html_decoration.unparse(msg.caption, msg.caption_entities or []).strip()
+            caption = (msg.caption or "").strip()
+            caption_entities_json = serialize_entities(msg.caption_entities)
 
-    await state.update_data(pending_photos=pending_photos, pending_caption=caption)
+    await state.update_data(pending_photos=pending_photos, pending_caption=caption,
+                            pending_caption_entities=caption_entities_json)
 
     if len(pending_photos) >= 10:
         await message.answer(
@@ -326,17 +391,18 @@ async def process_edit_message_photo(
 
 @router.message(EditMailingStates.waiting_message_text)
 async def process_edit_message_text(message: Message, state: FSMContext, db: Database):
-    text = (message.html_text if message.text else "").strip()
+    text = (message.text or "").strip()
     if not text:
         await message.answer("❌ Отправьте текст или фото.")
         return
+    entities_json = serialize_entities(message.entities)
     data = await state.get_data()
     mailing_id = data["mailing_id"]
     pending_photos = data.get("pending_photos", [])
 
     if pending_photos:
-        # Text sent while collecting photos — use as caption and save
-        await db.add_mailing_message(mailing_id, text, photo_paths=pending_photos)
+        await db.add_mailing_message(mailing_id, text, photo_paths=pending_photos,
+                                     entities_json=entities_json)
         await state.clear()
         messages = await db.get_mailing_messages(mailing_id)
         await message.answer(
@@ -344,7 +410,7 @@ async def process_edit_message_text(message: Message, state: FSMContext, db: Dat
             reply_markup=mailing_messages_keyboard(mailing_id, messages),
         )
     else:
-        await db.add_mailing_message(mailing_id, text)
+        await db.add_mailing_message(mailing_id, text, entities_json=entities_json)
         await state.clear()
         messages = await db.get_mailing_messages(mailing_id)
         await message.answer(
@@ -364,7 +430,9 @@ async def callback_edit_save_photos(callback: CallbackQuery, state: FSMContext, 
         return
 
     caption = data.get("pending_caption") or ""
-    await db.add_mailing_message(mailing_id, caption, photo_paths=pending_photos)
+    entities_json = data.get("pending_caption_entities")
+    await db.add_mailing_message(mailing_id, caption, photo_paths=pending_photos,
+                                 entities_json=entities_json)
     await state.clear()
 
     messages = await db.get_mailing_messages(mailing_id)
@@ -829,6 +897,48 @@ async def callback_create_add_message(callback: CallbackQuery, state: FSMContext
     await callback.answer()
 
 
+@router.callback_query(
+    CreateMailingStates.adding_messages, F.data.startswith("create_add_forward:")
+)
+async def callback_create_add_forward(callback: CallbackQuery, state: FSMContext):
+    await state.set_state(CreateMailingStates.waiting_forward_message)
+    await callback.message.edit_text(
+        "📨 Перешлите любое сообщение из канала или группы.\n"
+        "Бот збереже посилання на оригінал і при розсилці буде пересилати його.",
+        reply_markup=cancel_keyboard(),
+    )
+    await callback.answer()
+
+
+@router.message(CreateMailingStates.waiting_forward_message)
+async def process_create_forward_message(message: Message, state: FSMContext, db: Database):
+    from aiogram.types import MessageOriginChannel, MessageOriginChat
+    origin = message.forward_origin
+    if isinstance(origin, MessageOriginChannel):
+        peer = str(origin.chat.id)
+        msg_id = origin.message_id
+    elif isinstance(origin, MessageOriginChat):
+        peer = str(origin.sender_chat.id)
+        msg_id = origin.message_id
+    else:
+        await message.answer(
+            "❌ Не удалось определить источник. Перешлите сообщение из канала или группы."
+        )
+        return
+
+    data = await state.get_data()
+    mailing_id = data["mailing_id"]
+    await db.add_mailing_forward(mailing_id, peer, msg_id)
+    await state.set_state(CreateMailingStates.adding_messages)
+
+    messages = await db.get_mailing_messages(mailing_id)
+    await message.answer(
+        f"✅ Пересылка сохранена!\n📌 Источник: {peer} / сообщение #{msg_id}\n"
+        f"Всього записів: {len(messages)}\n\nДодайте ще або натисніть «Готово»:",
+        reply_markup=mailing_creation_messages_keyboard(mailing_id, messages),
+    )
+
+
 @router.message(CreateMailingStates.waiting_message_text, F.photo)
 async def process_create_message_photo(
     message: Message, state: FSMContext, db: Database, album: list[Message] = None
@@ -839,6 +949,7 @@ async def process_create_message_photo(
 
     messages_to_process = album or [message]
     caption = data.get("pending_caption")
+    caption_entities_json = data.get("pending_caption_entities")
 
     for msg in messages_to_process:
         if len(pending_photos) >= 10:
@@ -847,9 +958,11 @@ async def process_create_message_photo(
         if photo_path:
             pending_photos.append(photo_path)
         if caption is None and msg.caption:
-            caption = html_decoration.unparse(msg.caption, msg.caption_entities or []).strip()
+            caption = (msg.caption or "").strip()
+            caption_entities_json = serialize_entities(msg.caption_entities)
 
-    await state.update_data(pending_photos=pending_photos, pending_caption=caption)
+    await state.update_data(pending_photos=pending_photos, pending_caption=caption,
+                            pending_caption_entities=caption_entities_json)
 
     if len(pending_photos) >= 10:
         await message.answer(
@@ -867,18 +980,20 @@ async def process_create_message_photo(
 
 @router.message(CreateMailingStates.waiting_message_text)
 async def process_create_message_text(message: Message, state: FSMContext, db: Database):
-    text = (message.html_text if message.text else "").strip()
+    text = (message.text or "").strip()
     if not text:
         await message.answer("❌ Отправьте текст или фото.")
         return
+    entities_json = serialize_entities(message.entities)
     data = await state.get_data()
     mailing_id = data["mailing_id"]
     pending_photos = data.get("pending_photos", [])
 
     if pending_photos:
-        # Text sent while collecting photos — use as caption and save
-        await db.add_mailing_message(mailing_id, text, photo_paths=pending_photos)
-        await state.update_data(pending_photos=[], pending_caption=None)
+        await db.add_mailing_message(mailing_id, text, photo_paths=pending_photos,
+                                     entities_json=entities_json)
+        await state.update_data(pending_photos=[], pending_caption=None,
+                                pending_caption_entities=None)
         await state.set_state(CreateMailingStates.adding_messages)
         messages = await db.get_mailing_messages(mailing_id)
         await message.answer(
@@ -887,7 +1002,7 @@ async def process_create_message_text(message: Message, state: FSMContext, db: D
             reply_markup=mailing_creation_messages_keyboard(mailing_id, messages),
         )
     else:
-        await db.add_mailing_message(mailing_id, text)
+        await db.add_mailing_message(mailing_id, text, entities_json=entities_json)
         await state.set_state(CreateMailingStates.adding_messages)
         messages = await db.get_mailing_messages(mailing_id)
         await message.answer(
@@ -908,8 +1023,11 @@ async def callback_create_save_photos(callback: CallbackQuery, state: FSMContext
         return
 
     caption = data.get("pending_caption") or ""
-    await db.add_mailing_message(mailing_id, caption, photo_paths=pending_photos)
-    await state.update_data(pending_photos=[], pending_caption=None)
+    entities_json = data.get("pending_caption_entities")
+    await db.add_mailing_message(mailing_id, caption, photo_paths=pending_photos,
+                                 entities_json=entities_json)
+    await state.update_data(pending_photos=[], pending_caption=None,
+                            pending_caption_entities=None)
     await state.set_state(CreateMailingStates.adding_messages)
 
     messages = await db.get_mailing_messages(mailing_id)

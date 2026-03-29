@@ -84,11 +84,23 @@ def account_payment_keyboard(pay_url: str, invoice_id: str) -> InlineKeyboardMar
     return builder.as_markup()
 
 
-def add_account_method_keyboard() -> InlineKeyboardMarkup:
+def add_account_proxy_keyboard() -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
-    builder.row(InlineKeyboardButton(text="📱 Добавить по номеру телефона", callback_data="add_account_phone"))
-    builder.row(InlineKeyboardButton(text="🌐 Добавить с прокси SOCKS5", callback_data="add_account_with_proxy"))
-    builder.row(InlineKeyboardButton(text="◀️ Назад", callback_data="accounts"))
+    builder.row(
+        InlineKeyboardButton(text="✅ Да, добавить прокси", callback_data="add_account_set_proxy"),
+        InlineKeyboardButton(text="➡️ Продолжить", callback_data="add_account_skip_proxy"),
+    )
+    builder.row(InlineKeyboardButton(text="❌ Отмена", callback_data="accounts"))
+    return builder.as_markup()
+
+
+def add_account_api_keyboard() -> InlineKeyboardMarkup:
+    builder = InlineKeyboardBuilder()
+    builder.row(
+        InlineKeyboardButton(text="✅ Да, ввести API", callback_data="add_account_set_api"),
+        InlineKeyboardButton(text="➡️ Продолжить", callback_data="add_account_skip_api"),
+    )
+    builder.row(InlineKeyboardButton(text="❌ Отмена", callback_data="accounts"))
     return builder.as_markup()
 
 
@@ -184,6 +196,8 @@ def delete_mailing_confirm_keyboard(mailing_id: int) -> InlineKeyboardMarkup:
 
 # === Mailing messages ===
 def _msg_button_preview(msg: MailingMessage) -> str:
+    if msg.is_forward:
+        return f"[Переслано] {msg.forward_peer} #{msg.forward_msg_id}"
     photo_count = len(msg.photo_paths)
     prefix = f"[{photo_count} Фото] " if photo_count > 1 else "[Фото] " if photo_count == 1 else ""
     text = _strip_html(msg.text or "")
@@ -198,9 +212,10 @@ def mailing_messages_keyboard(mailing_id: int, messages: list[MailingMessage]) -
         preview = _msg_button_preview(msg)
         builder.row(InlineKeyboardButton(text=f"🗑️ {preview}", callback_data=f"delete_msg:{msg.id}"))
     builder.row(
-        InlineKeyboardButton(text="➕ Добавить сообщение", callback_data=f"add_mailing_message:{mailing_id}"),
-        InlineKeyboardButton(text="◀️ Назад", callback_data=f"mailing:{mailing_id}"),
+        InlineKeyboardButton(text="➕ Текст/фото", callback_data=f"add_mailing_message:{mailing_id}"),
+        InlineKeyboardButton(text="📨 Переслать", callback_data=f"add_mailing_forward:{mailing_id}"),
     )
+    builder.row(InlineKeyboardButton(text="◀️ Назад", callback_data=f"mailing:{mailing_id}"))
     return builder.as_markup()
 
 
@@ -278,13 +293,12 @@ def mailing_creation_messages_keyboard(mailing_id: int, messages: list[MailingMe
     for msg in messages:
         preview = _msg_button_preview(msg)
         builder.row(InlineKeyboardButton(text=f"🗑️ {preview}", callback_data=f"create_delete_msg:{msg.id}"))
+    builder.row(
+        InlineKeyboardButton(text="➕ Текст/фото", callback_data=f"create_add_message:{mailing_id}"),
+        InlineKeyboardButton(text="📨 Переслать", callback_data=f"create_add_forward:{mailing_id}"),
+    )
     if messages:
-        builder.row(
-            InlineKeyboardButton(text="➕ Добавить сообщение", callback_data=f"create_add_message:{mailing_id}"),
-            InlineKeyboardButton(text="✅ Готово", callback_data=f"create_messages_done:{mailing_id}"),
-        )
-    else:
-        builder.row(InlineKeyboardButton(text="➕ Добавить сообщение", callback_data=f"create_add_message:{mailing_id}"))
+        builder.row(InlineKeyboardButton(text="✅ Готово", callback_data=f"create_messages_done:{mailing_id}"))
     builder.row(InlineKeyboardButton(text="❌ Отмена", callback_data=f"cancel_creation:{mailing_id}"))
     return builder.as_markup()
 

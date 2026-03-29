@@ -8,7 +8,7 @@ if __name__ == "__main__" and __package__ is None:
     sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
     __package__ = "bot"
 
-from aiogram import Bot, Dispatcher
+from aiogram import Bot, Dispatcher, BaseMiddleware
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
 from aiogram.fsm.storage.memory import MemoryStorage
@@ -20,6 +20,20 @@ from .middlewares.subscription import SubscriptionMiddleware
 from .middlewares.album import AlbumMiddleware
 from .userbot.manager import UserbotManager
 from .services import CryptoBotService, TonPaymentService, AutoresponderService, MailingService, SubscriptionCheckerService
+
+
+class ActivityMiddleware(BaseMiddleware):
+    def __init__(self, db):
+        self.db = db
+
+    async def __call__(self, handler, event, data):
+        from_user = getattr(event, "from_user", None)
+        if from_user and not from_user.is_bot:
+            try:
+                await self.db.update_last_activity(from_user.id)
+            except Exception:
+                pass
+        return await handler(event, data)
 
 
 logging.basicConfig(
@@ -35,8 +49,7 @@ async def main():
         sys.exit(1)
 
     if not config.CRYPTOBOT_TOKEN:
-        logger.error("CRYPTOBOT_TOKEN is not set in .env file")
-        sys.exit(1)
+        logger.warning("CRYPTOBOT_TOKEN is not set — payment features will be unavailable")
 
     os.makedirs("data", exist_ok=True)
     os.makedirs("sessions", exist_ok=True)
@@ -82,7 +95,9 @@ async def main():
     dp = Dispatcher(storage=MemoryStorage())
 
     dp.message.middleware(AlbumMiddleware())
+    dp.message.middleware(ActivityMiddleware(db))
     dp.message.middleware(SubscriptionMiddleware(db))
+    dp.callback_query.middleware(ActivityMiddleware(db))
     dp.callback_query.middleware(SubscriptionMiddleware(db))
 
     dp.include_router(setup_routers())

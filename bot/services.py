@@ -415,6 +415,54 @@ class AutoresponderService:
             logger.error(f"Sponsor check error for account {account.phone}: {e}")
 
 
+def _build_telethon_entities(entities_json: str) -> list:
+    """Convert serialized aiogram entities JSON to Telethon MessageEntity objects."""
+    from telethon.tl.types import (
+        MessageEntityBold, MessageEntityItalic, MessageEntityCode,
+        MessageEntityUnderline, MessageEntityStrike, MessageEntitySpoiler,
+        MessageEntityPre, MessageEntityTextUrl, MessageEntityCustomEmoji,
+        MessageEntityBlockquote,
+    )
+    TYPE_MAP = {
+        "bold":          MessageEntityBold,
+        "italic":        MessageEntityItalic,
+        "code":          MessageEntityCode,
+        "underline":     MessageEntityUnderline,
+        "strikethrough": MessageEntityStrike,
+        "spoiler":       MessageEntitySpoiler,
+    }
+    result = []
+    try:
+        items = json.loads(entities_json)
+    except Exception:
+        return result
+    for e in items:
+        t = e.get("type", "")
+        o = e.get("offset", 0)
+        l = e.get("length", 0)
+        if t in TYPE_MAP:
+            result.append(TYPE_MAP[t](offset=o, length=l))
+        elif t == "pre":
+            result.append(MessageEntityPre(offset=o, length=l,
+                                           language=e.get("language", "") or ""))
+        elif t == "text_link":
+            result.append(MessageEntityTextUrl(offset=o, length=l, url=e.get("url", "")))
+        elif t == "custom_emoji":
+            try:
+                result.append(MessageEntityCustomEmoji(
+                    offset=o, length=l,
+                    document_id=int(e["custom_emoji_id"])
+                ))
+            except (KeyError, ValueError):
+                pass
+        elif t == "blockquote":
+            try:
+                result.append(MessageEntityBlockquote(offset=o, length=l))
+            except TypeError:
+                pass
+    return result
+
+
 class MailingService:
     def __init__(self, db: Database, userbot_manager):
         self.db = db
@@ -465,6 +513,29 @@ class MailingService:
     async def delete_mailing(self, mailing_id: int):
         await self.stop_mailing(mailing_id)
         await self.db.delete_mailing(mailing_id)
+
+    async def _send_msg(self, client, target: str, msg, pm: Optional[str]) -> None:
+        """Send one mailing message to target (forward / text / photo)."""
+        if msg.is_forward:
+            await client.forward_messages(
+                target, [msg.forward_msg_id], from_peer=msg.forward_peer
+            )
+            return
+
+        entities = _build_telethon_entities(msg.entities_json) if msg.entities_json else None
+        text = msg.text or None
+        eff_pm = None if entities else pm  # use entities directly — skip parse_mode
+
+        photos = [p for p in msg.photo_paths if os.path.exists(p)]
+        if len(photos) > 1:
+            await client.send_file(target, photos, caption=text, parse_mode=eff_pm,
+                                   formatting_entities=entities)
+        elif len(photos) == 1:
+            await client.send_file(target, photos[0], caption=text, parse_mode=eff_pm,
+                                   formatting_entities=entities)
+        else:
+            await client.send_message(target, text, parse_mode=eff_pm,
+                                      formatting_entities=entities)
 
     async def _start_mailing_task(self, mailing_id: int):
         if mailing_id in self._tasks:
@@ -529,13 +600,7 @@ class MailingService:
                             pm = None
 
                         try:
-                            photos = [p for p in msg.photo_paths if os.path.exists(p)]
-                            if len(photos) > 1:
-                                await client.send_file(target, photos, caption=msg.text or None, parse_mode=pm)
-                            elif len(photos) == 1:
-                                await client.send_file(target, photos[0], caption=msg.text or None, parse_mode=pm)
-                            else:
-                                await client.send_message(target, msg.text, parse_mode=pm)
+                            await self._send_msg(client, target, msg, pm)
                             logger.info(f"Mailing {mailing_id} sent to {target}")
                             await self.db.update_target_last_sent(target_obj.id)
                             sent_any = True
@@ -667,13 +732,7 @@ class MailingService:
             return False
 
         try:
-            photos = [p for p in msg.photo_paths if os.path.exists(p)]
-            if len(photos) > 1:
-                await client.send_file(target, photos, caption=msg.text or None, parse_mode=pm)
-            elif len(photos) == 1:
-                await client.send_file(target, photos[0], caption=msg.text or None, parse_mode=pm)
-            else:
-                await client.send_message(target, msg.text, parse_mode=pm)
+            await self._send_msg(client, target, msg, pm)
             await self.db.update_target_last_sent(target_obj.id)
             logger.info(f"Mailing {mailing_id}: sent to '{target}' after auto-join")
             return True
