@@ -326,10 +326,10 @@ async def process_edit_forward_message(message: Message, state: FSMContext, db: 
     from aiogram.types import MessageOriginChannel, MessageOriginChat
     origin = message.forward_origin
     if isinstance(origin, MessageOriginChannel):
-        peer = str(origin.chat.id)
+        peer = f"@{origin.chat.username}" if origin.chat.username else str(origin.chat.id)
         msg_id = origin.message_id
     elif isinstance(origin, MessageOriginChat):
-        peer = str(origin.sender_chat.id)
+        peer = f"@{origin.sender_chat.username}" if origin.sender_chat.username else str(origin.sender_chat.id)
         msg_id = origin.message_id
     else:
         await message.answer(
@@ -345,7 +345,7 @@ async def process_edit_forward_message(message: Message, state: FSMContext, db: 
     messages = await db.get_mailing_messages(mailing_id)
     await message.answer(
         f"✅ Пересылка сохранена!\n📌 Источник: {peer} / сообщение #{msg_id}\n"
-        f"Всього записів: {len(messages)}",
+        f"Всего записей: {len(messages)}",
         reply_markup=mailing_messages_keyboard(mailing_id, messages),
     )
 
@@ -915,10 +915,10 @@ async def process_create_forward_message(message: Message, state: FSMContext, db
     from aiogram.types import MessageOriginChannel, MessageOriginChat
     origin = message.forward_origin
     if isinstance(origin, MessageOriginChannel):
-        peer = str(origin.chat.id)
+        peer = f"@{origin.chat.username}" if origin.chat.username else str(origin.chat.id)
         msg_id = origin.message_id
     elif isinstance(origin, MessageOriginChat):
-        peer = str(origin.sender_chat.id)
+        peer = f"@{origin.sender_chat.username}" if origin.sender_chat.username else str(origin.sender_chat.id)
         msg_id = origin.message_id
     else:
         await message.answer(
@@ -934,7 +934,7 @@ async def process_create_forward_message(message: Message, state: FSMContext, db
     messages = await db.get_mailing_messages(mailing_id)
     await message.answer(
         f"✅ Пересылка сохранена!\n📌 Источник: {peer} / сообщение #{msg_id}\n"
-        f"Всього записів: {len(messages)}\n\nДодайте ще або натисніть «Готово»:",
+        f"Всего записей: {len(messages)}\n\nДодайте ще або натисніть «Готово»:",
         reply_markup=mailing_creation_messages_keyboard(mailing_id, messages),
     )
 

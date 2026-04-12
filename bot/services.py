@@ -514,11 +514,25 @@ class MailingService:
         await self.stop_mailing(mailing_id)
         await self.db.delete_mailing(mailing_id)
 
+    async def _has_chat_activity(self, client, target: str, since: datetime, my_id: int) -> bool:
+        """Повертає True якщо хтось (крім бота) писав у чат після since."""
+        try:
+            msgs = await client.get_messages(target, limit=10)
+            for m in msgs:
+                msg_time = m.date.replace(tzinfo=None) if m.date.tzinfo else m.date
+                if msg_time > since and m.sender_id != my_id:
+                    return True
+            return False
+        except Exception:
+            return True  # якщо не можемо перевірити — дозволяємо відправку
+
     async def _send_msg(self, client, target: str, msg, pm: Optional[str]) -> None:
         """Send one mailing message to target (forward / text / photo)."""
         if msg.is_forward:
+            peer = int(msg.forward_peer) if msg.forward_peer.lstrip('-').isdigit() else msg.forward_peer
+            entity = await client.get_entity(peer)
             await client.forward_messages(
-                target, [msg.forward_msg_id], from_peer=msg.forward_peer
+                target, [msg.forward_msg_id], from_peer=entity
             )
             return
 
@@ -581,6 +595,7 @@ class MailingService:
 
                     now = datetime.utcnow()
                     sent_any = False
+                    me = await client.get_me()
 
                     for target_obj in targets:
                         # Each target uses its own interval or falls back to mailing default
@@ -593,6 +608,13 @@ class MailingService:
                         target = target_obj.chat_identifier
                         if not target.startswith('-') and not target.startswith('@') and not target.isdigit():
                             target = f"@{target}"
+
+                        # Перевіряємо активність у чаті після останньої відправки
+                        if target_obj.last_sent_at is not None:
+                            has_activity = await self._has_chat_activity(client, target, target_obj.last_sent_at, me.id)
+                            if not has_activity:
+                                logger.info(f"Mailing {mailing_id}: no activity in {target} since last send, skipping")
+                                continue
 
                         msg = random.choice(messages)
                         pm = msg.parse_mode or 'html'

@@ -444,6 +444,10 @@ def admin_keyboard() -> InlineKeyboardMarkup:
         InlineKeyboardButton(text="⚙️ Настройки", callback_data="admin_settings"),
         InlineKeyboardButton(text="💸 Запросы вывода", callback_data="admin_withdrawals"),
     )
+    builder.row(
+        InlineKeyboardButton(text="📤 Экспорт БД", callback_data="admin_export_db"),
+        InlineKeyboardButton(text="📥 Импорт БД", callback_data="admin_import_db"),
+    )
     builder.row(InlineKeyboardButton(text="◀️ Главное меню", callback_data="main_menu"))
     return builder.as_markup()
 

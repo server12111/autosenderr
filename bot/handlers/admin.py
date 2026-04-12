@@ -1,9 +1,13 @@
+import os
+import shutil
+import tempfile
 from datetime import datetime, timedelta
 from aiogram import Router, F
-from aiogram.types import Message, CallbackQuery
+from aiogram.types import Message, CallbackQuery, FSInputFile
 from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
+import aiosqlite
 
 from ..database.db import Database
 from ..keyboards.inline import (
@@ -32,6 +36,7 @@ class AdminStates(StatesGroup):
     waiting_min_withdraw = State()
     waiting_channel_id = State()
     waiting_card_manager = State()
+    waiting_db_file = State()
 
 
 def is_admin(user_id: int) -> bool:
@@ -685,3 +690,91 @@ async def callback_admin_back(callback: CallbackQuery):
         reply_markup=admin_keyboard(),
     )
     await callback.answer()
+
+
+@router.callback_query(F.data == "admin_export_db")
+async def callback_admin_export_db(callback: CallbackQuery, db: Database):
+    if not is_admin(callback.from_user.id):
+        await callback.answer("Нет доступа", show_alert=True)
+        return
+    await callback.answer()
+    await callback.message.answer("⏳ Создаю резервную копию БД...")
+    tmp = tempfile.mktemp(suffix=".db")
+    try:
+        async with aiosqlite.connect(db.db_path) as src:
+            await src.execute(f"VACUUM INTO '{tmp}'")
+        await callback.message.answer_document(
+            FSInputFile(tmp, filename="bot_backup.db"),
+            caption=f"📦 Резервная копия БД\n🕐 {datetime.now().strftime('%d.%m.%Y %H:%M')}",
+        )
+    finally:
+        if os.path.exists(tmp):
+            os.remove(tmp)
+
+
+@router.callback_query(F.data == "admin_import_db")
+async def callback_admin_import_db(callback: CallbackQuery, state: FSMContext):
+    if not is_admin(callback.from_user.id):
+        await callback.answer("Нет доступа", show_alert=True)
+        return
+    await state.set_state(AdminStates.waiting_db_file)
+    await callback.message.answer(
+        "📥 Отправьте файл базы данных (.db)\n\n"
+        "⚠️ Текущая база будет полностью заменена!",
+        reply_markup=cancel_keyboard(),
+    )
+    await callback.answer()
+
+
+@router.message(AdminStates.waiting_db_file, F.document)
+async def process_import_db(message: Message, state: FSMContext, db: Database):
+    doc = message.document
+    if not doc.file_name or not doc.file_name.endswith(".db"):
+        await message.answer("❌ Файл должен иметь расширение .db")
+        return
+
+    tmp = tempfile.mktemp(suffix=".db")
+    try:
+        from io import BytesIO
+        file_info = await message.bot.get_file(doc.file_id)
+        buf = BytesIO()
+        await message.bot.download_file(file_info.file_path, destination=buf)
+        with open(tmp, "wb") as f:
+            f.write(buf.getvalue())
+
+        # Проверяем magic bytes SQLite
+        with open(tmp, "rb") as f:
+            header = f.read(16)
+        if b"SQLite format 3" not in header:
+            await message.answer(f"❌ Файл не является базой данных SQLite.\nПолучено: {header[:16]}")
+            return
+
+        await state.clear()
+        await message.answer("⏳ Заменяю базу данных...")
+
+        await db.close()
+
+        # Удаляем WAL файлы если есть
+        for ext in ("", "-shm", "-wal"):
+            path = db.db_path + ext
+            if os.path.exists(path):
+                os.remove(path)
+
+        shutil.copy2(tmp, db.db_path)
+        await db.connect()
+
+        await message.answer(
+            "✅ База данных успешно заменена!\n"
+            "Все данные обновлены.",
+            reply_markup=admin_keyboard(),
+        )
+    except Exception as e:
+        # Если что-то пошло не так — пробуем переподключиться к старой/новой БД
+        try:
+            await db.connect()
+        except Exception:
+            pass
+        await message.answer(f"❌ Ошибка при импорте: {e}")
+    finally:
+        if os.path.exists(tmp):
+            os.remove(tmp)
