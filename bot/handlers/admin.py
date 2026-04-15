@@ -778,3 +778,53 @@ async def process_import_db(message: Message, state: FSMContext, db: Database):
     finally:
         if os.path.exists(tmp):
             os.remove(tmp)
+
+
+@router.callback_query(F.data == "admin_cleanup_accounts")
+async def callback_admin_cleanup_accounts(callback: CallbackQuery, db: Database):
+    if not is_admin(callback.from_user.id):
+        await callback.answer("Нет доступа", show_alert=True)
+        return
+
+    from aiogram.utils.keyboard import InlineKeyboardBuilder
+    from aiogram.types import InlineKeyboardButton
+    count = await db.count_inactive_accounts()
+
+    if count == 0:
+        await callback.message.edit_text(
+            "✅ Мёртвых аккаунтов нет — база чистая.",
+            reply_markup=admin_keyboard(),
+        )
+        await callback.answer()
+        return
+
+    builder = InlineKeyboardBuilder()
+    builder.row(
+        InlineKeyboardButton(text=f"🗑 Удалить {count} аккаунтов", callback_data="admin_cleanup_accounts_confirm"),
+        InlineKeyboardButton(text="◀️ Отмена", callback_data="admin_panel"),
+    )
+
+    await callback.message.edit_text(
+        f"⚠️ <b>Очистка мёртвых аккаунтов</b>\n\n"
+        f"Найдено неактивных аккаунтов: <b>{count}</b>\n\n"
+        f"Это аккаунты с истёкшими сессиями, забаненные или использованные с двух IP.\n"
+        f"Они будут <b>удалены из базы навсегда</b>.\n\n"
+        f"Подтвердить удаление?",
+        reply_markup=builder.as_markup(),
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data == "admin_cleanup_accounts_confirm")
+async def callback_admin_cleanup_accounts_confirm(callback: CallbackQuery, db: Database):
+    if not is_admin(callback.from_user.id):
+        await callback.answer("Нет доступа", show_alert=True)
+        return
+
+    deleted = await db.purge_inactive_accounts()
+    await callback.message.edit_text(
+        f"✅ Удалено <b>{deleted}</b> мёртвых аккаунтов.\n\n"
+        f"База данных очищена. При следующем перезапуске бот стартует быстрее.",
+        reply_markup=admin_keyboard(),
+    )
+    await callback.answer()

@@ -107,8 +107,10 @@ class UserbotManager:
             await client.connect()
 
             if not await client.is_user_authorized():
-                logger.warning(f"Account {account.phone} is not authorized")
+                logger.warning(f"Account {account.phone} is not authorized — deactivating")
                 await client.disconnect()
+                await asyncio.sleep(0)
+                await self.db.deactivate_account(account.id)
                 return None
 
             me = await client.get_me()
@@ -147,6 +149,7 @@ class UserbotManager:
             await self._handle_account_problem(account.id, e)
             try:
                 await client.disconnect()
+                await asyncio.sleep(0)
             except Exception:
                 pass
             return None
@@ -154,6 +157,7 @@ class UserbotManager:
             logger.error(f"Error starting client for {account.phone}: {e}")
             try:
                 await client.disconnect()
+                await asyncio.sleep(0)
             except Exception:
                 pass
             return None
@@ -266,8 +270,19 @@ class UserbotManager:
 
     async def start_all_clients(self):
         accounts = await self.db.get_all_active_accounts()
-        for account in accounts:
-            await self.start_client(account)
+        if not accounts:
+            logger.info("No active accounts to start")
+            return
+
+        semaphore = asyncio.Semaphore(5)
+
+        async def _start(account):
+            async with semaphore:
+                return await self.start_client(account)
+
+        results = await asyncio.gather(*[_start(a) for a in accounts], return_exceptions=True)
+        started = sum(1 for r in results if r is not None and not isinstance(r, Exception))
+        logger.info(f"Startup complete: {started}/{len(accounts)} accounts active")
 
     async def stop_all_clients(self):
         for account_id in list(self._clients.keys()):

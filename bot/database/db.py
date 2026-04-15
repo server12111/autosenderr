@@ -453,6 +453,17 @@ class Database:
         async with self._conn.execute("SELECT * FROM accounts WHERE is_active = 1") as cur:
             return [self._row_to_account(r) for r in await cur.fetchall()]
 
+    async def count_inactive_accounts(self) -> int:
+        async with self._conn.execute("SELECT COUNT(*) FROM accounts WHERE is_active = 0") as cur:
+            return (await cur.fetchone())[0]
+
+    async def purge_inactive_accounts(self) -> int:
+        """Permanently delete all inactive accounts. Returns count deleted."""
+        count = await self.count_inactive_accounts()
+        await self._conn.execute("DELETE FROM accounts WHERE is_active = 0")
+        await self._conn.commit()
+        return count
+
     # === Mailings ===
     async def get_mailing(self, mailing_id: int) -> Optional[Mailing]:
         async with self._conn.execute("SELECT * FROM mailings WHERE id = ?", (mailing_id,)) as cur:
