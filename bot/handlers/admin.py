@@ -1,9 +1,15 @@
+import io
 import os
 import shutil
 import tempfile
 from datetime import datetime, timedelta
+
+import matplotlib
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
+
 from aiogram import Router, F
-from aiogram.types import Message, CallbackQuery, FSInputFile
+from aiogram.types import Message, CallbackQuery, FSInputFile, BufferedInputFile
 from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
@@ -12,6 +18,7 @@ import aiosqlite
 from ..database.db import Database
 from ..keyboards.inline import (
     admin_keyboard,
+    admin_stats_period_keyboard,
     admin_promocodes_keyboard,
     admin_promo_list_keyboard,
     admin_settings_keyboard,
@@ -53,69 +60,106 @@ async def cmd_admin(message: Message, db: Database):
     )
 
 
-def _build_hourly_chart(data: list) -> str:
-    max_val = max((cnt for _, cnt in data), default=0) or 1
-    bar_max = 10
-    lines = []
-    for h, cnt in data:
-        filled = round(cnt / max_val * bar_max)
-        bar = "█" * filled + "░" * (bar_max - filled)
-        lines.append(f"{h:02d}:00 {bar} {cnt}")
-    return "\n".join(lines)
+_PERIOD_LABELS = {
+    "day": "День",
+    "week": "Неделя",
+    "month": "Месяц",
+    "year": "Год",
+}
 
 
-@router.callback_query(F.data == "admin_stats")
-async def callback_admin_stats(callback: CallbackQuery, db: Database):
-    if not is_admin(callback.from_user.id):
-        await callback.answer("Нет доступа", show_alert=True)
-        return
+def _build_chart_image(data: list, title: str) -> io.BytesIO:
+    labels = [d[0] for d in data] or ["—"]
+    values = [d[1] for d in data] or [0]
+    fig, ax = plt.subplots(figsize=(10, 4))
+    fig.patch.set_facecolor("#1e1e2e")
+    ax.set_facecolor("#1e1e2e")
+    bars = ax.bar(range(len(labels)), values, color="#7c9eff", width=0.6)
+    ax.set_xticks(range(len(labels)))
+    ax.set_xticklabels(labels, rotation=45, ha="right", color="white", fontsize=8)
+    ax.tick_params(colors="white")
+    for spine in ax.spines.values():
+        spine.set_color("#444")
+    ax.set_title(title, color="white", fontsize=12, pad=10)
+    ax.set_ylabel("Пользователи", color="white")
+    for bar, val in zip(bars, values):
+        if val > 0:
+            ax.text(
+                bar.get_x() + bar.get_width() / 2,
+                bar.get_height() + 0.1,
+                str(val),
+                ha="center", va="bottom", color="white", fontsize=8,
+            )
+    plt.tight_layout()
+    buf = io.BytesIO()
+    plt.savefig(buf, format="png", dpi=120, facecolor=fig.get_facecolor())
+    plt.close(fig)
+    buf.seek(0)
+    return buf
 
+
+async def _send_stats(callback: CallbackQuery, db: Database, period: str, bot):
     users = await db.get_all_users()
     total_users = len(users)
     now = datetime.now()
-
     active_subs = sum(1 for u in users if u.subscription_end and u.subscription_end > now)
-
-    # New users by period
-    day_ago = now - timedelta(days=1)
-    week_ago = now - timedelta(days=7)
-    month_ago = now - timedelta(days=30)
-    new_today = sum(1 for u in users if u.created_at and u.created_at > day_ago)
-    new_week = sum(1 for u in users if u.created_at and u.created_at > week_ago)
-    new_month = sum(1 for u in users if u.created_at and u.created_at > month_ago)
-
     accounts = await db.get_all_active_accounts()
-    total_accounts = len(accounts)
-
     mailings = await db.get_active_mailings()
-    active_mailings = len(mailings)
     total_mailings = await db.count_all_mailings()
-
     revenue = await db.get_revenue_by_currency()
     paid_subs = await db.count_paid_subscriptions()
-    hourly = await db.get_hourly_activity(24)
-    chart = _build_hourly_chart(hourly)
 
     revenue_parts = [f"{amt:.2f} {cur}" for cur, amt in revenue.items() if amt > 0]
     revenue_line = " | ".join(revenue_parts) if revenue_parts else "0.00 USDT"
 
-    text = (
-        "📊 Статистика бота\n\n"
-        f"👥 Всего пользователей: {total_users}\n"
-        f"  • За сегодня: +{new_today}\n"
-        f"  • За 7 дней: +{new_week}\n"
-        f"  • За 30 дней: +{new_month}\n\n"
-        f"✅ Активных подписок: {active_subs}\n"
-        f"💰 Всего продано подписок: {paid_subs}\n"
-        f"💵 Общий доход: {revenue_line}\n\n"
-        f"📱 Аккаунтов: {total_accounts}\n"
-        f"📋 Активных рассылок: {active_mailings}\n"
-        f"📋 Всего рассылок: {total_mailings}\n\n"
-        f"📊 Активность по часам (24ч):\n<code>{chart}</code>\n"
+    chart_data = await db.get_registrations_by_period(period)
+    period_label = _PERIOD_LABELS.get(period, period)
+    chart_buf = _build_chart_image(chart_data, f"Новые пользователи — {period_label}")
+
+    caption = (
+        f"📊 <b>Статистика бота</b> — {period_label}\n\n"
+        f"👥 Всего пользователей: <b>{total_users}</b>\n"
+        f"✅ Активных подписок: <b>{active_subs}</b>\n"
+        f"💰 Продано подписок: <b>{paid_subs}</b>\n"
+        f"💵 Доход: <b>{revenue_line}</b>\n\n"
+        f"📱 Аккаунтов: <b>{len(accounts)}</b>\n"
+        f"📋 Активных рассылок: <b>{len(mailings)}</b>\n"
+        f"📋 Всего рассылок: <b>{total_mailings}</b>"
     )
 
-    await callback.message.edit_text(text, parse_mode="HTML", reply_markup=admin_keyboard())
+    photo = BufferedInputFile(chart_buf.read(), filename="stats.png")
+    keyboard = admin_stats_period_keyboard(active=period)
+
+    await callback.message.delete()
+    await bot.send_photo(
+        chat_id=callback.from_user.id,
+        photo=photo,
+        caption=caption,
+        parse_mode="HTML",
+        reply_markup=keyboard,
+    )
+
+
+@router.callback_query(F.data == "admin_stats")
+async def callback_admin_stats(callback: CallbackQuery, db: Database, bot):
+    if not is_admin(callback.from_user.id):
+        await callback.answer("Нет доступа", show_alert=True)
+        return
     await callback.answer()
+    await _send_stats(callback, db, "day", bot)
+
+
+@router.callback_query(F.data.startswith("admin_stats:"))
+async def callback_admin_stats_period(callback: CallbackQuery, db: Database, bot):
+    if not is_admin(callback.from_user.id):
+        await callback.answer("Нет доступа", show_alert=True)
+        return
+    period = callback.data.split(":")[1]
+    if period not in _PERIOD_LABELS:
+        await callback.answer()
+        return
+    await callback.answer()
+    await _send_stats(callback, db, period, bot)
 
 
 @router.callback_query(F.data == "admin_broadcast")

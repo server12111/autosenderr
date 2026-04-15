@@ -453,6 +453,26 @@ class Database:
         async with self._conn.execute("SELECT * FROM accounts WHERE is_active = 1") as cur:
             return [self._row_to_account(r) for r in await cur.fetchall()]
 
+    async def get_registrations_by_period(self, period: str) -> list:
+        if period == "day":
+            sql = ("SELECT strftime('%H:00', created_at) as label, COUNT(*) as cnt "
+                   "FROM users WHERE created_at >= datetime('now', '-1 day') "
+                   "GROUP BY label ORDER BY label")
+        elif period == "week":
+            sql = ("SELECT strftime('%d.%m', created_at) as label, COUNT(*) as cnt "
+                   "FROM users WHERE created_at >= datetime('now', '-7 days') "
+                   "GROUP BY label ORDER BY label")
+        elif period == "month":
+            sql = ("SELECT strftime('%d.%m', created_at) as label, COUNT(*) as cnt "
+                   "FROM users WHERE created_at >= datetime('now', '-30 days') "
+                   "GROUP BY label ORDER BY label")
+        else:  # year
+            sql = ("SELECT strftime('%m.%Y', created_at) as label, COUNT(*) as cnt "
+                   "FROM users WHERE created_at >= datetime('now', '-1 year') "
+                   "GROUP BY label ORDER BY label")
+        async with self._conn.execute(sql) as cur:
+            return [(r["label"], r["cnt"]) for r in await cur.fetchall()]
+
     async def count_inactive_accounts(self) -> int:
         async with self._conn.execute("SELECT COUNT(*) FROM accounts WHERE is_active = 0") as cur:
             return (await cur.fetchone())[0]

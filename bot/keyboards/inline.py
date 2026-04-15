@@ -430,6 +430,20 @@ def channel_check_keyboard(channels: list[RequiredChannel]) -> InlineKeyboardMar
 
 
 # === Admin ===
+def admin_stats_period_keyboard(active: str = "day") -> InlineKeyboardMarkup:
+    periods = [("День", "day"), ("Неделя", "week"), ("Месяц", "month"), ("Год", "year")]
+    builder = InlineKeyboardBuilder()
+    builder.row(*[
+        InlineKeyboardButton(
+            text=f"▶ {label}" if active == k else label,
+            callback_data=f"admin_stats:{k}",
+        )
+        for label, k in periods
+    ])
+    builder.row(InlineKeyboardButton(text="◀️ Назад", callback_data="admin_panel"))
+    return builder.as_markup()
+
+
 def admin_keyboard() -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
     builder.row(
