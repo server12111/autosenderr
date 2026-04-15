@@ -1,48 +1,12 @@
 import asyncio
 import logging
 import os
-import signal
 import sys
 
 # Allow running as `python bot/main.py` directly
 if __name__ == "__main__" and __package__ is None:
     sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
     __package__ = "bot"
-
-
-_PID_FILE = "data/bot.pid"
-
-
-def _kill_previous_instance():
-    """Kill previous bot process if PID file exists."""
-    if not os.path.exists(_PID_FILE):
-        return
-    try:
-        with open(_PID_FILE) as f:
-            old_pid = int(f.read().strip())
-        if old_pid == os.getpid():
-            return
-        os.kill(old_pid, signal.SIGTERM)
-        import time
-        time.sleep(2)
-        try:
-            os.kill(old_pid, signal.SIGKILL)
-        except ProcessLookupError:
-            pass
-        print(f"Killed previous instance (PID {old_pid})")
-    except (ValueError, ProcessLookupError, PermissionError):
-        pass
-    finally:
-        try:
-            os.remove(_PID_FILE)
-        except FileNotFoundError:
-            pass
-
-
-def _write_pid():
-    os.makedirs("data", exist_ok=True)
-    with open(_PID_FILE, "w") as f:
-        f.write(str(os.getpid()))
 
 from aiogram import Bot, Dispatcher, BaseMiddleware
 from aiogram.client.default import DefaultBotProperties
@@ -80,9 +44,6 @@ logger = logging.getLogger(__name__)
 
 
 async def main():
-    _kill_previous_instance()
-    _write_pid()
-
     if not config.BOT_TOKEN:
         logger.error("BOT_TOKEN is not set in .env file")
         sys.exit(1)
@@ -168,10 +129,6 @@ async def main():
         await userbot_manager.stop_all_clients()
         await db.close()
         await bot.session.close()
-        try:
-            os.remove(_PID_FILE)
-        except FileNotFoundError:
-            pass
         logger.info("Bot stopped")
 
 

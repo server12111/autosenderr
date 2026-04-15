@@ -108,6 +108,7 @@ class UserbotManager:
 
             if not await client.is_user_authorized():
                 logger.warning(f"Account {account.phone} is not authorized")
+                await client.disconnect()
                 return None
 
             me = await client.get_me()
@@ -142,8 +143,19 @@ class UserbotManager:
             logger.info(f"Started client for account {account.phone} (ID: {account.id})")
             return client
 
+        except _BAN_ERRORS as e:
+            await self._handle_account_problem(account.id, e)
+            try:
+                await client.disconnect()
+            except Exception:
+                pass
+            return None
         except Exception as e:
             logger.error(f"Error starting client for {account.phone}: {e}")
+            try:
+                await client.disconnect()
+            except Exception:
+                pass
             return None
 
     async def stop_client(self, account_id: int):
