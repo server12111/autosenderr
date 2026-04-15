@@ -1,3 +1,4 @@
+import asyncio
 import time
 from aiogram import Router, F
 from aiogram.types import Message, CallbackQuery
@@ -445,18 +446,30 @@ async def process_phone(
     )
 
     try:
-        await client.connect()
-        await client.send_code_request(phone)
-        await state.update_data(client=client, entered_code="")
+        await asyncio.wait_for(client.connect(), timeout=20)
+
+        sent = await asyncio.wait_for(client.send_code_request(phone), timeout=30)
+
+        await state.update_data(client=client, entered_code="", phone_code_hash=sent.phone_code_hash)
 
         await message.answer(
             "📱 Код отправлен!\n\n"
+            "📲 Проверьте приложение Telegram на других ваших устройствах или Telegram Web — "
+            "код придёт туда.\n\n"
             "🔢 Введите код с помощью кнопок:\n\n"
             "Код: ▫️▫️▫️▫️▫️",
             reply_markup=code_input_keyboard(),
         )
         await state.set_state(AddAccountStates.waiting_code)
 
+    except asyncio.TimeoutError:
+        await client.disconnect()
+        await message.answer(
+            "❌ Превышено время ожидания (30 сек).\n\n"
+            "Telegram не отвечает. Проверьте интернет-соединение или прокси и попробуйте снова.",
+            reply_markup=main_menu_keyboard(),
+        )
+        await state.clear()
     except Exception as e:
         await client.disconnect()
         await message.answer(
