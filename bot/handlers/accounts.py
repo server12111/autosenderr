@@ -443,6 +443,9 @@ async def process_phone(
         app_version=device["app_version"],
         lang_code="uk",
         system_lang_code="uk-UA",
+        connection_retries=1,
+        retry_delay=1,
+        timeout=15,
     )
 
     try:
@@ -472,11 +475,20 @@ async def process_phone(
         await state.clear()
     except Exception as e:
         await client.disconnect()
-        await message.answer(
-            f"❌ Ошибка при отправке кода: {e}\n\n"
-            "Проверьте номер телефона.",
-            reply_markup=main_menu_keyboard(),
-        )
+        err = str(e)
+        if "Connection to Telegram failed" in err or "ConnectionError" in type(e).__name__:
+            msg = (
+                "❌ Не удалось подключиться к Telegram.\n\n"
+                "Возможные причины:\n"
+                "• Нет интернета на сервере\n"
+                "• Telegram заблокирован — попробуйте добавить прокси\n\n"
+                "Попробуйте снова позже."
+            )
+        elif "phone" in err.lower() or "invalid" in err.lower():
+            msg = f"❌ Неверный номер телефона: {e}\n\nПроверьте формат: +380991234567"
+        else:
+            msg = f"❌ Ошибка при отправке кода: {e}\n\nПопробуйте снова."
+        await message.answer(msg, reply_markup=main_menu_keyboard())
         await state.clear()
 
 
