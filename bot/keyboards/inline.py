@@ -69,7 +69,7 @@ def delete_account_confirm_keyboard(account_id: int) -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
     builder.row(
         InlineKeyboardButton(text="✅ Да, удалить", callback_data=f"confirm_delete_account:{account_id}"),
-        InlineKeyboardButton(text="❌ Отмена", callback_data=f"account:{account_id}"),
+        InlineKeyboardButton(text="◀️ Назад", callback_data=f"account:{account_id}"),
     )
     return builder.as_markup()
 
@@ -90,7 +90,7 @@ def add_account_proxy_keyboard() -> InlineKeyboardMarkup:
         InlineKeyboardButton(text="✅ Да, добавить прокси", callback_data="add_account_set_proxy"),
         InlineKeyboardButton(text="➡️ Продолжить", callback_data="add_account_skip_proxy"),
     )
-    builder.row(InlineKeyboardButton(text="❌ Отмена", callback_data="accounts"))
+    builder.row(InlineKeyboardButton(text="◀️ Назад", callback_data="accounts"))
     return builder.as_markup()
 
 
@@ -100,7 +100,7 @@ def add_account_api_keyboard() -> InlineKeyboardMarkup:
         InlineKeyboardButton(text="✅ Да, ввести API", callback_data="add_account_set_api"),
         InlineKeyboardButton(text="➡️ Продолжить", callback_data="add_account_skip_api"),
     )
-    builder.row(InlineKeyboardButton(text="❌ Отмена", callback_data="accounts"))
+    builder.row(InlineKeyboardButton(text="◀️ Назад", callback_data="accounts"))
     return builder.as_markup()
 
 
@@ -189,7 +189,7 @@ def delete_mailing_confirm_keyboard(mailing_id: int) -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
     builder.row(
         InlineKeyboardButton(text="✅ Да, удалить", callback_data=f"confirm_delete_mailing:{mailing_id}"),
-        InlineKeyboardButton(text="❌ Отмена", callback_data=f"mailing:{mailing_id}"),
+        InlineKeyboardButton(text="◀️ Назад", callback_data=f"mailing:{mailing_id}"),
     )
     return builder.as_markup()
 
@@ -235,7 +235,7 @@ def photo_collection_keyboard(mailing_id: int, photo_count: int, is_create: bool
     prefix = "create_" if is_create else "edit_"
     builder.row(
         InlineKeyboardButton(text=f"💾 Сохранить ({photo_count} фото)", callback_data=f"{prefix}save_photos:{mailing_id}"),
-        InlineKeyboardButton(text="❌ Отмена", callback_data="cancel"),
+        InlineKeyboardButton(text="◀️ Назад", callback_data="cancel"),
     )
     return builder.as_markup()
 
@@ -273,7 +273,7 @@ def select_account_keyboard(accounts: list[Account]) -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
     for acc in accounts:
         builder.row(InlineKeyboardButton(text=f"📱 {acc.display_name}", callback_data=f"select_account:{acc.id}"))
-    builder.row(InlineKeyboardButton(text="❌ Отмена", callback_data="mailings"))
+    builder.row(InlineKeyboardButton(text="◀️ Назад", callback_data="mailings"))
     return builder.as_markup()
 
 
@@ -299,7 +299,7 @@ def mailing_creation_messages_keyboard(mailing_id: int, messages: list[MailingMe
     )
     if messages:
         builder.row(InlineKeyboardButton(text="✅ Готово", callback_data=f"create_messages_done:{mailing_id}"))
-    builder.row(InlineKeyboardButton(text="❌ Отмена", callback_data=f"cancel_creation:{mailing_id}"))
+    builder.row(InlineKeyboardButton(text="◀️ Назад", callback_data=f"cancel_creation:{mailing_id}"))
     return builder.as_markup()
 
 
@@ -314,10 +314,10 @@ def mailing_creation_targets_keyboard(mailing_id: int, targets: list[MailingTarg
     if targets:
         builder.row(
             InlineKeyboardButton(text="✅ Готово", callback_data=f"create_targets_done:{mailing_id}"),
-            InlineKeyboardButton(text="❌ Отмена", callback_data=f"cancel_creation:{mailing_id}"),
+            InlineKeyboardButton(text="◀️ Назад", callback_data=f"cancel_creation:{mailing_id}"),
         )
     else:
-        builder.row(InlineKeyboardButton(text="❌ Отмена", callback_data=f"cancel_creation:{mailing_id}"))
+        builder.row(InlineKeyboardButton(text="◀️ Назад", callback_data=f"cancel_creation:{mailing_id}"))
     return builder.as_markup()
 
 
@@ -327,7 +327,7 @@ def active_hours_keyboard(mailing_id: int) -> InlineKeyboardMarkup:
         InlineKeyboardButton(text="⏭️ Пропустить (24/7)", callback_data=f"skip_hours:{mailing_id}"),
         InlineKeyboardButton(text="⏰ Настроить", callback_data=f"setup_hours:{mailing_id}"),
     )
-    builder.row(InlineKeyboardButton(text="❌ Отмена", callback_data=f"cancel_creation:{mailing_id}"))
+    builder.row(InlineKeyboardButton(text="◀️ Назад", callback_data=f"cancel_creation:{mailing_id}"))
     return builder.as_markup()
 
 
@@ -335,7 +335,7 @@ def launch_mailing_keyboard(mailing_id: int) -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
     builder.row(
         InlineKeyboardButton(text="🚀 Запустить рассылку", callback_data=f"launch_mailing:{mailing_id}"),
-        InlineKeyboardButton(text="❌ Отмена", callback_data=f"cancel_creation:{mailing_id}"),
+        InlineKeyboardButton(text="◀️ Назад", callback_data=f"cancel_creation:{mailing_id}"),
     )
     return builder.as_markup()
 
@@ -414,7 +414,7 @@ def referral_keyboard(can_withdraw: bool) -> InlineKeyboardMarkup:
 
 def withdraw_wallet_keyboard() -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
-    builder.row(InlineKeyboardButton(text="❌ Отмена", callback_data="referral"))
+    builder.row(InlineKeyboardButton(text="◀️ Назад", callback_data="referral"))
     return builder.as_markup()
 
 
@@ -440,7 +440,7 @@ def admin_stats_period_keyboard(active: str = "day") -> InlineKeyboardMarkup:
         )
         for label, k in periods
     ])
-    builder.row(InlineKeyboardButton(text="◀️ Назад", callback_data="admin_panel"))
+    builder.row(InlineKeyboardButton(text="◀️ Назад", callback_data="admin_back"))
     return builder.as_markup()
 
 
@@ -542,7 +542,7 @@ def admin_promo_list_keyboard(promocodes: list[Promocode]) -> InlineKeyboardMark
 
 def cancel_keyboard() -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
-    builder.row(InlineKeyboardButton(text="❌ Отмена", callback_data="cancel"))
+    builder.row(InlineKeyboardButton(text="◀️ Назад", callback_data="cancel"))
     return builder.as_markup()
 
 
@@ -570,7 +570,7 @@ def code_input_keyboard(current_code: str = "") -> InlineKeyboardMarkup:
         InlineKeyboardButton(text="⬅️", callback_data="code_backspace"),
     )
     builder.row(
-        InlineKeyboardButton(text="❌ Отмена", callback_data="cancel"),
+        InlineKeyboardButton(text="◀️ Назад", callback_data="cancel"),
         InlineKeyboardButton(text="✅ Подтвердить", callback_data="code_confirm"),
     )
     return builder.as_markup()

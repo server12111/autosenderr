@@ -4,7 +4,10 @@ from aiogram.types import Message, CallbackQuery
 from aiogram.fsm.context import FSMContext
 
 from ..database.db import Database
-from ..keyboards.inline import main_menu_keyboard, back_to_menu_keyboard, channel_check_keyboard
+from ..keyboards.inline import (
+    main_menu_keyboard, back_to_menu_keyboard, channel_check_keyboard,
+    accounts_keyboard, admin_keyboard, mailings_keyboard,
+)
 
 router = Router()
 
@@ -130,11 +133,39 @@ async def callback_help(callback: CallbackQuery, db: Database):
 
 
 @router.callback_query(F.data == "cancel")
-async def callback_cancel(callback: CallbackQuery, state: FSMContext):
+async def callback_cancel(callback: CallbackQuery, state: FSMContext, db: Database):
+    current_state = await state.get_state()
     await state.clear()
-    await callback.message.edit_text(
-        "📋 <b>Главное меню</b>\n\nВыберите раздел:",
-        parse_mode="HTML",
-        reply_markup=main_menu_keyboard(),
-    )
-    await callback.answer("Отменено")
+    await callback.answer()
+
+    if current_state and any(x in current_state for x in ("AddAccount", "RenameAccount", "SetProxy", "Autoresponder")):
+        user = await db.get_user(callback.from_user.id)
+        accounts = await db.get_user_accounts(user.id)
+        text = "👤 <b>Аккаунты</b>\n\nВыберите аккаунт или добавьте новый:"
+        try:
+            await callback.message.edit_text(text, parse_mode="HTML", reply_markup=accounts_keyboard(accounts))
+        except Exception:
+            await callback.message.delete()
+            await callback.message.answer(text, parse_mode="HTML", reply_markup=accounts_keyboard(accounts))
+    elif current_state and "Admin" in current_state:
+        text = "🔧 Админ-панель\n\nВыберите действие:"
+        try:
+            await callback.message.edit_text(text, reply_markup=admin_keyboard())
+        except Exception:
+            await callback.message.delete()
+            await callback.message.answer(text, reply_markup=admin_keyboard())
+    elif current_state and any(x in current_state for x in ("CreateMailing", "EditMailing")):
+        mailings = await db.get_user_mailings((await db.get_user(callback.from_user.id)).id)
+        text = "📋 <b>Рассылки</b>\n\nВыберите рассылку или создайте новую:"
+        try:
+            await callback.message.edit_text(text, parse_mode="HTML", reply_markup=mailings_keyboard(mailings))
+        except Exception:
+            await callback.message.delete()
+            await callback.message.answer(text, parse_mode="HTML", reply_markup=mailings_keyboard(mailings))
+    else:
+        text = "📋 <b>Главное меню</b>\n\nВыберите раздел:"
+        try:
+            await callback.message.edit_text(text, parse_mode="HTML", reply_markup=main_menu_keyboard())
+        except Exception:
+            await callback.message.delete()
+            await callback.message.answer(text, parse_mode="HTML", reply_markup=main_menu_keyboard())

@@ -729,11 +729,13 @@ async def callback_admin_back(callback: CallbackQuery):
     if not is_admin(callback.from_user.id):
         await callback.answer("Нет доступа", show_alert=True)
         return
-    await callback.message.edit_text(
-        "🔧 Админ-панель\n\nВыберите действие:",
-        reply_markup=admin_keyboard(),
-    )
     await callback.answer()
+    text = "🔧 Админ-панель\n\nВыберите действие:"
+    try:
+        await callback.message.edit_text(text, reply_markup=admin_keyboard())
+    except Exception:
+        await callback.message.delete()
+        await callback.message.answer(text, reply_markup=admin_keyboard())
 
 
 @router.callback_query(F.data == "admin_export_db")
@@ -845,7 +847,7 @@ async def callback_admin_cleanup_accounts(callback: CallbackQuery, db: Database)
     builder = InlineKeyboardBuilder()
     builder.row(
         InlineKeyboardButton(text=f"🗑 Удалить {count} аккаунтов", callback_data="admin_cleanup_accounts_confirm"),
-        InlineKeyboardButton(text="◀️ Отмена", callback_data="admin_panel"),
+        InlineKeyboardButton(text="◀️ Назад", callback_data="admin_back"),
     )
 
     await callback.message.edit_text(
