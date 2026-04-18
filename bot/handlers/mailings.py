@@ -289,7 +289,7 @@ async def callback_mailing_messages(callback: CallbackQuery, db: Database):
     text += "\nНажмите на сообщение, чтобы удалить его:"
 
     await callback.message.edit_text(
-        text, reply_markup=mailing_messages_keyboard(mailing_id, messages)
+        pe(text), parse_mode="HTML", reply_markup=mailing_messages_keyboard(mailing_id, messages)
     )
     await callback.answer()
 
@@ -302,8 +302,9 @@ async def callback_add_mailing_message(callback: CallbackQuery, state: FSMContex
     await state.set_state(EditMailingStates.waiting_message_text)
 
     await callback.message.edit_text(
-        "✏️ Отправьте текст или фото для рассылки.\n"
-        "Можно отправить несколько фото (до 10) — они будут отправлены альбомом.",
+        pe("✏️ Отправьте текст или фото для рассылки.\n"
+        "Можно отправить несколько фото (до 10) — они будут отправлены альбомом."),
+        parse_mode="HTML",
         reply_markup=cancel_keyboard(),
     )
     await callback.answer()
@@ -315,8 +316,9 @@ async def callback_add_mailing_forward(callback: CallbackQuery, state: FSMContex
     await state.update_data(mailing_id=mailing_id)
     await state.set_state(EditMailingStates.waiting_forward_message)
     await callback.message.edit_text(
-        "📨 Перешлите любое сообщение из канала или группы.\n"
-        "Бот збереже посилання на оригінал і при розсилці буде пересилати його.",
+        pe("📨 Перешлите любое сообщение из канала или группы.\n"
+        "Бот збереже посилання на оригінал і при розсилці буде пересилати його."),
+        parse_mode="HTML",
         reply_markup=cancel_keyboard(),
     )
     await callback.answer()
@@ -345,8 +347,9 @@ async def process_edit_forward_message(message: Message, state: FSMContext, db: 
 
     messages = await db.get_mailing_messages(mailing_id)
     await message.answer(
-        f"✅ Пересылка сохранена!\n📌 Источник: {peer} / сообщение #{msg_id}\n"
-        f"Всего записей: {len(messages)}",
+        pe(f"✅ Пересылка сохранена!\n📌 Источник: {peer} / сообщение #{msg_id}\n"
+        f"Всего записей: {len(messages)}"),
+        parse_mode="HTML",
         reply_markup=mailing_messages_keyboard(mailing_id, messages),
     )
 
@@ -378,14 +381,16 @@ async def process_edit_message_photo(
 
     if len(pending_photos) >= 10:
         await message.answer(
-            f"📸 Добавлено {len(pending_photos)} фото (максимум).\n"
-            "Нажмите «Сохранить» для завершения.",
+            pe(f"📸 Добавлено {len(pending_photos)} фото (максимум).\n"
+            "Нажмите «Сохранить» для завершения."),
+            parse_mode="HTML",
             reply_markup=photo_collection_keyboard(mailing_id, len(pending_photos), is_create=False),
         )
     else:
         await message.answer(
-            f"📸 Фото добавлено ({len(pending_photos)}/10).\n"
-            "Отправьте ещё фото или нажмите «Сохранить».",
+            pe(f"📸 Фото добавлено ({len(pending_photos)}/10).\n"
+            "Отправьте ещё фото или нажмите «Сохранить»."),
+            parse_mode="HTML",
             reply_markup=photo_collection_keyboard(mailing_id, len(pending_photos), is_create=False),
         )
 
@@ -407,7 +412,8 @@ async def process_edit_message_text(message: Message, state: FSMContext, db: Dat
         await state.clear()
         messages = await db.get_mailing_messages(mailing_id)
         await message.answer(
-            f"✅ Сообщение с {len(pending_photos)} фото добавлено! Всего сообщений: {len(messages)}",
+            pe(f"✅ Сообщение с {len(pending_photos)} фото добавлено! Всего сообщений: {len(messages)}"),
+            parse_mode="HTML",
             reply_markup=mailing_messages_keyboard(mailing_id, messages),
         )
     else:
@@ -415,7 +421,8 @@ async def process_edit_message_text(message: Message, state: FSMContext, db: Dat
         await state.clear()
         messages = await db.get_mailing_messages(mailing_id)
         await message.answer(
-            f"✅ Текст добавлен! Всего сообщений: {len(messages)}",
+            pe(f"✅ Текст добавлен! Всего сообщений: {len(messages)}"),
+            parse_mode="HTML",
             reply_markup=mailing_messages_keyboard(mailing_id, messages),
         )
 
@@ -438,7 +445,8 @@ async def callback_edit_save_photos(callback: CallbackQuery, state: FSMContext, 
 
     messages = await db.get_mailing_messages(mailing_id)
     await callback.message.edit_text(
-        f"✅ Сообщение с {len(pending_photos)} фото добавлено! Всего сообщений: {len(messages)}",
+        pe(f"✅ Сообщение с {len(pending_photos)} фото добавлено! Всего сообщений: {len(messages)}"),
+        parse_mode="HTML",
         reply_markup=mailing_messages_keyboard(mailing_id, messages),
     )
     await callback.answer()
@@ -470,7 +478,7 @@ async def callback_delete_message(callback: CallbackQuery, db: Database):
         text += "Сообщений пока нет.\n"
 
     await callback.message.edit_text(
-        text, reply_markup=mailing_messages_keyboard(mailing_id, messages)
+        pe(text), parse_mode="HTML", reply_markup=mailing_messages_keyboard(mailing_id, messages)
     )
 
 
@@ -490,7 +498,7 @@ async def callback_mailing_targets(callback: CallbackQuery, db: Database):
     text += "\nНажмите на чат, чтобы удалить его:"
 
     await callback.message.edit_text(
-        text, reply_markup=mailing_targets_keyboard(mailing_id, targets)
+        pe(text), parse_mode="HTML", reply_markup=mailing_targets_keyboard(mailing_id, targets)
     )
     await callback.answer()
 
@@ -503,11 +511,12 @@ async def callback_add_mailing_target(callback: CallbackQuery, state: FSMContext
     await state.set_state(EditMailingStates.waiting_target)
 
     await callback.message.edit_text(
-        "🎯 Введите username, ID или ссылку на чат/группу:\n\n"
+        pe("🎯 Введите username, ID или ссылку на чат/группу:\n\n"
         "Примеры:\n"
         "• @username\n"
         "• -1001234567890\n"
-        "• https://t.me/chatname",
+        "• https://t.me/chatname"),
+        parse_mode="HTML",
         reply_markup=cancel_keyboard(),
     )
     await callback.answer()
@@ -529,7 +538,8 @@ async def process_edit_target(message: Message, state: FSMContext, db: Database)
     targets = await db.get_mailing_targets(mailing_id)
 
     await message.answer(
-        f"✅ Чат добавлен! Всего чатов: {len(targets)}",
+        pe(f"✅ Чат добавлен! Всего чатов: {len(targets)}"),
+        parse_mode="HTML",
         reply_markup=mailing_targets_keyboard(mailing_id, targets),
     )
 
@@ -560,7 +570,7 @@ async def callback_delete_target(callback: CallbackQuery, db: Database):
         text += "Целевых чатов пока нет.\n"
 
     await callback.message.edit_text(
-        text, reply_markup=mailing_targets_keyboard(mailing_id, targets)
+        pe(text), parse_mode="HTML", reply_markup=mailing_targets_keyboard(mailing_id, targets)
     )
 
 
@@ -580,10 +590,11 @@ async def callback_edit_target_interval(callback: CallbackQuery, state: FSMConte
     await state.set_state(EditMailingStates.waiting_target_interval)
 
     await callback.message.edit_text(
-        f"⏱️ Интервал для чата: {target.chat_identifier if target else ''}\n\n"
+        pe(f"⏱️ Интервал для чата: {target.chat_identifier if target else ''}\n\n"
         f"Текущий: {current_str}\n\n"
         "Введите интервал в секундах (минимум 30).\n"
-        "Отправьте 0 — использовать общий интервал рассылки.",
+        "Отправьте 0 — использовать общий интервал рассылки."),
+        parse_mode="HTML",
         reply_markup=cancel_keyboard(),
     )
     await callback.answer()
@@ -613,7 +624,7 @@ async def process_target_interval(message: Message, state: FSMContext, db: Datab
         iv = f" [{t.interval_seconds}с]" if t.interval_seconds else " [умолч.]"
         text += f"{i}. {t.chat_identifier}{iv}\n"
 
-    await message.answer(text, reply_markup=mailing_targets_keyboard(mailing_id, targets))
+    await message.answer(pe(text), parse_mode="HTML", reply_markup=mailing_targets_keyboard(mailing_id, targets))
 
 
 # === Folder targets (edit mode) ===
@@ -625,9 +636,10 @@ async def callback_add_folder_target(callback: CallbackQuery, state: FSMContext)
     await state.set_state(EditMailingStates.waiting_folder)
 
     await callback.message.edit_text(
-        "📁 Отправьте ссылку на папку чатов:\n\n"
+        pe("📁 Отправьте ссылку на папку чатов:\n\n"
         "Пример:\n"
-        "• https://t.me/addlist/xxxxx",
+        "• https://t.me/addlist/xxxxx"),
+        parse_mode="HTML",
         reply_markup=cancel_keyboard(),
     )
     await callback.answer()
@@ -689,14 +701,16 @@ async def process_edit_folder(
         targets = await db.get_mailing_targets(mailing_id)
 
         await message.answer(
-            f"✅ Добавлено {added} чатов из папки! Всего чатов: {len(targets)}",
+            pe(f"✅ Добавлено {added} чатов из папки! Всего чатов: {len(targets)}"),
+            parse_mode="HTML",
             reply_markup=mailing_targets_keyboard(mailing_id, targets),
         )
 
     except Exception as e:
         logger.error(f"Error resolving folder {slug}: {e}")
         await message.answer(
-            f"❌ Ошибка при получении чатов из папки: {e}"
+            pe(f"❌ Ошибка при получении чатов из папки: {e}"),
+            parse_mode="HTML",
         )
 
 
@@ -712,13 +726,14 @@ async def callback_mailing_hours(callback: CallbackQuery, db: Database, state: F
     await state.set_state(EditMailingStates.waiting_hours)
 
     await callback.message.edit_text(
-        f"⏰ Время активности\n\n"
+        pe(f"⏰ Время активности\n\n"
         f"Текущие настройки: {current_hours}\n\n"
         "Введите диапазон времени в формате:\n"
         "10:00-13:00\n\n"
         "Можно указать несколько диапазонов через запятую:\n"
         "10:00-13:00, 18:00-22:00\n\n"
-        "Или отправьте 'сброс' для работы 24/7",
+        "Или отправьте 'сброс' для работы 24/7"),
+        parse_mode="HTML",
         reply_markup=cancel_keyboard(),
     )
     await callback.answer()
@@ -734,7 +749,8 @@ async def process_edit_hours(message: Message, state: FSMContext, db: Database):
         await db.update_mailing_active_hours(mailing_id, None)
         await state.clear()
         await message.answer(
-            "✅ Время активности сброшено (24/7)",
+            pe("✅ Время активности сброшено (24/7)"),
+            parse_mode="HTML",
             reply_markup=main_menu_keyboard(),
         )
         return
@@ -758,7 +774,8 @@ async def process_edit_hours(message: Message, state: FSMContext, db: Database):
     await state.clear()
 
     await message.answer(
-        f"✅ Время активности обновлено: {format_active_hours(active_hours_json)}",
+        pe(f"✅ Время активности обновлено: {format_active_hours(active_hours_json)}"),
+        parse_mode="HTML",
         reply_markup=main_menu_keyboard(),
     )
 
@@ -774,7 +791,8 @@ async def callback_delete_mailing(callback: CallbackQuery, db: Database):
         return
 
     await callback.message.edit_text(
-        f"❓ Вы уверены, что хотите удалить рассылку «{mailing.name}»?",
+        pe(f"❓ Вы уверены, что хотите удалить рассылку «{mailing.name}»?"),
+        parse_mode="HTML",
         reply_markup=delete_mailing_confirm_keyboard(mailing_id),
     )
     await callback.answer()
@@ -789,7 +807,8 @@ async def callback_confirm_delete_mailing(
     await mailing_service.delete_mailing(mailing_id)
 
     await callback.message.edit_text(
-        "✅ Рассылка удалена",
+        pe("✅ Рассылка удалена"),
+        parse_mode="HTML",
         reply_markup=main_menu_keyboard(),
     )
     await callback.answer()
@@ -801,8 +820,9 @@ async def callback_create_mailing(callback: CallbackQuery, state: FSMContext):
     await state.set_state(CreateMailingStates.waiting_name)
 
     await callback.message.edit_text(
-        "➕ Создание рассылки\n\n"
-        "Шаг 1/6: Введите название рассылки:",
+        pe("➕ Создание рассылки\n\n"
+        "Шаг 1/6: Введите название рассылки:"),
+        parse_mode="HTML",
         reply_markup=cancel_keyboard(),
     )
     await callback.answer()
@@ -891,8 +911,9 @@ async def callback_create_add_message(callback: CallbackQuery, state: FSMContext
     await state.set_state(CreateMailingStates.waiting_message_text)
 
     await callback.message.edit_text(
-        "✏️ Отправьте текст или фото для рассылки.\n"
-        "Можно отправить несколько фото (до 10) — они будут отправлены альбомом.",
+        pe("✏️ Отправьте текст или фото для рассылки.\n"
+        "Можно отправить несколько фото (до 10) — они будут отправлены альбомом."),
+        parse_mode="HTML",
         reply_markup=cancel_keyboard(),
     )
     await callback.answer()
@@ -904,8 +925,9 @@ async def callback_create_add_message(callback: CallbackQuery, state: FSMContext
 async def callback_create_add_forward(callback: CallbackQuery, state: FSMContext):
     await state.set_state(CreateMailingStates.waiting_forward_message)
     await callback.message.edit_text(
-        "📨 Перешлите любое сообщение из канала или группы.\n"
-        "Бот збереже посилання на оригінал і при розсилці буде пересилати його.",
+        pe("📨 Перешлите любое сообщение из канала или группы.\n"
+        "Бот збереже посилання на оригінал і при розсилці буде пересилати його."),
+        parse_mode="HTML",
         reply_markup=cancel_keyboard(),
     )
     await callback.answer()
@@ -934,8 +956,9 @@ async def process_create_forward_message(message: Message, state: FSMContext, db
 
     messages = await db.get_mailing_messages(mailing_id)
     await message.answer(
-        f"✅ Пересылка сохранена!\n📌 Источник: {peer} / сообщение #{msg_id}\n"
-        f"Всего записей: {len(messages)}\n\nДодайте ще або натисніть «Готово»:",
+        pe(f"✅ Пересылка сохранена!\n📌 Источник: {peer} / сообщение #{msg_id}\n"
+        f"Всего записей: {len(messages)}\n\nДобавьте ещё или нажмите «Готово»:"),
+        parse_mode="HTML",
         reply_markup=mailing_creation_messages_keyboard(mailing_id, messages),
     )
 
@@ -967,14 +990,16 @@ async def process_create_message_photo(
 
     if len(pending_photos) >= 10:
         await message.answer(
-            f"📸 Добавлено {len(pending_photos)} фото (максимум).\n"
-            "Нажмите «Сохранить» для завершения.",
+            pe(f"📸 Добавлено {len(pending_photos)} фото (максимум).\n"
+            "Нажмите «Сохранить» для завершения."),
+            parse_mode="HTML",
             reply_markup=photo_collection_keyboard(mailing_id, len(pending_photos), is_create=True),
         )
     else:
         await message.answer(
-            f"📸 Фото добавлено ({len(pending_photos)}/10).\n"
-            "Отправьте ещё фото или нажмите «Сохранить».",
+            pe(f"📸 Фото добавлено ({len(pending_photos)}/10).\n"
+            "Отправьте ещё фото или нажмите «Сохранить»."),
+            parse_mode="HTML",
             reply_markup=photo_collection_keyboard(mailing_id, len(pending_photos), is_create=True),
         )
 
@@ -998,8 +1023,9 @@ async def process_create_message_text(message: Message, state: FSMContext, db: D
         await state.set_state(CreateMailingStates.adding_messages)
         messages = await db.get_mailing_messages(mailing_id)
         await message.answer(
-            f"✅ Сообщение с {len(pending_photos)} фото добавлено! Всего сообщений: {len(messages)}\n\n"
-            "Добавьте ещё или нажмите «Готово»:",
+            pe(f"✅ Сообщение с {len(pending_photos)} фото добавлено! Всего сообщений: {len(messages)}\n\n"
+            "Добавьте ещё или нажмите «Готово»:"),
+            parse_mode="HTML",
             reply_markup=mailing_creation_messages_keyboard(mailing_id, messages),
         )
     else:
@@ -1007,8 +1033,9 @@ async def process_create_message_text(message: Message, state: FSMContext, db: D
         await state.set_state(CreateMailingStates.adding_messages)
         messages = await db.get_mailing_messages(mailing_id)
         await message.answer(
-            f"✅ Текст добавлен! Всего сообщений: {len(messages)}\n\n"
-            "Добавьте ещё или нажмите «Готово»:",
+            pe(f"✅ Текст добавлен! Всего сообщений: {len(messages)}\n\n"
+            "Добавьте ещё или нажмите «Готово»:"),
+            parse_mode="HTML",
             reply_markup=mailing_creation_messages_keyboard(mailing_id, messages),
         )
 
@@ -1033,8 +1060,9 @@ async def callback_create_save_photos(callback: CallbackQuery, state: FSMContext
 
     messages = await db.get_mailing_messages(mailing_id)
     await callback.message.edit_text(
-        f"✅ Сообщение с {len(pending_photos)} фото добавлено! Всего сообщений: {len(messages)}\n\n"
-        "Добавьте ещё или нажмите «Готово»:",
+        pe(f"✅ Сообщение с {len(pending_photos)} фото добавлено! Всего сообщений: {len(messages)}\n\n"
+        "Добавьте ещё или нажмите «Готово»:"),
+        parse_mode="HTML",
         reply_markup=mailing_creation_messages_keyboard(mailing_id, messages),
     )
     await callback.answer()
@@ -1084,11 +1112,12 @@ async def callback_create_add_target(callback: CallbackQuery, state: FSMContext)
     await state.set_state(CreateMailingStates.waiting_target)
 
     await callback.message.edit_text(
-        "🎯 Введите username, ID или ссылку на чат/группу:\n\n"
+        pe("🎯 Введите username, ID или ссылку на чат/группу:\n\n"
         "Примеры:\n"
         "• @username\n"
         "• -1001234567890\n"
-        "• https://t.me/chatname",
+        "• https://t.me/chatname"),
+        parse_mode="HTML",
         reply_markup=cancel_keyboard(),
     )
     await callback.answer()
@@ -1110,8 +1139,9 @@ async def process_create_target(message: Message, state: FSMContext, db: Databas
     targets = await db.get_mailing_targets(mailing_id)
 
     await message.answer(
-        f"✅ Чат добавлен! Всего чатов: {len(targets)}\n\n"
-        "Добавьте ещё или нажмите «Готово»:",
+        pe(f"✅ Чат добавлен! Всего чатов: {len(targets)}\n\n"
+        "Добавьте ещё или нажмите «Готово»:"),
+        parse_mode="HTML",
         reply_markup=mailing_creation_targets_keyboard(mailing_id, targets),
     )
 
@@ -1141,9 +1171,10 @@ async def callback_create_add_folder(callback: CallbackQuery, state: FSMContext)
     await state.set_state(CreateMailingStates.waiting_folder)
 
     await callback.message.edit_text(
-        "📁 Отправьте ссылку на папку чатов:\n\n"
+        pe("📁 Отправьте ссылку на папку чатов:\n\n"
         "Пример:\n"
-        "• https://t.me/addlist/xxxxx",
+        "• https://t.me/addlist/xxxxx"),
+        parse_mode="HTML",
         reply_markup=cancel_keyboard(),
     )
     await callback.answer()
@@ -1204,15 +1235,17 @@ async def process_create_folder(
         targets = await db.get_mailing_targets(mailing_id)
 
         await message.answer(
-            f"✅ Добавлено {added} чатов из папки! Всего чатов: {len(targets)}\n\n"
-            "Добавьте ещё или нажмите «Готово»:",
+            pe(f"✅ Добавлено {added} чатов из папки! Всего чатов: {len(targets)}\n\n"
+            "Добавьте ещё или нажмите «Готово»:"),
+            parse_mode="HTML",
             reply_markup=mailing_creation_targets_keyboard(mailing_id, targets),
         )
 
     except Exception as e:
         logger.error(f"Error resolving folder {slug}: {e}")
         await message.answer(
-            f"❌ Ошибка при получении чатов из папки: {e}"
+            pe(f"❌ Ошибка при получении чатов из папки: {e}"),
+            parse_mode="HTML",
         )
 
 
@@ -1242,8 +1275,9 @@ async def callback_skip_hours(callback: CallbackQuery, state: FSMContext):
     await state.clear()
 
     await callback.message.edit_text(
-        "✅ Рассылка создана!\n\n"
-        "Нажмите «Запустить рассылку», чтобы начать отправку.",
+        pe("✅ Рассылка создана!\n\n"
+        "Нажмите «Запустить рассылку», чтобы начать отправку."),
+        parse_mode="HTML",
         reply_markup=launch_mailing_keyboard(mailing_id),
     )
     await callback.answer()
@@ -1252,10 +1286,11 @@ async def callback_skip_hours(callback: CallbackQuery, state: FSMContext):
 @router.callback_query(CreateMailingStates.waiting_hours, F.data.startswith("setup_hours:"))
 async def callback_setup_hours(callback: CallbackQuery, state: FSMContext):
     await callback.message.edit_text(
-        "⏰ Введите диапазон времени в формате:\n"
+        pe("⏰ Введите диапазон времени в формате:\n"
         "10:00-13:00\n\n"
         "Можно указать несколько диапазонов через запятую:\n"
-        "10:00-13:00, 18:00-22:00",
+        "10:00-13:00, 18:00-22:00"),
+        parse_mode="HTML",
         reply_markup=cancel_keyboard(),
     )
     await callback.answer()
@@ -1286,9 +1321,10 @@ async def process_create_hours(message: Message, state: FSMContext, db: Database
     await state.clear()
 
     await message.answer(
-        f"✅ Рассылка создана!\n"
+        pe(f"✅ Рассылка создана!\n"
         f"Время активности: {format_active_hours(active_hours_json)}\n\n"
-        "Нажмите «Запустить рассылку», чтобы начать отправку.",
+        "Нажмите «Запустить рассылку», чтобы начать отправку."),
+        parse_mode="HTML",
         reply_markup=launch_mailing_keyboard(mailing_id),
     )
 
@@ -1303,7 +1339,8 @@ async def callback_launch_mailing(
 
     if success:
         await callback.message.edit_text(
-            "🚀 Рассылка запущена!",
+            pe("🚀 Рассылка запущена!"),
+            parse_mode="HTML",
             reply_markup=main_menu_keyboard(),
         )
         await callback.answer("Рассылка запущена!")
@@ -1325,7 +1362,8 @@ async def callback_change_mailing_account(callback: CallbackQuery, db: Database)
         return
 
     await callback.message.edit_text(
-        "🔄 Выберите аккаунт для рассылки:",
+        pe("🔄 Выберите аккаунт для рассылки:"),
+        parse_mode="HTML",
         reply_markup=select_account_for_mailing_keyboard(accounts, mailing_id),
     )
     await callback.answer()
@@ -1349,7 +1387,7 @@ async def callback_set_mailing_account(callback: CallbackQuery, db: Database):
     last_sent = _fmt_dt(mailing.last_sent_at)
     active_hours = format_active_hours(mailing.active_hours_json)
 
-    text = (
+    text = pe(
         f"📋 Рассылка: {mailing.name}\n\n"
         f"Статус: {status}\n"
         f"Аккаунт: {account.display_name if account else 'не найден'}\n"
@@ -1361,7 +1399,7 @@ async def callback_set_mailing_account(callback: CallbackQuery, db: Database):
         "Выберите действие:"
     )
 
-    await callback.message.edit_text(text, reply_markup=mailing_menu_keyboard(mailing))
+    await callback.message.edit_text(text, parse_mode="HTML", reply_markup=mailing_menu_keyboard(mailing))
 
 
 @router.callback_query(F.data.startswith("change_msg_format:"))
@@ -1412,7 +1450,8 @@ async def callback_cancel_creation(
     await state.clear()
 
     await callback.message.edit_text(
-        "❌ Создание рассылки отменено",
+        pe("❌ Создание рассылки отменено"),
+        parse_mode="HTML",
         reply_markup=main_menu_keyboard(),
     )
     await callback.answer()

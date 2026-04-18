@@ -108,7 +108,7 @@ async def callback_add_account(callback: CallbackQuery, state: FSMContext, db: D
                 ton_text = f"💠 TON — ~{ton_amount} TON (≈ {config.EXTRA_ACCOUNT_PRICE} USDT)"
             else:
                 ton_text = f"💠 TON — ≈ {config.EXTRA_ACCOUNT_PRICE} USDT в TON"
-            text = (
+            text = pe(
                 f"➕ Добавление аккаунта\n\n"
                 f"⚠️ Вы достигли лимита в {config.FREE_ACCOUNTS_LIMIT} бесплатных аккаунтов.\n\n"
                 f"Выберите способ оплаты:\n\n"
@@ -116,7 +116,7 @@ async def callback_add_account(callback: CallbackQuery, state: FSMContext, db: D
                 f"{ton_text}"
             )
             await callback.message.edit_text(
-                text, reply_markup=account_payment_method_keyboard()
+                text, parse_mode="HTML", reply_markup=account_payment_method_keyboard()
             )
         else:
             await _create_cryptobot_account_payment(callback, db, accounts_count)
@@ -124,7 +124,7 @@ async def callback_add_account(callback: CallbackQuery, state: FSMContext, db: D
         return
 
     remaining = config.FREE_ACCOUNTS_LIMIT - accounts_count
-    text = (
+    text = pe(
         "➕ Добавление аккаунта\n\n"
         f"📊 У вас {accounts_count}/{config.FREE_ACCOUNTS_LIMIT} бесплатных аккаунтов\n"
         f"Осталось бесплатных: {remaining}\n\n"
@@ -136,7 +136,7 @@ async def callback_add_account(callback: CallbackQuery, state: FSMContext, db: D
     )
 
     await state.clear()
-    await callback.message.edit_text(text, reply_markup=add_account_proxy_keyboard())
+    await callback.message.edit_text(text, parse_mode="HTML", reply_markup=add_account_proxy_keyboard())
     await callback.answer()
 
 
@@ -153,12 +153,13 @@ async def _create_cryptobot_account_payment(callback: CallbackQuery, db: Databas
     if not invoice:
         error_msg = crypto_service.last_error.message if crypto_service.last_error else "Неизвестная ошибка"
         await callback.message.edit_text(
-            f"❌ Не удалось создать счёт: {error_msg}",
+            pe(f"❌ Не удалось создать счёт: {error_msg}"),
+            parse_mode="HTML",
             reply_markup=main_menu_keyboard(),
         )
         return
 
-    text = (
+    text = pe(
         f"➕ Добавление аккаунта\n\n"
         f"⚠️ Вы достигли лимита в {config.FREE_ACCOUNTS_LIMIT} бесплатных аккаунтов.\n\n"
         f"💰 Стоимость дополнительного аккаунта: <b>{extra_cost} USDT</b>\n\n"
@@ -166,6 +167,7 @@ async def _create_cryptobot_account_payment(callback: CallbackQuery, db: Databas
     )
     await callback.message.edit_text(
         text,
+        parse_mode="HTML",
         reply_markup=account_payment_keyboard(invoice.pay_url, invoice.invoice_id),
     )
 
@@ -206,7 +208,7 @@ async def callback_pay_account_ton(
 
     pay_url = ton_service.generate_payment_link(amount, comment)
 
-    text = (
+    text = pe(
         f"💠 Оплата дополнительного аккаунта через TON\n\n"
         f"Сумма: <b>{amount} TON</b> (≈ {config.EXTRA_ACCOUNT_PRICE} USDT)\n\n"
         f"Кошелёк: <code>{config.TON_WALLET_ADDRESS}</code>\n"
@@ -217,7 +219,7 @@ async def callback_pay_account_ton(
     )
 
     await callback.message.edit_text(
-        text, reply_markup=ton_account_payment_keyboard(pay_url, comment)
+        text, parse_mode="HTML", reply_markup=ton_account_payment_keyboard(pay_url, comment)
     )
     await callback.answer()
 
@@ -345,7 +347,7 @@ async def process_proxy(message: Message, state: FSMContext):
 
 
 async def _ask_api_step(target, can_edit: bool = False):
-    text = (
+    text = pe(
         "➕ Добавление аккаунта\n\n"
         "<b>Шаг 2 из 3</b>\n\n"
         "Хотите использовать собственный API ID и Hash?\n\n"
@@ -353,16 +355,17 @@ async def _ask_api_step(target, can_edit: bool = False):
         "Если нет — используются стандартные настройки."
     )
     if can_edit:
-        await target.edit_text(text, reply_markup=add_account_api_keyboard())
+        await target.edit_text(text, parse_mode="HTML", reply_markup=add_account_api_keyboard())
     else:
-        await target.answer(text, reply_markup=add_account_api_keyboard())
+        await target.answer(text, parse_mode="HTML", reply_markup=add_account_api_keyboard())
 
 
 @router.callback_query(F.data == "add_account_set_api")
 async def callback_add_account_set_api(callback: CallbackQuery, state: FSMContext):
     await callback.message.edit_text(
-        "🔑 Введите API ID (число):\n\n"
-        "Получить: https://my.telegram.org",
+        pe("🔑 Введите API ID (число):\n\n"
+        "Получить: https://my.telegram.org"),
+        parse_mode="HTML",
         reply_markup=cancel_keyboard(),
     )
     await state.set_state(AddAccountStates.waiting_api_id)
@@ -376,10 +379,11 @@ async def callback_add_account_skip_api(callback: CallbackQuery, state: FSMConte
         api_hash=config.DEFAULT_API_HASH,
     )
     await callback.message.edit_text(
-        "➕ Добавление аккаунта\n\n"
+        pe("➕ Добавление аккаунта\n\n"
         "<b>Шаг 3 из 3</b>\n\n"
         "Введите номер телефона в международном формате:\n"
-        "Например: <code>+380991234567</code>",
+        "Например: <code>+380991234567</code>"),
+        parse_mode="HTML",
         reply_markup=cancel_keyboard(),
     )
     await state.set_state(AddAccountStates.waiting_phone)
@@ -431,7 +435,7 @@ async def process_phone(
     await state.update_data(phone=phone)
     data = await state.get_data()
 
-    await message.answer("⏳ Отправляем код на телефон...")
+    await message.answer(pe("⏳ Отправляем код на телефон..."), parse_mode="HTML")
 
     from telethon import TelegramClient
     from telethon.sessions import StringSession
@@ -458,11 +462,12 @@ async def process_phone(
         await state.update_data(client=client, entered_code="", phone_code_hash=sent.phone_code_hash)
 
         await message.answer(
-            "📱 Код отправлен!\n\n"
+            pe("📱 Код отправлен!\n\n"
             "📲 Проверьте приложение Telegram на других ваших устройствах или Telegram Web — "
             "код придёт туда.\n\n"
             "🔢 Введите код с помощью кнопок:\n\n"
-            "Код: ▫️▫️▫️▫️▫️",
+            "Код: ▫️▫️▫️▫️▫️"),
+            parse_mode="HTML",
             reply_markup=code_input_keyboard(),
         )
         await state.set_state(AddAccountStates.waiting_code)
@@ -544,7 +549,8 @@ async def process_password(message: Message, state: FSMContext, db: Database):
             await db.update_account_proxy(account_id, proxy_str)
 
         await message.answer(
-            f"✅ Аккаунт {data['phone']} успешно добавлен!",
+            pe(f"✅ Аккаунт {data['phone']} успешно добавлен!"),
+            parse_mode="HTML",
             reply_markup=main_menu_keyboard(),
         )
         await state.clear()
@@ -590,9 +596,10 @@ async def callback_code_digit(callback: CallbackQuery, state: FSMContext):
 
     display = _format_code_display(new_code)
     await callback.message.edit_text(
-        f"📱 Код отправлен!\n\n"
+        pe(f"📱 Код отправлен!\n\n"
         f"🔢 Введите код с помощью кнопок:\n\n"
-        f"Код: {display}",
+        f"Код: {display}"),
+        parse_mode="HTML",
         reply_markup=code_input_keyboard(),
     )
     await callback.answer()
@@ -618,9 +625,10 @@ async def callback_code_backspace(callback: CallbackQuery, state: FSMContext):
 
     display = _format_code_display(new_code)
     await callback.message.edit_text(
-        f"📱 Код отправлен!\n\n"
+        pe(f"📱 Код отправлен!\n\n"
         f"🔢 Введите код с помощью кнопок:\n\n"
-        f"Код: {display}",
+        f"Код: {display}"),
+        parse_mode="HTML",
         reply_markup=code_input_keyboard(),
     )
     await callback.answer()
@@ -638,9 +646,10 @@ async def callback_code_clear(callback: CallbackQuery, state: FSMContext):
 
     display = _format_code_display("")
     await callback.message.edit_text(
-        f"📱 Код отправлен!\n\n"
+        pe(f"📱 Код отправлен!\n\n"
         f"🔢 Введите код с помощью кнопок:\n\n"
-        f"Код: {display}",
+        f"Код: {display}"),
+        parse_mode="HTML",
         reply_markup=code_input_keyboard(),
     )
     await callback.answer("Код очищен")
@@ -733,10 +742,10 @@ async def callback_delete_account(callback: CallbackQuery, db: Database):
         await callback.answer("Аккаунт не найден", show_alert=True)
         return
 
-    text = f"❓ Вы уверены, что хотите удалить аккаунт {account.phone}?\n\n⚠️ Все рассылки этого аккаунта будут остановлены."
+    text = pe(f"❓ Вы уверены, что хотите удалить аккаунт {account.phone}?\n\n⚠️ Все рассылки этого аккаунта будут остановлены.")
 
     await callback.message.edit_text(
-        text, reply_markup=delete_account_confirm_keyboard(account_id)
+        text, parse_mode="HTML", reply_markup=delete_account_confirm_keyboard(account_id)
     )
     await callback.answer()
 
@@ -754,7 +763,8 @@ async def callback_confirm_delete_account(
     await db.delete_account(account_id)
 
     await callback.message.edit_text(
-        "✅ Аккаунт удалён",
+        pe("✅ Аккаунт удалён"),
+        parse_mode="HTML",
         reply_markup=main_menu_keyboard(),
     )
     await callback.answer()
@@ -795,7 +805,7 @@ async def process_rename_account(message: Message, state: FSMContext, db: Databa
 @router.callback_query(F.data == "pay_account_card")
 async def callback_pay_account_card(callback: CallbackQuery):
     await callback.message.edit_text(
-        "💳 Оплата банковской картой\n\n"
+        pe("💳 Оплата банковской картой\n\n"
         "Для оплаты аккаунта банковской картой (Visa/MasterCard) "
         "напишите нашему менеджеру:\n\n"
         "👤 Менеджер: @autosenderkarta\n\n"
@@ -804,7 +814,8 @@ async def callback_pay_account_card(callback: CallbackQuery):
         "2. Менеджер отправит вам реквизиты для перевода\n"
         "3. После оплаты отправьте скриншот чека менеджеру\n"
         "4. Аккаунт будет добавлен в течение нескольких минут\n\n"
-        "⏰ Время работы менеджера: ежедневно с 9:00 до 23:00",
+        "⏰ Время работы менеджера: ежедневно с 9:00 до 23:00"),
+        parse_mode="HTML",
         reply_markup=account_payment_method_keyboard(),
     )
     await callback.answer()
@@ -825,13 +836,14 @@ async def callback_set_proxy(callback: CallbackQuery, state: FSMContext, db: Dat
 
     current = f"<code>{account.proxy}</code>" if account.proxy else "не настроен"
     await callback.message.edit_text(
-        f"🌐 <b>Настройка прокси SOCKS5</b>\n\n"
+        pe(f"🌐 <b>Настройка прокси SOCKS5</b>\n\n"
         f"Текущий прокси: {current}\n\n"
         f"Введите прокси в формате:\n"
         f"<code>socks5://host:port</code>\n"
         f"или с авторизацией:\n"
         f"<code>socks5://user:pass@host:port</code>\n\n"
-        f"Чтобы <b>удалить</b> прокси — отправьте: <code>удалить</code>",
+        f"Чтобы <b>удалить</b> прокси — отправьте: <code>удалить</code>"),
+        parse_mode="HTML",
         reply_markup=cancel_keyboard(),
     )
     await callback.answer()

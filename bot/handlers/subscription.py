@@ -71,9 +71,10 @@ async def callback_buy_subscription(callback: CallbackQuery, state: FSMContext, 
     price_7d = await db.get_price(7)
     price_30d = await db.get_price(30)
     await callback.message.edit_text(
-        f"💳 Выберите план подписки:\n\n"
+        pe(f"💳 Выберите план подписки:\n\n"
         f"📅 7 дней — {price_7d} USDT\n"
-        f"📅 30 дней — {price_30d} USDT",
+        f"📅 30 дней — {price_30d} USDT"),
+        parse_mode="HTML",
         reply_markup=subscription_plan_keyboard(),
     )
     await callback.answer()
@@ -92,12 +93,12 @@ async def callback_sub_plan(callback: CallbackQuery, state: FSMContext, db: Data
             ton_text = f"💠 TON — ~{ton_amount} TON (≈ {price} USDT)"
         else:
             ton_text = f"💠 TON — ≈ {price} USDT в TON"
-        text = (
+        text = pe(
             f"💳 Способ оплаты ({plan_days} дней):\n\n"
             f"💎 CryptoBot — {price} USDT\n"
             f"{ton_text}"
         )
-        await callback.message.edit_text(text, reply_markup=payment_method_keyboard())
+        await callback.message.edit_text(text, parse_mode="HTML", reply_markup=payment_method_keyboard())
     else:
         await _create_cryptobot_subscription(callback, db, plan_days=plan_days)
     await callback.answer()
@@ -122,7 +123,7 @@ async def _create_cryptobot_subscription(
     user = await db.get_user(callback.from_user.id)
     price = await db.get_price(plan_days)
 
-    await callback.message.edit_text("⏳ Создаём платёж...")
+    await callback.message.edit_text(pe("⏳ Создаём платёж..."), parse_mode="HTML")
 
     invoice = await cryptobot.create_invoice(
         amount=price,
@@ -150,7 +151,7 @@ async def _create_cryptobot_subscription(
         plan_days=plan_days,
     )
 
-    text = (
+    text = pe(
         f"💳 Оплата подписки\n\n"
         f"Сумма: {invoice.amount} {invoice.currency}\n"
         f"Срок: {plan_days} дней\n\n"
@@ -159,7 +160,7 @@ async def _create_cryptobot_subscription(
     )
 
     await callback.message.edit_text(
-        text, reply_markup=payment_keyboard(invoice.pay_url, invoice.invoice_id)
+        text, parse_mode="HTML", reply_markup=payment_keyboard(invoice.pay_url, invoice.invoice_id)
     )
 
 
@@ -173,7 +174,7 @@ async def callback_pay_ton(
     user = await db.get_user(callback.from_user.id)
     comment = f"sub_{user.telegram_id}_{int(time.time())}"
 
-    await callback.message.edit_text("⏳ Получаем курс TON...")
+    await callback.message.edit_text(pe("⏳ Получаем курс TON..."), parse_mode="HTML")
 
     price = await db.get_price(plan_days)
     amount = await ton_service.calculate_ton_amount(price)
