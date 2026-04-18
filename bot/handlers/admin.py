@@ -846,7 +846,7 @@ async def callback_admin_cleanup_accounts(callback: CallbackQuery, db: Database)
 
     builder = InlineKeyboardBuilder()
     builder.row(
-        InlineKeyboardButton(text=f"🗑 Удалить {count} аккаунтов", callback_data="admin_cleanup_accounts_confirm"),
+        InlineKeyboardButton(text=f"🗑 Удалить {count} аккаунтов", callback_data="admin_cleanup_accounts_confirm", style="danger"),
         InlineKeyboardButton(text="◀️ Назад", callback_data="admin_back"),
     )
 
