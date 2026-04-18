@@ -114,12 +114,12 @@ EMOJI_MAP: dict[str, str] = {
     "❓": "5436113877181941026",
     # Circle
     "⚫": "5298839734489986848",
-    # Bullet point → animated red circle
-    "•": "5398038979217989221",
 }
 
 
 def pe(text: str) -> str:
     for char, eid in EMOJI_MAP.items():
         text = text.replace(char, f'<tg-emoji emoji-id="{eid}">{char}</tg-emoji>')
+    # Bullet point → animated red circle (fallback must match emoji, not "•")
+    text = text.replace("•", '<tg-emoji emoji-id="5398038979217989221">🔴</tg-emoji>')
     return text
