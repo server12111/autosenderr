@@ -117,6 +117,10 @@ class UserbotManager:
             self._me_ids[account.id] = me.id
             self._clients[account.id] = client
 
+            fresh_session = client.session.save()
+            if fresh_session != account.session_string:
+                await self.db.update_account_session(account.id, fresh_session)
+
             account_id = account.id
             me_id = me.id
 
@@ -221,6 +225,13 @@ class UserbotManager:
                             await self._handle_account_problem(account_id, e)
                             continue
                     await client.get_me()
+                    try:
+                        fresh_session = client.session.save()
+                        account = await self.db.get_account(account_id)
+                        if account and fresh_session != account.session_string:
+                            await self.db.update_account_session(account_id, fresh_session)
+                    except Exception:
+                        pass
                 except _BAN_ERRORS as e:
                     await self._handle_account_problem(account_id, e)
                 except Exception as e:
