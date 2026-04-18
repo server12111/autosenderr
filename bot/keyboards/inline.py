@@ -98,7 +98,7 @@ def account_payment_keyboard(pay_url: str, invoice_id: str) -> InlineKeyboardMar
     builder = InlineKeyboardBuilder()
     builder.row(_btn("💳 Оплатить", url=pay_url, style="success"))
     builder.row(
-        InlineKeyboardButton(text="🔄 Проверить оплату", callback_data=f"check_account_payment:{invoice_id}", style="primary"),
+        _btn("🔄 Проверить оплату", callback_data=f"check_account_payment:{invoice_id}", style="primary"),
         _btn("◀️ Назад", callback_data="accounts", style="primary"),
     )
     return builder.as_markup()
@@ -108,7 +108,7 @@ def add_account_proxy_keyboard() -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
     builder.row(
         _btn("✅ Да, добавить прокси", callback_data="add_account_set_proxy", style="success"),
-        InlineKeyboardButton(text="➡️ Продолжить", callback_data="add_account_skip_proxy", style="primary"),
+        _btn("➡️ Продолжить", callback_data="add_account_skip_proxy", style="primary"),
     )
     builder.row(_btn("◀️ Назад", callback_data="accounts", style="primary"))
     return builder.as_markup()
@@ -118,7 +118,7 @@ def add_account_api_keyboard() -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
     builder.row(
         _btn("✅ Да, ввести API", callback_data="add_account_set_api", style="success"),
-        InlineKeyboardButton(text="➡️ Продолжить", callback_data="add_account_skip_api", style="primary"),
+        _btn("➡️ Продолжить", callback_data="add_account_skip_api", style="primary"),
     )
     builder.row(_btn("◀️ Назад", callback_data="accounts", style="primary"))
     return builder.as_markup()
@@ -127,8 +127,8 @@ def add_account_api_keyboard() -> InlineKeyboardMarkup:
 def account_payment_method_keyboard() -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
     builder.row(
-        InlineKeyboardButton(text="💎 CryptoBot (USDT)", callback_data="pay_account_cryptobot", style="primary"),
-        InlineKeyboardButton(text="💠 TON", callback_data="pay_account_ton", style="primary"),
+        _btn("💎 CryptoBot (USDT)", callback_data="pay_account_cryptobot", style="primary"),
+        _btn("💠 TON", callback_data="pay_account_ton", style="primary"),
     )
     builder.row(_btn("💳 На карту", callback_data="pay_account_card", style="primary"))
     builder.row(_btn("◀️ Назад", callback_data="accounts", style="primary"))
@@ -137,9 +137,9 @@ def account_payment_method_keyboard() -> InlineKeyboardMarkup:
 
 def ton_account_payment_keyboard(pay_url: str, comment: str) -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
-    builder.row(InlineKeyboardButton(text="💠 Оплатить через Tonkeeper", url=pay_url, style="success"))
+    builder.row(_btn("💠 Оплатить через Tonkeeper", url=pay_url, style="success"))
     builder.row(
-        InlineKeyboardButton(text="🔄 Проверить оплату", callback_data=f"check_ton_account:{comment}", style="primary"),
+        _btn("🔄 Проверить оплату", callback_data=f"check_ton_account:{comment}", style="primary"),
         _btn("◀️ Назад", callback_data="accounts", style="primary"),
     )
     return builder.as_markup()
@@ -237,7 +237,7 @@ def mailing_messages_keyboard(mailing_id: int, messages: list[MailingMessage]) -
         builder.row(_btn(f"🗑️ {preview}", callback_data=f"delete_msg:{msg.id}", style="danger"))
     builder.row(
         _btn("➕ Текст/фото", callback_data=f"add_mailing_message:{mailing_id}", style="primary"),
-        InlineKeyboardButton(text="📨 Переслать", callback_data=f"add_mailing_forward:{mailing_id}", style="primary"),
+        _btn("📨 Переслать", callback_data=f"add_mailing_forward:{mailing_id}", style="primary"),
     )
     builder.row(_btn("◀️ Назад", callback_data=f"mailing:{mailing_id}", style="primary"))
     return builder.as_markup()
@@ -258,7 +258,7 @@ def photo_collection_keyboard(mailing_id: int, photo_count: int, is_create: bool
     builder = InlineKeyboardBuilder()
     prefix = "create_" if is_create else "edit_"
     builder.row(
-        InlineKeyboardButton(text=f"💾 Сохранить ({photo_count} фото)", callback_data=f"{prefix}save_photos:{mailing_id}", style="success"),
+        _btn(f"💾 Сохранить ({photo_count} фото)", callback_data=f"{prefix}save_photos:{mailing_id}", style="success"),
         _btn("◀️ Назад", callback_data="cancel", style="primary"),
     )
     return builder.as_markup()
@@ -320,7 +320,7 @@ def mailing_creation_messages_keyboard(mailing_id: int, messages: list[MailingMe
         builder.row(_btn(f"🗑️ {preview}", callback_data=f"create_delete_msg:{msg.id}", style="danger"))
     builder.row(
         _btn("➕ Текст/фото", callback_data=f"create_add_message:{mailing_id}", style="primary"),
-        InlineKeyboardButton(text="📨 Переслать", callback_data=f"create_add_forward:{mailing_id}", style="primary"),
+        _btn("📨 Переслать", callback_data=f"create_add_forward:{mailing_id}", style="primary"),
     )
     if messages:
         builder.row(_btn("✅ Готово", callback_data=f"create_messages_done:{mailing_id}", style="success"))
@@ -349,7 +349,7 @@ def mailing_creation_targets_keyboard(mailing_id: int, targets: list[MailingTarg
 def active_hours_keyboard(mailing_id: int) -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
     builder.row(
-        InlineKeyboardButton(text="⏭️ Пропустить (24/7)", callback_data=f"skip_hours:{mailing_id}", style="primary"),
+        _btn("⏭️ Пропустить (24/7)", callback_data=f"skip_hours:{mailing_id}", style="primary"),
         _btn("⏰ Настроить", callback_data=f"setup_hours:{mailing_id}", style="primary"),
     )
     builder.row(_btn("◀️ Назад", callback_data=f"cancel_creation:{mailing_id}", style="primary"))
@@ -391,7 +391,7 @@ def payment_keyboard(pay_url: str, invoice_id: str) -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
     builder.row(_btn("💳 Оплатить", url=pay_url, style="success"))
     builder.row(
-        InlineKeyboardButton(text="🔄 Проверить оплату", callback_data=f"check_payment:{invoice_id}", style="primary"),
+        _btn("🔄 Проверить оплату", callback_data=f"check_payment:{invoice_id}", style="primary"),
         _btn("◀️ Назад", callback_data="subscription", style="primary"),
     )
     return builder.as_markup()
@@ -400,8 +400,8 @@ def payment_keyboard(pay_url: str, invoice_id: str) -> InlineKeyboardMarkup:
 def payment_method_keyboard() -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
     builder.row(
-        InlineKeyboardButton(text="💎 CryptoBot (USDT)", callback_data="pay_cryptobot", style="primary"),
-        InlineKeyboardButton(text="💠 TON", callback_data="pay_ton", style="primary"),
+        _btn("💎 CryptoBot (USDT)", callback_data="pay_cryptobot", style="primary"),
+        _btn("💠 TON", callback_data="pay_ton", style="primary"),
     )
     builder.row(_btn("💳 На карту", callback_data="pay_card", style="primary"))
     builder.row(_btn("◀️ Назад", callback_data="subscription", style="primary"))
@@ -410,9 +410,9 @@ def payment_method_keyboard() -> InlineKeyboardMarkup:
 
 def ton_payment_keyboard(pay_url: str, comment: str) -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
-    builder.row(InlineKeyboardButton(text="💠 Оплатить через Tonkeeper", url=pay_url, style="success"))
+    builder.row(_btn("💠 Оплатить через Tonkeeper", url=pay_url, style="success"))
     builder.row(
-        InlineKeyboardButton(text="🔄 Проверить оплату", callback_data=f"check_ton_payment:{comment}", style="primary"),
+        _btn("🔄 Проверить оплату", callback_data=f"check_ton_payment:{comment}", style="primary"),
         _btn("◀️ Назад", callback_data="subscription", style="primary"),
     )
     return builder.as_markup()
