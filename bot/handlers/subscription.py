@@ -19,6 +19,7 @@ from ..keyboards.inline import (
 )
 from ..config import config
 from ..services import CryptoBotService, TonPaymentService
+from ..utils.premium_emoji import pe
 
 router = Router()
 
@@ -60,7 +61,7 @@ async def callback_subscription(callback: CallbackQuery, db: Database):
         has_subscription = False
 
     await callback.message.edit_text(
-        text, reply_markup=subscription_keyboard(has_subscription)
+        pe(text), parse_mode="HTML", reply_markup=subscription_keyboard(has_subscription)
     )
     await callback.answer()
 
@@ -135,7 +136,8 @@ async def _create_cryptobot_subscription(
         if cryptobot.last_error:
             error_msg = cryptobot.last_error.message
         await callback.message.edit_text(
-            f"❌ Ошибка создания платежа:\n{error_msg}",
+            pe(f"❌ Ошибка создания платежа:\n{error_msg}"),
+            parse_mode="HTML",
             reply_markup=main_menu_keyboard(),
         )
         return
@@ -177,7 +179,8 @@ async def callback_pay_ton(
     amount = await ton_service.calculate_ton_amount(price)
     if not amount:
         await callback.message.edit_text(
-            "❌ Не удалось получить курс TON. Попробуйте позже.",
+            pe("❌ Не удалось получить курс TON. Попробуйте позже."),
+            parse_mode="HTML",
             reply_markup=payment_method_keyboard(),
         )
         await callback.answer()
@@ -241,8 +244,9 @@ async def callback_check_ton_payment(
         await _pay_referral(user, db, payment.amount)
 
         await callback.message.edit_text(
-            f"✅ Оплата получена!\n\n"
-            f"Ваша подписка активна до {new_end.strftime('%d.%m.%Y %H:%M')}",
+            pe(f"✅ Оплата получена!\n\n"
+            f"Ваша подписка активна до {new_end.strftime('%d.%m.%Y %H:%M')}"),
+            parse_mode="HTML",
             reply_markup=main_menu_keyboard(),
         )
         await callback.answer("Оплата получена!")
@@ -284,8 +288,9 @@ async def callback_check_payment(
         await _pay_referral(user, db, payment.amount)
 
         await callback.message.edit_text(
-            f"✅ Оплата получена!\n\n"
-            f"Ваша подписка активна до {new_end.strftime('%d.%m.%Y %H:%M')}",
+            pe(f"✅ Оплата получена!\n\n"
+            f"Ваша подписка активна до {new_end.strftime('%d.%m.%Y %H:%M')}"),
+            parse_mode="HTML",
             reply_markup=main_menu_keyboard(),
         )
         await callback.answer("Оплата получена!")
@@ -326,14 +331,16 @@ async def process_promocode(message: Message, state: FSMContext, db: Database):
 
     if not promo:
         await message.answer(
-            "❌ Промокод не найден. Проверьте правильность и попробуйте ещё раз:",
+            pe("❌ Промокод не найден. Проверьте правильность и попробуйте ещё раз:"),
+            parse_mode="HTML",
             reply_markup=cancel_keyboard(),
         )
         return
 
     if promo.uses_count >= promo.max_uses:
         await message.answer(
-            "❌ Этот промокод уже был использован максимальное количество раз.",
+            pe("❌ Этот промокод уже был использован максимальное количество раз."),
+            parse_mode="HTML",
             reply_markup=back_to_subscription_keyboard(),
         )
         await state.clear()
@@ -343,7 +350,8 @@ async def process_promocode(message: Message, state: FSMContext, db: Database):
 
     if await db.has_user_used_promocode(promo.id, user.id):
         await message.answer(
-            "❌ Вы уже использовали этот промокод.",
+            pe("❌ Вы уже использовали этот промокод."),
+            parse_mode="HTML",
             reply_markup=back_to_subscription_keyboard(),
         )
         await state.clear()
@@ -359,9 +367,10 @@ async def process_promocode(message: Message, state: FSMContext, db: Database):
     await state.clear()
 
     await message.answer(
-        f"✅ Промокод активирован!\n\n"
+        pe(f"✅ Промокод активирован!\n\n"
         f"Добавлено дней: {promo.duration_days}\n"
-        f"Подписка активна до: {new_end.strftime('%d.%m.%Y %H:%M')}",
+        f"Подписка активна до: {new_end.strftime('%d.%m.%Y %H:%M')}"),
+        parse_mode="HTML",
         reply_markup=main_menu_keyboard(),
     )
 
@@ -370,7 +379,7 @@ async def process_promocode(message: Message, state: FSMContext, db: Database):
 async def callback_pay_card(callback: CallbackQuery, db: Database):
     manager = await db.get_setting("card_manager_username") or "autosenderkarta"
     await callback.message.edit_text(
-        "💳 Оплата банковской картой\n\n"
+        pe("💳 Оплата банковской картой\n\n"
         "Принимаем оплату в гривнах и рублях.\n"
         "Напишите нашему менеджеру:\n\n"
         f"👤 Менеджер: @{manager}\n\n"
@@ -379,7 +388,8 @@ async def callback_pay_card(callback: CallbackQuery, db: Database):
         "2. Менеджер отправит вам реквизиты для перевода\n"
         "3. После оплаты отправьте скриншот чека менеджеру\n"
         "4. Подписка будет активирована в течение нескольких минут\n\n"
-        "⏰ Время работы менеджера: ежедневно с 9:00 до 23:00",
+        "⏰ Время работы менеджера: ежедневно с 9:00 до 23:00"),
+        parse_mode="HTML",
         reply_markup=back_to_subscription_keyboard(),
     )
     await callback.answer()

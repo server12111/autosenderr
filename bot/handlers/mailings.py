@@ -42,6 +42,7 @@ from ..keyboards.inline import (
 from ..utils.time_utils import format_active_hours, parse_time_range, create_active_hours_json
 from ..services import MailingService
 from ..userbot.manager import UserbotManager
+from ..utils.premium_emoji import pe
 
 logger = logging.getLogger(__name__)
 
@@ -167,7 +168,7 @@ async def callback_account_mailings(callback: CallbackQuery, db: Database):
         text += "Рассылок для этого аккаунта нет.\n"
 
     text += "\nВыберите рассылку или создайте новую:"
-    await callback.message.edit_text(text, reply_markup=mailings_keyboard(mailings))
+    await callback.message.edit_text(pe(text), parse_mode="HTML", reply_markup=mailings_keyboard(mailings))
     await callback.answer()
 
 
@@ -186,7 +187,7 @@ async def callback_mailings(callback: CallbackQuery, db: Database):
 
     text += "\nВыберите рассылку или создайте новую:"
 
-    await callback.message.edit_text(text, reply_markup=mailings_keyboard(mailings))
+    await callback.message.edit_text(pe(text), parse_mode="HTML", reply_markup=mailings_keyboard(mailings))
     await callback.answer()
 
 
@@ -207,7 +208,7 @@ async def callback_mailing_menu(callback: CallbackQuery, db: Database):
     last_sent = _fmt_dt(mailing.last_sent_at)
     active_hours = format_active_hours(mailing.active_hours_json)
 
-    text = (
+    text = pe(
         f"📋 Рассылка: {mailing.name}\n\n"
         f"Статус: {status}\n"
         f"Аккаунт: {account.phone if account else 'не найден'}\n"
@@ -219,7 +220,7 @@ async def callback_mailing_menu(callback: CallbackQuery, db: Database):
         "Выберите действие:"
     )
 
-    await callback.message.edit_text(text, reply_markup=mailing_menu_keyboard(mailing))
+    await callback.message.edit_text(text, parse_mode="HTML", reply_markup=mailing_menu_keyboard(mailing))
     await callback.answer()
 
 
@@ -257,7 +258,7 @@ async def callback_toggle_mailing(
     last_sent = _fmt_dt(mailing.last_sent_at)
     active_hours = format_active_hours(mailing.active_hours_json)
 
-    text = (
+    text = pe(
         f"📋 Рассылка: {mailing.name}\n\n"
         f"Статус: {status}\n"
         f"Аккаунт: {account.phone if account else 'не найден'}\n"
@@ -269,7 +270,7 @@ async def callback_toggle_mailing(
         "Выберите действие:"
     )
 
-    await callback.message.edit_text(text, reply_markup=mailing_menu_keyboard(mailing))
+    await callback.message.edit_text(text, parse_mode="HTML", reply_markup=mailing_menu_keyboard(mailing))
 
 
 # === Mailing Messages ===
@@ -393,7 +394,7 @@ async def process_edit_message_photo(
 async def process_edit_message_text(message: Message, state: FSMContext, db: Database):
     text = (message.text or "").strip()
     if not text:
-        await message.answer("❌ Отправьте текст или фото.")
+        await message.answer(pe("❌ Отправьте текст или фото."), parse_mode="HTML")
         return
     entities_json = serialize_entities(message.entities)
     data = await state.get_data()
@@ -593,10 +594,10 @@ async def process_target_interval(message: Message, state: FSMContext, db: Datab
     try:
         interval = int(message.text.strip())
         if interval != 0 and interval < 30:
-            await message.answer("❌ Минимальный интервал — 30 секунд (или 0 для использования общего интервала)")
+            await message.answer(pe("❌ Минимальный интервал — 30 секунд (или 0 для использования общего интервала)"), parse_mode="HTML")
             return
     except ValueError:
-        await message.answer("❌ Введите число (секунды) или 0")
+        await message.answer(pe("❌ Введите число (секунды) или 0"), parse_mode="HTML")
         return
 
     data = await state.get_data()
@@ -651,13 +652,13 @@ async def process_edit_folder(
     # Get account for this mailing to use Telethon
     mailing = await db.get_mailing(mailing_id)
     if not mailing:
-        await message.answer("❌ Рассылка не найдена")
+        await message.answer(pe("❌ Рассылка не найдена"), parse_mode="HTML")
         await state.clear()
         return
 
     client = await userbot_manager.get_client(mailing.account_id)
     if not client:
-        await message.answer("❌ Аккаунт не подключён. Проверьте аккаунт.")
+        await message.answer(pe("❌ Аккаунт не подключён. Проверьте аккаунт."), parse_mode="HTML")
         await state.clear()
         return
 
@@ -667,7 +668,7 @@ async def process_edit_folder(
 
         chats = getattr(result, 'chats', [])
         if not chats:
-            await message.answer("❌ Папка пуста или не удалось получить чаты.")
+            await message.answer(pe("❌ Папка пуста или не удалось получить чаты."), parse_mode="HTML")
             return
 
         added = 0
@@ -853,10 +854,10 @@ async def process_mailing_interval(message: Message, state: FSMContext, db: Data
     try:
         interval = int(message.text.strip())
         if interval < 30:
-            await message.answer("❌ Минимальный интервал - 30 секунд")
+            await message.answer(pe("❌ Минимальный интервал - 30 секунд"), parse_mode="HTML")
             return
     except ValueError:
-        await message.answer("❌ Введите число (секунды)")
+        await message.answer(pe("❌ Введите число (секунды)"), parse_mode="HTML")
         return
 
     data = await state.get_data()
@@ -982,7 +983,7 @@ async def process_create_message_photo(
 async def process_create_message_text(message: Message, state: FSMContext, db: Database):
     text = (message.text or "").strip()
     if not text:
-        await message.answer("❌ Отправьте текст или фото.")
+        await message.answer(pe("❌ Отправьте текст или фото."), parse_mode="HTML")
         return
     entities_json = serialize_entities(message.entities)
     data = await state.get_data()
@@ -1166,13 +1167,13 @@ async def process_create_folder(
 
     mailing = await db.get_mailing(mailing_id)
     if not mailing:
-        await message.answer("❌ Рассылка не найдена")
+        await message.answer(pe("❌ Рассылка не найдена"), parse_mode="HTML")
         await state.clear()
         return
 
     client = await userbot_manager.get_client(mailing.account_id)
     if not client:
-        await message.answer("❌ Аккаунт не подключён. Проверьте аккаунт.")
+        await message.answer(pe("❌ Аккаунт не подключён. Проверьте аккаунт."), parse_mode="HTML")
         await state.clear()
         return
 
@@ -1182,7 +1183,7 @@ async def process_create_folder(
 
         chats = getattr(result, 'chats', [])
         if not chats:
-            await message.answer("❌ Папка пуста или не удалось получить чаты.")
+            await message.answer(pe("❌ Папка пуста или не удалось получить чаты."), parse_mode="HTML")
             return
 
         added = 0

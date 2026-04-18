@@ -48,6 +48,7 @@ import certifi
 
 from .database.db import Database
 from .utils.time_utils import is_within_active_hours
+from .utils.premium_emoji import pe
 
 logger = logging.getLogger(__name__)
 
@@ -238,7 +239,7 @@ class AutoresponderService:
             msg_text = event.text or "(медиа/стикер)"
             if len(msg_text) > 200:
                 msg_text = msg_text[:200] + "..."
-            notification = (
+            notification = pe(
                 f"📥 Сообщение от:\n"
                 f"👤 {sender_name}\n"
                 f"🔗 {sender_username}\n"
@@ -689,11 +690,13 @@ class MailingService:
                     if user:
                         await notify(
                             user.telegram_id,
-                            f"⚠️ <b>Проблема с аккаунтом!</b>\n\n"
-                            f"📱 Аккаунт: <b>{account.display_name}</b>\n"
-                            f"❗️ Причина: {reason}\n\n"
-                            f"Рассылка остановлена. Аккаунт отключён.\n"
-                            f"Добавьте аккаунт заново в разделе «Аккаунты».",
+                            pe(
+                                f"⚠️ <b>Проблема с аккаунтом!</b>\n\n"
+                                f"📱 Аккаунт: <b>{account.display_name}</b>\n"
+                                f"❗️ Причина: {reason}\n\n"
+                                f"Рассылка остановлена. Аккаунт отключён.\n"
+                                f"Добавьте аккаунт заново в разделе «Аккаунты»."
+                            ),
                         )
             except Exception as e:
                 logger.error(f"Failed to notify about ban for account {account_id}: {e}")
@@ -728,11 +731,13 @@ class MailingService:
                     if user:
                         await notify(
                             user.telegram_id,
-                            f"⚠️ <b>Проблема с рассылкой!</b>\n\n"
-                            f"📱 Аккаунт: <b>{account.display_name}</b>\n"
-                            f"💬 Чат: <code>{chat}</code>\n"
-                            f"❗️ {reason}\n\n"
-                            f"Цель автоматически удалена из рассылки.",
+                            pe(
+                                f"⚠️ <b>Проблема с рассылкой!</b>\n\n"
+                                f"📱 Аккаунт: <b>{account.display_name}</b>\n"
+                                f"💬 Чат: <code>{chat}</code>\n"
+                                f"❗️ {reason}\n\n"
+                                f"Цель автоматически удалена из рассылки."
+                            ),
                         )
             except Exception as e:
                 logger.error(f"Failed to notify about chat ban for account {account_id}: {e}")
@@ -799,9 +804,9 @@ class SubscriptionCheckerService:
                     try:
                         await bot.send_message(
                             user.telegram_id,
-                            "⚠️ <b>Ваша подписка истекла.</b>\n\n"
+                            pe("⚠️ <b>Ваша подписка истекла.</b>\n\n"
                             f"Остановлено {stopped} рассылок.\n"
-                            "Продлите подписку в разделе «Подписка», чтобы возобновить работу.",
+                            "Продлите подписку в разделе «Подписка», чтобы возобновить работу."),
                             parse_mode="HTML"
                         )
                     except Exception:

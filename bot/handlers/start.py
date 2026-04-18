@@ -8,6 +8,7 @@ from ..keyboards.inline import (
     main_menu_keyboard, back_to_menu_keyboard, channel_check_keyboard,
     accounts_keyboard, admin_keyboard, mailings_keyboard,
 )
+from ..utils.premium_emoji import pe
 
 router = Router()
 
@@ -50,12 +51,13 @@ async def cmd_start(message: Message, db: Database):
         not_subscribed = await check_channels_subscription(message.bot, message.from_user.id, channels)
         if not_subscribed:
             await message.answer(
-                "📢 Для использования бота необходимо подписаться на каналы:",
+                pe("📢 Для использования бота необходимо подписаться на каналы:"),
+                parse_mode="HTML",
                 reply_markup=channel_check_keyboard(not_subscribed),
             )
             return
 
-    text = (
+    text = pe(
         f"👋 Привет, <b>{message.from_user.first_name}</b>!\n\n"
         "Добро пожаловать в <b>AutoSender</b> — инструмент для автоматических рассылок через Telegram-аккаунты.\n\n"
         "⚡️ <b>Что умеет бот:</b>\n"
@@ -77,14 +79,15 @@ async def callback_check_channels(callback: CallbackQuery, db: Database):
         if not_subscribed:
             await callback.answer("Вы ещё не подписались на все каналы!", show_alert=True)
             await callback.message.edit_text(
-                "📢 Подпишитесь на все каналы и нажмите «Проверить»:",
+                pe("📢 Подпишитесь на все каналы и нажмите «Проверить»:"),
+                parse_mode="HTML",
                 reply_markup=channel_check_keyboard(not_subscribed),
             )
             return
 
     await callback.answer("✅ Готово!")
     await callback.message.edit_text(
-        "📋 <b>Главное меню</b>\n\nВыберите раздел:",
+        pe("📋 <b>Главное меню</b>\n\nВыберите раздел:"),
         parse_mode="HTML",
         reply_markup=main_menu_keyboard(),
     )
@@ -94,7 +97,7 @@ async def callback_check_channels(callback: CallbackQuery, db: Database):
 async def callback_main_menu(callback: CallbackQuery, db: Database):
     await db.get_or_create_user(callback.from_user.id, callback.from_user.username)
     await callback.message.edit_text(
-        "📋 <b>Главное меню</b>\n\nВыберите раздел:",
+        pe("📋 <b>Главное меню</b>\n\nВыберите раздел:"),
         parse_mode="HTML",
         reply_markup=main_menu_keyboard(),
     )
@@ -104,7 +107,7 @@ async def callback_main_menu(callback: CallbackQuery, db: Database):
 @router.callback_query(F.data == "help")
 async def callback_help(callback: CallbackQuery, db: Database):
     support = await db.get_setting("card_manager_username") or "autosenderkarta"
-    text = (
+    text = pe(
         "ℹ️ <b>Помощь</b>\n\n"
         "<b>📋 Рассылки</b> — создание и управление рассылками по чатам\n"
         "<b>👤 Аккаунты</b> — добавление Telegram-аккаунтов для рассылок\n"
@@ -141,29 +144,29 @@ async def callback_cancel(callback: CallbackQuery, state: FSMContext, db: Databa
     if current_state and any(x in current_state for x in ("AddAccount", "RenameAccount", "SetProxy", "Autoresponder")):
         user = await db.get_user(callback.from_user.id)
         accounts = await db.get_user_accounts(user.id)
-        text = "👤 <b>Аккаунты</b>\n\nВыберите аккаунт или добавьте новый:"
+        text = pe("👤 <b>Аккаунты</b>\n\nВыберите аккаунт или добавьте новый:")
         try:
             await callback.message.edit_text(text, parse_mode="HTML", reply_markup=accounts_keyboard(accounts))
         except Exception:
             await callback.message.delete()
             await callback.message.answer(text, parse_mode="HTML", reply_markup=accounts_keyboard(accounts))
     elif current_state and "Admin" in current_state:
-        text = "🔧 Админ-панель\n\nВыберите действие:"
+        text = pe("🔧 Админ-панель\n\nВыберите действие:")
         try:
-            await callback.message.edit_text(text, reply_markup=admin_keyboard())
+            await callback.message.edit_text(text, parse_mode="HTML", reply_markup=admin_keyboard())
         except Exception:
             await callback.message.delete()
-            await callback.message.answer(text, reply_markup=admin_keyboard())
+            await callback.message.answer(text, parse_mode="HTML", reply_markup=admin_keyboard())
     elif current_state and any(x in current_state for x in ("CreateMailing", "EditMailing")):
         mailings = await db.get_user_mailings((await db.get_user(callback.from_user.id)).id)
-        text = "📋 <b>Рассылки</b>\n\nВыберите рассылку или создайте новую:"
+        text = pe("📋 <b>Рассылки</b>\n\nВыберите рассылку или создайте новую:")
         try:
             await callback.message.edit_text(text, parse_mode="HTML", reply_markup=mailings_keyboard(mailings))
         except Exception:
             await callback.message.delete()
             await callback.message.answer(text, parse_mode="HTML", reply_markup=mailings_keyboard(mailings))
     else:
-        text = "📋 <b>Главное меню</b>\n\nВыберите раздел:"
+        text = pe("📋 <b>Главное меню</b>\n\nВыберите раздел:")
         try:
             await callback.message.edit_text(text, parse_mode="HTML", reply_markup=main_menu_keyboard())
         except Exception:

@@ -15,6 +15,7 @@ from telethon.errors import (
 )
 
 from ..database.db import Database, Account
+from ..utils.premium_emoji import pe
 
 
 _DEVICE_POOL = [
@@ -271,10 +272,12 @@ class UserbotManager:
                     if user:
                         await self._bot_notify_callback(
                             user.telegram_id,
-                            f"⚠️ <b>Проблема с аккаунтом!</b>\n\n"
-                            f"📱 Аккаунт: <b>{account.display_name}</b>\n"
-                            f"❗️ Причина: {reason}\n\n"
-                            f"Аккаунт отключён. Добавьте его заново в разделе «Аккаунты».",
+                            pe(
+                                f"⚠️ <b>Проблема с аккаунтом!</b>\n\n"
+                                f"📱 Аккаунт: <b>{account.display_name}</b>\n"
+                                f"❗️ Причина: {reason}\n\n"
+                                f"Аккаунт отключён. Добавьте его заново в разделе «Аккаунты»."
+                            ),
                         )
             except Exception as e:
                 logger.error(f"Failed to notify about account {account_id} problem: {e}")

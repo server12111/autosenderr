@@ -7,6 +7,7 @@ from aiogram.fsm.state import State, StatesGroup
 
 from ..database.db import Database
 from ..keyboards.inline import autoresponder_keyboard, group_autoresponder_keyboard, cancel_keyboard
+from ..utils.premium_emoji import pe
 
 router = Router()
 
@@ -41,7 +42,7 @@ async def callback_autoresponder(callback: CallbackQuery, db: Database):
     )
 
     await callback.message.edit_text(
-        text, reply_markup=autoresponder_keyboard(account_id, account.autoresponder_enabled, account.notify_messages)
+        pe(text), parse_mode="HTML", reply_markup=autoresponder_keyboard(account_id, account.autoresponder_enabled, account.notify_messages)
     )
     await callback.answer()
 
@@ -86,7 +87,7 @@ async def callback_toggle_autoresponder(callback: CallbackQuery, db: Database):
     )
 
     await callback.message.edit_text(
-        text, reply_markup=autoresponder_keyboard(account_id, account.autoresponder_enabled, account.notify_messages)
+        pe(text), parse_mode="HTML", reply_markup=autoresponder_keyboard(account_id, account.autoresponder_enabled, account.notify_messages)
     )
 
 
@@ -123,7 +124,7 @@ async def callback_toggle_notify(callback: CallbackQuery, db: Database):
     )
 
     await callback.message.edit_text(
-        text, reply_markup=autoresponder_keyboard(account_id, account.autoresponder_enabled, account.notify_messages)
+        pe(text), parse_mode="HTML", reply_markup=autoresponder_keyboard(account_id, account.autoresponder_enabled, account.notify_messages)
     )
 
 
@@ -162,7 +163,7 @@ async def process_autoresponder_text(message: Message, state: FSMContext, db: Da
     elif message.text:
         text = message.text.strip()
     else:
-        await message.answer("❌ Отправьте текст или фото.", reply_markup=cancel_keyboard())
+        await message.answer(pe("❌ Отправьте текст или фото."), parse_mode="HTML", reply_markup=cancel_keyboard())
         return
 
     await db.update_autoresponder(account_id, False, text, photo=photo_path)
@@ -172,8 +173,9 @@ async def process_autoresponder_text(message: Message, state: FSMContext, db: Da
     saved = "Фото + текст сохранены" if photo_path else "Текст автоответа сохранён"
 
     await message.answer(
-        f"✅ {saved}!\n\n"
-        f"Не забудьте включить автоответчик.",
+        pe(f"✅ {saved}!\n\n"
+        f"Не забудьте включить автоответчик."),
+        parse_mode="HTML",
         reply_markup=autoresponder_keyboard(account_id, account.autoresponder_enabled, account.notify_messages),
     )
 
@@ -201,7 +203,7 @@ async def callback_group_autoresponder(callback: CallbackQuery, db: Database):
     )
 
     await callback.message.edit_text(
-        text, reply_markup=group_autoresponder_keyboard(account_id, account.group_autoresponder_enabled)
+        pe(text), parse_mode="HTML", reply_markup=group_autoresponder_keyboard(account_id, account.group_autoresponder_enabled)
     )
     await callback.answer()
 
@@ -233,11 +235,12 @@ async def callback_toggle_group_autoresponder(callback: CallbackQuery, db: Datab
         text_preview = text_preview[:100] + "..."
 
     await callback.message.edit_text(
-        f"💬 Автоответчик (группы) для {account.display_name}\n\n"
+        pe(f"💬 Автоответчик (группы) для {account.display_name}\n\n"
         f"Статус: {status}\n\n"
         f"Текст автоответа:\n{text_preview}\n\n"
         "ℹ️ Автоответчик отвечает, когда кто-то отвечает на сообщение этого аккаунта в группе.\n"
-        "Каждому пользователю отвечает только один раз.",
+        "Каждому пользователю отвечает только один раз."),
+        parse_mode="HTML",
         reply_markup=group_autoresponder_keyboard(account_id, account.group_autoresponder_enabled),
     )
 
@@ -274,7 +277,7 @@ async def process_group_autoresponder_text(message: Message, state: FSMContext, 
     elif message.text:
         text = message.text.strip()
     else:
-        await message.answer("❌ Отправьте текст или фото.", reply_markup=cancel_keyboard())
+        await message.answer(pe("❌ Отправьте текст или фото."), parse_mode="HTML", reply_markup=cancel_keyboard())
         return
 
     await db.update_group_autoresponder(account_id, False, text, photo=photo_path)
@@ -283,8 +286,9 @@ async def process_group_autoresponder_text(message: Message, state: FSMContext, 
     account = await db.get_account(account_id)
     saved = "Фото + текст сохранены" if photo_path else "Текст автоответа для групп сохранён"
     await message.answer(
-        f"✅ {saved}!\n\n"
-        "Не забудьте включить автоответчик.",
+        pe(f"✅ {saved}!\n\n"
+        "Не забудьте включить автоответчик."),
+        parse_mode="HTML",
         reply_markup=group_autoresponder_keyboard(account_id, account.group_autoresponder_enabled),
     )
 

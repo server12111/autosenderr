@@ -5,6 +5,7 @@ from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
 from ..database.db import Account, Mailing, MailingMessage, MailingTarget, Promocode, RequiredChannel
+from ..utils.premium_emoji import EMOJI_MAP
 
 
 def _strip_html(text: str) -> str:
@@ -12,23 +13,41 @@ def _strip_html(text: str) -> str:
     return _html_lib.unescape(clean)
 
 
+# Sorted longest-first so "⚡️" matches before "⚡"
+_SORTED_EMOJI = sorted(EMOJI_MAP.keys(), key=len, reverse=True)
+
+
+def _btn(text: str, **kwargs) -> InlineKeyboardButton:
+    """Create InlineKeyboardButton: if text starts with a mapped emoji,
+    strip it from text and pass it as icon_custom_emoji_id."""
+    for emoji in _SORTED_EMOJI:
+        if text.startswith(emoji):
+            clean = text[len(emoji):].lstrip()
+            return InlineKeyboardButton(
+                text=clean or emoji,
+                icon_custom_emoji_id=EMOJI_MAP[emoji],
+                **kwargs,
+            )
+    return InlineKeyboardButton(text=text, **kwargs)
+
+
 def main_menu_keyboard() -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
     builder.row(
-        InlineKeyboardButton(text="📋 Мои рассылки", callback_data="mailings", style="primary"),
-        InlineKeyboardButton(text="👤 Аккаунты", callback_data="accounts", style="primary"),
+        _btn("📋 Мои рассылки", callback_data="mailings", style="primary"),
+        _btn("👤 Аккаунты", callback_data="accounts", style="primary"),
     )
     builder.row(
-        InlineKeyboardButton(text="💳 Подписка", callback_data="subscription", style="primary"),
-        InlineKeyboardButton(text="🤝 Рефералы", callback_data="referral", style="primary"),
+        _btn("💳 Подписка", callback_data="subscription", style="primary"),
+        _btn("🤝 Рефералы", callback_data="referral", style="primary"),
     )
-    builder.row(InlineKeyboardButton(text="ℹ️ Помощь", callback_data="help", style="primary"))
+    builder.row(_btn("ℹ️ Помощь", callback_data="help", style="primary"))
     return builder.as_markup()
 
 
 def back_to_menu_keyboard() -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
-    builder.row(InlineKeyboardButton(text="◀️ Главное меню", callback_data="main_menu", style="primary"))
+    builder.row(_btn("◀️ Главное меню", callback_data="main_menu", style="primary"))
     return builder.as_markup()
 
 
@@ -37,50 +56,50 @@ def accounts_keyboard(accounts: list[Account]) -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
     for acc in accounts:
         status = "🟢" if acc.is_active else "🔴"
-        builder.row(InlineKeyboardButton(text=f"{status} {acc.display_name}", callback_data=f"account:{acc.id}", style="primary"))
+        builder.row(_btn(f"{status} {acc.display_name}", callback_data=f"account:{acc.id}", style="primary"))
     builder.row(
-        InlineKeyboardButton(text="➕ Добавить аккаунт", callback_data="add_account", style="success"),
-        InlineKeyboardButton(text="◀️ Главное меню", callback_data="main_menu", style="primary"),
+        _btn("➕ Добавить аккаунт", callback_data="add_account", style="success"),
+        _btn("◀️ Главное меню", callback_data="main_menu", style="primary"),
     )
     return builder.as_markup()
 
 
 def account_menu_keyboard(account_id: int, auto_subscribe: bool = False) -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
-    builder.row(InlineKeyboardButton(text="✉️ Рассылки аккаунта", callback_data=f"account_mailings:{account_id}", style="primary"))
+    builder.row(_btn("✉️ Рассылки аккаунта", callback_data=f"account_mailings:{account_id}", style="primary"))
     builder.row(
-        InlineKeyboardButton(text="🤖 Автоответ (личные)", callback_data=f"autoresponder:{account_id}", style="primary"),
-        InlineKeyboardButton(text="💬 Автоответ (группы)", callback_data=f"group_autoresponder:{account_id}", style="primary"),
+        _btn("🤖 Автоответ (личные)", callback_data=f"autoresponder:{account_id}", style="primary"),
+        _btn("💬 Автоответ (группы)", callback_data=f"group_autoresponder:{account_id}", style="primary"),
     )
-    sub_text = "🔔 Авто-подписка: ВКЛ" if auto_subscribe else "🔕 Авто-подписка: ВЫКЛ"
+    sub_text = "🔔 Авто-подписка: ВКЛ" if auto_subscribe else "🔔 Авто-подписка: ВЫКЛ"
     sub_style = "danger" if auto_subscribe else "success"
     builder.row(
-        InlineKeyboardButton(text=sub_text, callback_data=f"toggle_auto_subscribe:{account_id}", style=sub_style),
-        InlineKeyboardButton(text="🌐 Прокси", callback_data=f"set_proxy:{account_id}", style="primary"),
+        _btn(sub_text, callback_data=f"toggle_auto_subscribe:{account_id}", style=sub_style),
+        _btn("🌐 Прокси", callback_data=f"set_proxy:{account_id}", style="primary"),
     )
     builder.row(
-        InlineKeyboardButton(text="✏️ Переименовать", callback_data=f"rename_account:{account_id}", style="primary"),
-        InlineKeyboardButton(text="❌ Удалить", callback_data=f"delete_account:{account_id}", style="danger"),
+        _btn("✏️ Переименовать", callback_data=f"rename_account:{account_id}", style="primary"),
+        _btn("❌ Удалить", callback_data=f"delete_account:{account_id}", style="danger"),
     )
-    builder.row(InlineKeyboardButton(text="◀️ Назад", callback_data="accounts", style="primary"))
+    builder.row(_btn("◀️ Назад", callback_data="accounts", style="primary"))
     return builder.as_markup()
 
 
 def delete_account_confirm_keyboard(account_id: int) -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
     builder.row(
-        InlineKeyboardButton(text="✅ Да, удалить", callback_data=f"confirm_delete_account:{account_id}", style="danger"),
-        InlineKeyboardButton(text="◀️ Назад", callback_data=f"account:{account_id}", style="primary"),
+        _btn("✅ Да, удалить", callback_data=f"confirm_delete_account:{account_id}", style="danger"),
+        _btn("◀️ Назад", callback_data=f"account:{account_id}", style="primary"),
     )
     return builder.as_markup()
 
 
 def account_payment_keyboard(pay_url: str, invoice_id: str) -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
-    builder.row(InlineKeyboardButton(text="💳 Оплатить", url=pay_url, style="success"))
+    builder.row(_btn("💳 Оплатить", url=pay_url, style="success"))
     builder.row(
         InlineKeyboardButton(text="🔄 Проверить оплату", callback_data=f"check_account_payment:{invoice_id}", style="primary"),
-        InlineKeyboardButton(text="◀️ Назад", callback_data="accounts", style="primary"),
+        _btn("◀️ Назад", callback_data="accounts", style="primary"),
     )
     return builder.as_markup()
 
@@ -88,20 +107,20 @@ def account_payment_keyboard(pay_url: str, invoice_id: str) -> InlineKeyboardMar
 def add_account_proxy_keyboard() -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
     builder.row(
-        InlineKeyboardButton(text="✅ Да, добавить прокси", callback_data="add_account_set_proxy", style="success"),
+        _btn("✅ Да, добавить прокси", callback_data="add_account_set_proxy", style="success"),
         InlineKeyboardButton(text="➡️ Продолжить", callback_data="add_account_skip_proxy", style="primary"),
     )
-    builder.row(InlineKeyboardButton(text="◀️ Назад", callback_data="accounts", style="primary"))
+    builder.row(_btn("◀️ Назад", callback_data="accounts", style="primary"))
     return builder.as_markup()
 
 
 def add_account_api_keyboard() -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
     builder.row(
-        InlineKeyboardButton(text="✅ Да, ввести API", callback_data="add_account_set_api", style="success"),
+        _btn("✅ Да, ввести API", callback_data="add_account_set_api", style="success"),
         InlineKeyboardButton(text="➡️ Продолжить", callback_data="add_account_skip_api", style="primary"),
     )
-    builder.row(InlineKeyboardButton(text="◀️ Назад", callback_data="accounts", style="primary"))
+    builder.row(_btn("◀️ Назад", callback_data="accounts", style="primary"))
     return builder.as_markup()
 
 
@@ -111,8 +130,8 @@ def account_payment_method_keyboard() -> InlineKeyboardMarkup:
         InlineKeyboardButton(text="💎 CryptoBot (USDT)", callback_data="pay_account_cryptobot", style="primary"),
         InlineKeyboardButton(text="💠 TON", callback_data="pay_account_ton", style="primary"),
     )
-    builder.row(InlineKeyboardButton(text="💳 На карту", callback_data="pay_account_card", style="primary"))
-    builder.row(InlineKeyboardButton(text="◀️ Назад", callback_data="accounts", style="primary"))
+    builder.row(_btn("💳 На карту", callback_data="pay_account_card", style="primary"))
+    builder.row(_btn("◀️ Назад", callback_data="accounts", style="primary"))
     return builder.as_markup()
 
 
@@ -121,7 +140,7 @@ def ton_account_payment_keyboard(pay_url: str, comment: str) -> InlineKeyboardMa
     builder.row(InlineKeyboardButton(text="💠 Оплатить через Tonkeeper", url=pay_url, style="success"))
     builder.row(
         InlineKeyboardButton(text="🔄 Проверить оплату", callback_data=f"check_ton_account:{comment}", style="primary"),
-        InlineKeyboardButton(text="◀️ Назад", callback_data="accounts", style="primary"),
+        _btn("◀️ Назад", callback_data="accounts", style="primary"),
     )
     return builder.as_markup()
 
@@ -131,16 +150,16 @@ def autoresponder_keyboard(account_id: int, enabled: bool, notify_enabled: bool 
     builder = InlineKeyboardBuilder()
     toggle_text = "🔴 Выключить" if enabled else "🟢 Включить"
     toggle_style = "danger" if enabled else "success"
-    builder.row(InlineKeyboardButton(text=toggle_text, callback_data=f"toggle_autoresponder:{account_id}", style=toggle_style))
-    notify_text = "🔔 Уведомления: ВКЛ" if notify_enabled else "🔕 Уведомления: ВЫКЛ"
+    builder.row(_btn(toggle_text, callback_data=f"toggle_autoresponder:{account_id}", style=toggle_style))
+    notify_text = "🔔 Уведомления: ВКЛ" if notify_enabled else "🔔 Уведомления: ВЫКЛ"
     notify_style = "danger" if notify_enabled else "success"
     builder.row(
-        InlineKeyboardButton(text="✏️ Изменить текст", callback_data=f"edit_autoresponder_text:{account_id}", style="primary"),
-        InlineKeyboardButton(text=notify_text, callback_data=f"toggle_notify:{account_id}", style=notify_style),
+        _btn("✏️ Изменить текст", callback_data=f"edit_autoresponder_text:{account_id}", style="primary"),
+        _btn(notify_text, callback_data=f"toggle_notify:{account_id}", style=notify_style),
     )
     builder.row(
-        InlineKeyboardButton(text="🗑️ Очистить историю", callback_data=f"clear_autoresponder_history:{account_id}", style="danger"),
-        InlineKeyboardButton(text="◀️ Назад", callback_data=f"account:{account_id}", style="primary"),
+        _btn("🗑️ Очистить историю", callback_data=f"clear_autoresponder_history:{account_id}", style="danger"),
+        _btn("◀️ Назад", callback_data=f"account:{account_id}", style="primary"),
     )
     return builder.as_markup()
 
@@ -149,10 +168,10 @@ def group_autoresponder_keyboard(account_id: int, enabled: bool) -> InlineKeyboa
     builder = InlineKeyboardBuilder()
     toggle_text = "🔴 Выключить" if enabled else "🟢 Включить"
     toggle_style = "danger" if enabled else "success"
-    builder.row(InlineKeyboardButton(text=toggle_text, callback_data=f"toggle_group_autoresponder:{account_id}", style=toggle_style))
+    builder.row(_btn(toggle_text, callback_data=f"toggle_group_autoresponder:{account_id}", style=toggle_style))
     builder.row(
-        InlineKeyboardButton(text="✏️ Изменить текст", callback_data=f"edit_group_autoresponder_text:{account_id}", style="primary"),
-        InlineKeyboardButton(text="◀️ Назад", callback_data=f"account:{account_id}", style="primary"),
+        _btn("✏️ Изменить текст", callback_data=f"edit_group_autoresponder_text:{account_id}", style="primary"),
+        _btn("◀️ Назад", callback_data=f"account:{account_id}", style="primary"),
     )
     return builder.as_markup()
 
@@ -162,10 +181,10 @@ def mailings_keyboard(mailings: list[Mailing]) -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
     for m in mailings:
         status = "🟢" if m.is_active else "🔴"
-        builder.row(InlineKeyboardButton(text=f"{status} {m.name}", callback_data=f"mailing:{m.id}", style="primary"))
+        builder.row(_btn(f"{status} {m.name}", callback_data=f"mailing:{m.id}", style="primary"))
     builder.row(
-        InlineKeyboardButton(text="➕ Создать рассылку", callback_data="create_mailing", style="success"),
-        InlineKeyboardButton(text="◀️ Главное меню", callback_data="main_menu", style="primary"),
+        _btn("➕ Создать рассылку", callback_data="create_mailing", style="success"),
+        _btn("◀️ Главное меню", callback_data="main_menu", style="primary"),
     )
     return builder.as_markup()
 
@@ -174,18 +193,18 @@ def mailing_menu_keyboard(mailing: Mailing) -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
     toggle_text = "🔴 Остановить" if mailing.is_active else "🟢 Запустить"
     toggle_style = "danger" if mailing.is_active else "success"
-    builder.row(InlineKeyboardButton(text=toggle_text, callback_data=f"toggle_mailing:{mailing.id}", style=toggle_style))
+    builder.row(_btn(toggle_text, callback_data=f"toggle_mailing:{mailing.id}", style=toggle_style))
     builder.row(
-        InlineKeyboardButton(text="📝 Сообщения", callback_data=f"mailing_messages:{mailing.id}", style="primary"),
-        InlineKeyboardButton(text="🎯 Целевые чаты", callback_data=f"mailing_targets:{mailing.id}", style="primary"),
+        _btn("📝 Сообщения", callback_data=f"mailing_messages:{mailing.id}", style="primary"),
+        _btn("🎯 Целевые чаты", callback_data=f"mailing_targets:{mailing.id}", style="primary"),
     )
     builder.row(
-        InlineKeyboardButton(text="⏰ Время активности", callback_data=f"mailing_hours:{mailing.id}", style="primary"),
+        _btn("⏰ Время активности", callback_data=f"mailing_hours:{mailing.id}", style="primary"),
         InlineKeyboardButton(text="🔄 Аккаунт", callback_data=f"change_mailing_account:{mailing.id}", style="primary"),
     )
     builder.row(
-        InlineKeyboardButton(text="❌ Удалить рассылку", callback_data=f"delete_mailing:{mailing.id}", style="danger"),
-        InlineKeyboardButton(text="◀️ Назад", callback_data="mailings", style="primary"),
+        _btn("❌ Удалить рассылку", callback_data=f"delete_mailing:{mailing.id}", style="danger"),
+        _btn("◀️ Назад", callback_data="mailings", style="primary"),
     )
     return builder.as_markup()
 
@@ -193,8 +212,8 @@ def mailing_menu_keyboard(mailing: Mailing) -> InlineKeyboardMarkup:
 def delete_mailing_confirm_keyboard(mailing_id: int) -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
     builder.row(
-        InlineKeyboardButton(text="✅ Да, удалить", callback_data=f"confirm_delete_mailing:{mailing_id}", style="danger"),
-        InlineKeyboardButton(text="◀️ Назад", callback_data=f"mailing:{mailing_id}", style="primary"),
+        _btn("✅ Да, удалить", callback_data=f"confirm_delete_mailing:{mailing_id}", style="danger"),
+        _btn("◀️ Назад", callback_data=f"mailing:{mailing_id}", style="primary"),
     )
     return builder.as_markup()
 
@@ -215,12 +234,12 @@ def mailing_messages_keyboard(mailing_id: int, messages: list[MailingMessage]) -
     builder = InlineKeyboardBuilder()
     for msg in messages:
         preview = _msg_button_preview(msg)
-        builder.row(InlineKeyboardButton(text=f"🗑️ {preview}", callback_data=f"delete_msg:{msg.id}", style="danger"))
+        builder.row(_btn(f"🗑️ {preview}", callback_data=f"delete_msg:{msg.id}", style="danger"))
     builder.row(
-        InlineKeyboardButton(text="➕ Текст/фото", callback_data=f"add_mailing_message:{mailing_id}", style="primary"),
+        _btn("➕ Текст/фото", callback_data=f"add_mailing_message:{mailing_id}", style="primary"),
         InlineKeyboardButton(text="📨 Переслать", callback_data=f"add_mailing_forward:{mailing_id}", style="primary"),
     )
-    builder.row(InlineKeyboardButton(text="◀️ Назад", callback_data=f"mailing:{mailing_id}", style="primary"))
+    builder.row(_btn("◀️ Назад", callback_data=f"mailing:{mailing_id}", style="primary"))
     return builder.as_markup()
 
 
@@ -231,7 +250,7 @@ def parse_mode_keyboard(message_id: int, mailing_id: int) -> InlineKeyboardMarku
         InlineKeyboardButton(text="Markdown", callback_data=f"set_parse_mode:md:{message_id}:{mailing_id}", style="primary"),
         InlineKeyboardButton(text="Plain", callback_data=f"set_parse_mode:plain:{message_id}:{mailing_id}", style="primary"),
     )
-    builder.row(InlineKeyboardButton(text="◀️ Назад", callback_data=f"mailing_messages:{mailing_id}", style="primary"))
+    builder.row(_btn("◀️ Назад", callback_data=f"mailing_messages:{mailing_id}", style="primary"))
     return builder.as_markup()
 
 
@@ -240,7 +259,7 @@ def photo_collection_keyboard(mailing_id: int, photo_count: int, is_create: bool
     prefix = "create_" if is_create else "edit_"
     builder.row(
         InlineKeyboardButton(text=f"💾 Сохранить ({photo_count} фото)", callback_data=f"{prefix}save_photos:{mailing_id}", style="success"),
-        InlineKeyboardButton(text="◀️ Назад", callback_data="cancel", style="primary"),
+        _btn("◀️ Назад", callback_data="cancel", style="primary"),
     )
     return builder.as_markup()
 
@@ -262,14 +281,14 @@ def mailing_targets_keyboard(mailing_id: int, targets: list[MailingTarget]) -> I
     for target in targets:
         iv_text = _format_target_interval(target)
         builder.row(
-            InlineKeyboardButton(text=f"🗑️ {target.chat_identifier}", callback_data=f"delete_target:{target.id}", style="danger"),
-            InlineKeyboardButton(text=iv_text, callback_data=f"edit_target_interval:{target.id}:{mailing_id}", style="primary"),
+            _btn(f"🗑️ {target.chat_identifier}", callback_data=f"delete_target:{target.id}", style="danger"),
+            _btn(iv_text, callback_data=f"edit_target_interval:{target.id}:{mailing_id}", style="primary"),
         )
     builder.row(
-        InlineKeyboardButton(text="➕ Добавить чат", callback_data=f"add_mailing_target:{mailing_id}", style="primary"),
-        InlineKeyboardButton(text="📁 Добавить папку", callback_data=f"add_folder_target:{mailing_id}", style="primary"),
+        _btn("➕ Добавить чат", callback_data=f"add_mailing_target:{mailing_id}", style="primary"),
+        _btn("📁 Добавить папку", callback_data=f"add_folder_target:{mailing_id}", style="primary"),
     )
-    builder.row(InlineKeyboardButton(text="◀️ Назад", callback_data=f"mailing:{mailing_id}", style="primary"))
+    builder.row(_btn("◀️ Назад", callback_data=f"mailing:{mailing_id}", style="primary"))
     return builder.as_markup()
 
 
@@ -277,20 +296,20 @@ def mailing_targets_keyboard(mailing_id: int, targets: list[MailingTarget]) -> I
 def select_account_keyboard(accounts: list[Account]) -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
     for acc in accounts:
-        builder.row(InlineKeyboardButton(text=f"📱 {acc.display_name}", callback_data=f"select_account:{acc.id}", style="primary"))
-    builder.row(InlineKeyboardButton(text="◀️ Назад", callback_data="mailings", style="primary"))
+        builder.row(_btn(f"📱 {acc.display_name}", callback_data=f"select_account:{acc.id}", style="primary"))
+    builder.row(_btn("◀️ Назад", callback_data="mailings", style="primary"))
     return builder.as_markup()
 
 
 def select_account_for_mailing_keyboard(accounts: list[Account], mailing_id: int) -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
     for acc in accounts:
-        builder.row(InlineKeyboardButton(
-            text=f"📱 {acc.display_name}",
+        builder.row(_btn(
+            f"📱 {acc.display_name}",
             callback_data=f"set_mailing_account:{acc.id}:{mailing_id}",
             style="primary",
         ))
-    builder.row(InlineKeyboardButton(text="◀️ Назад", callback_data=f"mailing:{mailing_id}", style="primary"))
+    builder.row(_btn("◀️ Назад", callback_data=f"mailing:{mailing_id}", style="primary"))
     return builder.as_markup()
 
 
@@ -298,32 +317,32 @@ def mailing_creation_messages_keyboard(mailing_id: int, messages: list[MailingMe
     builder = InlineKeyboardBuilder()
     for msg in messages:
         preview = _msg_button_preview(msg)
-        builder.row(InlineKeyboardButton(text=f"🗑️ {preview}", callback_data=f"create_delete_msg:{msg.id}", style="danger"))
+        builder.row(_btn(f"🗑️ {preview}", callback_data=f"create_delete_msg:{msg.id}", style="danger"))
     builder.row(
-        InlineKeyboardButton(text="➕ Текст/фото", callback_data=f"create_add_message:{mailing_id}", style="primary"),
+        _btn("➕ Текст/фото", callback_data=f"create_add_message:{mailing_id}", style="primary"),
         InlineKeyboardButton(text="📨 Переслать", callback_data=f"create_add_forward:{mailing_id}", style="primary"),
     )
     if messages:
-        builder.row(InlineKeyboardButton(text="✅ Готово", callback_data=f"create_messages_done:{mailing_id}", style="success"))
-    builder.row(InlineKeyboardButton(text="◀️ Назад", callback_data=f"cancel_creation:{mailing_id}", style="primary"))
+        builder.row(_btn("✅ Готово", callback_data=f"create_messages_done:{mailing_id}", style="success"))
+    builder.row(_btn("◀️ Назад", callback_data=f"cancel_creation:{mailing_id}", style="primary"))
     return builder.as_markup()
 
 
 def mailing_creation_targets_keyboard(mailing_id: int, targets: list[MailingTarget]) -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
     for target in targets:
-        builder.row(InlineKeyboardButton(text=f"🗑️ {target.chat_identifier}", callback_data=f"create_delete_target:{target.id}", style="danger"))
+        builder.row(_btn(f"🗑️ {target.chat_identifier}", callback_data=f"create_delete_target:{target.id}", style="danger"))
     builder.row(
-        InlineKeyboardButton(text="➕ Добавить чат", callback_data=f"create_add_target:{mailing_id}", style="primary"),
-        InlineKeyboardButton(text="📁 Добавить папку", callback_data=f"create_add_folder:{mailing_id}", style="primary"),
+        _btn("➕ Добавить чат", callback_data=f"create_add_target:{mailing_id}", style="primary"),
+        _btn("📁 Добавить папку", callback_data=f"create_add_folder:{mailing_id}", style="primary"),
     )
     if targets:
         builder.row(
-            InlineKeyboardButton(text="✅ Готово", callback_data=f"create_targets_done:{mailing_id}", style="success"),
-            InlineKeyboardButton(text="◀️ Назад", callback_data=f"cancel_creation:{mailing_id}", style="primary"),
+            _btn("✅ Готово", callback_data=f"create_targets_done:{mailing_id}", style="success"),
+            _btn("◀️ Назад", callback_data=f"cancel_creation:{mailing_id}", style="primary"),
         )
     else:
-        builder.row(InlineKeyboardButton(text="◀️ Назад", callback_data=f"cancel_creation:{mailing_id}", style="primary"))
+        builder.row(_btn("◀️ Назад", callback_data=f"cancel_creation:{mailing_id}", style="primary"))
     return builder.as_markup()
 
 
@@ -331,17 +350,17 @@ def active_hours_keyboard(mailing_id: int) -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
     builder.row(
         InlineKeyboardButton(text="⏭️ Пропустить (24/7)", callback_data=f"skip_hours:{mailing_id}", style="primary"),
-        InlineKeyboardButton(text="⏰ Настроить", callback_data=f"setup_hours:{mailing_id}", style="primary"),
+        _btn("⏰ Настроить", callback_data=f"setup_hours:{mailing_id}", style="primary"),
     )
-    builder.row(InlineKeyboardButton(text="◀️ Назад", callback_data=f"cancel_creation:{mailing_id}", style="primary"))
+    builder.row(_btn("◀️ Назад", callback_data=f"cancel_creation:{mailing_id}", style="primary"))
     return builder.as_markup()
 
 
 def launch_mailing_keyboard(mailing_id: int) -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
     builder.row(
-        InlineKeyboardButton(text="🚀 Запустить рассылку", callback_data=f"launch_mailing:{mailing_id}", style="success"),
-        InlineKeyboardButton(text="◀️ Назад", callback_data=f"cancel_creation:{mailing_id}", style="primary"),
+        _btn("🚀 Запустить рассылку", callback_data=f"launch_mailing:{mailing_id}", style="success"),
+        _btn("◀️ Назад", callback_data=f"cancel_creation:{mailing_id}", style="primary"),
     )
     return builder.as_markup()
 
@@ -351,29 +370,29 @@ def subscription_keyboard(has_subscription: bool) -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
     sub_text = "🔄 Продлить подписку" if has_subscription else "💳 Купить подписку"
     builder.row(
-        InlineKeyboardButton(text="🎟 Ввести промокод", callback_data="enter_promocode", style="primary"),
-        InlineKeyboardButton(text=sub_text, callback_data="buy_subscription", style="success"),
+        _btn("🎟 Ввести промокод", callback_data="enter_promocode", style="primary"),
+        _btn(sub_text, callback_data="buy_subscription", style="success"),
     )
-    builder.row(InlineKeyboardButton(text="◀️ Главное меню", callback_data="main_menu", style="primary"))
+    builder.row(_btn("◀️ Главное меню", callback_data="main_menu", style="primary"))
     return builder.as_markup()
 
 
 def subscription_plan_keyboard() -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
     builder.row(
-        InlineKeyboardButton(text="📅 7 дней", callback_data="sub_plan:7", style="primary"),
-        InlineKeyboardButton(text="📅 30 дней", callback_data="sub_plan:30", style="primary"),
+        _btn("📅 7 дней", callback_data="sub_plan:7", style="primary"),
+        _btn("📅 30 дней", callback_data="sub_plan:30", style="primary"),
     )
-    builder.row(InlineKeyboardButton(text="◀️ Назад", callback_data="subscription", style="primary"))
+    builder.row(_btn("◀️ Назад", callback_data="subscription", style="primary"))
     return builder.as_markup()
 
 
 def payment_keyboard(pay_url: str, invoice_id: str) -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
-    builder.row(InlineKeyboardButton(text="💳 Оплатить", url=pay_url, style="success"))
+    builder.row(_btn("💳 Оплатить", url=pay_url, style="success"))
     builder.row(
         InlineKeyboardButton(text="🔄 Проверить оплату", callback_data=f"check_payment:{invoice_id}", style="primary"),
-        InlineKeyboardButton(text="◀️ Назад", callback_data="subscription", style="primary"),
+        _btn("◀️ Назад", callback_data="subscription", style="primary"),
     )
     return builder.as_markup()
 
@@ -384,8 +403,8 @@ def payment_method_keyboard() -> InlineKeyboardMarkup:
         InlineKeyboardButton(text="💎 CryptoBot (USDT)", callback_data="pay_cryptobot", style="primary"),
         InlineKeyboardButton(text="💠 TON", callback_data="pay_ton", style="primary"),
     )
-    builder.row(InlineKeyboardButton(text="💳 На карту", callback_data="pay_card", style="primary"))
-    builder.row(InlineKeyboardButton(text="◀️ Назад", callback_data="subscription", style="primary"))
+    builder.row(_btn("💳 На карту", callback_data="pay_card", style="primary"))
+    builder.row(_btn("◀️ Назад", callback_data="subscription", style="primary"))
     return builder.as_markup()
 
 
@@ -394,14 +413,14 @@ def ton_payment_keyboard(pay_url: str, comment: str) -> InlineKeyboardMarkup:
     builder.row(InlineKeyboardButton(text="💠 Оплатить через Tonkeeper", url=pay_url, style="success"))
     builder.row(
         InlineKeyboardButton(text="🔄 Проверить оплату", callback_data=f"check_ton_payment:{comment}", style="primary"),
-        InlineKeyboardButton(text="◀️ Назад", callback_data="subscription", style="primary"),
+        _btn("◀️ Назад", callback_data="subscription", style="primary"),
     )
     return builder.as_markup()
 
 
 def back_to_subscription_keyboard() -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
-    builder.row(InlineKeyboardButton(text="◀️ Назад", callback_data="subscription", style="primary"))
+    builder.row(_btn("◀️ Назад", callback_data="subscription", style="primary"))
     return builder.as_markup()
 
 
@@ -410,17 +429,17 @@ def referral_keyboard(can_withdraw: bool) -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
     if can_withdraw:
         builder.row(
-            InlineKeyboardButton(text="💸 Вывести баланс", callback_data="withdraw_ref_balance", style="success"),
-            InlineKeyboardButton(text="◀️ Главное меню", callback_data="main_menu", style="primary"),
+            _btn("💸 Вывести баланс", callback_data="withdraw_ref_balance", style="success"),
+            _btn("◀️ Главное меню", callback_data="main_menu", style="primary"),
         )
     else:
-        builder.row(InlineKeyboardButton(text="◀️ Главное меню", callback_data="main_menu", style="primary"))
+        builder.row(_btn("◀️ Главное меню", callback_data="main_menu", style="primary"))
     return builder.as_markup()
 
 
 def withdraw_wallet_keyboard() -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
-    builder.row(InlineKeyboardButton(text="◀️ Назад", callback_data="referral", style="primary"))
+    builder.row(_btn("◀️ Назад", callback_data="referral", style="primary"))
     return builder.as_markup()
 
 
@@ -430,8 +449,8 @@ def channel_check_keyboard(channels: list[RequiredChannel]) -> InlineKeyboardMar
     for ch in channels:
         url = f"https://t.me/{ch.channel_username}" if ch.channel_username else None
         if url:
-            builder.row(InlineKeyboardButton(text=f"📢 {ch.channel_title}", url=url, style="primary"))
-    builder.row(InlineKeyboardButton(text="✅ Я подписался — проверить", callback_data="check_channels", style="success"))
+            builder.row(_btn(f"📢 {ch.channel_title}", url=url, style="primary"))
+    builder.row(_btn("✅ Я подписался — проверить", callback_data="check_channels", style="success"))
     return builder.as_markup()
 
 
@@ -447,61 +466,61 @@ def admin_stats_period_keyboard(active: str = "day") -> InlineKeyboardMarkup:
         )
         for label, k in periods
     ])
-    builder.row(InlineKeyboardButton(text="◀️ Назад", callback_data="admin_back", style="primary"))
+    builder.row(_btn("◀️ Назад", callback_data="admin_back", style="primary"))
     return builder.as_markup()
 
 
 def admin_keyboard() -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
     builder.row(
-        InlineKeyboardButton(text="📊 Статистика", callback_data="admin_stats", style="primary"),
-        InlineKeyboardButton(text="🎟 Промокоды", callback_data="admin_promocodes", style="primary"),
+        _btn("📊 Статистика", callback_data="admin_stats", style="primary"),
+        _btn("🎟 Промокоды", callback_data="admin_promocodes", style="primary"),
     )
     builder.row(
-        InlineKeyboardButton(text="📢 Рассылка всем", callback_data="admin_broadcast", style="primary"),
+        _btn("📢 Рассылка всем", callback_data="admin_broadcast", style="primary"),
         InlineKeyboardButton(text="📡 Обяз. каналы", callback_data="admin_channels", style="primary"),
     )
     builder.row(
-        InlineKeyboardButton(text="⚙️ Настройки", callback_data="admin_settings", style="primary"),
-        InlineKeyboardButton(text="💸 Запросы вывода", callback_data="admin_withdrawals", style="primary"),
+        _btn("⚙️ Настройки", callback_data="admin_settings", style="primary"),
+        _btn("💸 Запросы вывода", callback_data="admin_withdrawals", style="primary"),
     )
     builder.row(
-        InlineKeyboardButton(text="📤 Экспорт БД", callback_data="admin_export_db", style="primary"),
-        InlineKeyboardButton(text="📥 Импорт БД", callback_data="admin_import_db", style="primary"),
+        _btn("📤 Экспорт БД", callback_data="admin_export_db", style="primary"),
+        _btn("📥 Импорт БД", callback_data="admin_import_db", style="primary"),
     )
     builder.row(
-        InlineKeyboardButton(text="🗑 Очистить мёртвые аккаунты", callback_data="admin_cleanup_accounts", style="danger"),
+        _btn("🗑 Очистить мёртвые аккаунты", callback_data="admin_cleanup_accounts", style="danger"),
     )
-    builder.row(InlineKeyboardButton(text="◀️ Главное меню", callback_data="main_menu", style="primary"))
+    builder.row(_btn("◀️ Главное меню", callback_data="main_menu", style="primary"))
     return builder.as_markup()
 
 
 def admin_settings_keyboard() -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
     builder.row(
-        InlineKeyboardButton(text="💰 Цена 7 дней", callback_data="admin_set_price_7d", style="primary"),
-        InlineKeyboardButton(text="💰 Цена 30 дней", callback_data="admin_set_price_30d", style="primary"),
+        _btn("💰 Цена 7 дней", callback_data="admin_set_price_7d", style="primary"),
+        _btn("💰 Цена 30 дней", callback_data="admin_set_price_30d", style="primary"),
     )
     builder.row(
-        InlineKeyboardButton(text="🤝 % рефералов", callback_data="admin_set_ref_percent", style="primary"),
-        InlineKeyboardButton(text="💸 Мин. вывод", callback_data="admin_set_min_withdraw", style="primary"),
+        _btn("🤝 % рефералов", callback_data="admin_set_ref_percent", style="primary"),
+        _btn("💸 Мин. вывод", callback_data="admin_set_min_withdraw", style="primary"),
     )
-    builder.row(InlineKeyboardButton(text="💳 Менеджер (оплата картой)", callback_data="admin_set_card_manager", style="primary"))
-    builder.row(InlineKeyboardButton(text="◀️ Назад", callback_data="admin_back", style="primary"))
+    builder.row(_btn("💳 Менеджер (оплата картой)", callback_data="admin_set_card_manager", style="primary"))
+    builder.row(_btn("◀️ Назад", callback_data="admin_back", style="primary"))
     return builder.as_markup()
 
 
 def admin_channels_keyboard(channels: list[RequiredChannel]) -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
     for ch in channels:
-        builder.row(InlineKeyboardButton(
-            text=f"🗑️ {ch.channel_title}",
+        builder.row(_btn(
+            f"🗑️ {ch.channel_title}",
             callback_data=f"admin_del_channel:{ch.channel_id}",
             style="danger",
         ))
     builder.row(
-        InlineKeyboardButton(text="➕ Добавить канал", callback_data="admin_add_channel", style="success"),
-        InlineKeyboardButton(text="◀️ Назад", callback_data="admin_back", style="primary"),
+        _btn("➕ Добавить канал", callback_data="admin_add_channel", style="success"),
+        _btn("◀️ Назад", callback_data="admin_back", style="primary"),
     )
     return builder.as_markup()
 
@@ -510,28 +529,28 @@ def admin_withdrawals_keyboard(requests) -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
     for req in requests:
         builder.row(
-            InlineKeyboardButton(
-                text=f"✅ #{req.id} ({req.amount} USDT)",
+            _btn(
+                f"✅ #{req.id} ({req.amount} USDT)",
                 callback_data=f"admin_approve_withdraw:{req.id}",
                 style="success",
             ),
-            InlineKeyboardButton(
-                text="❌",
+            _btn(
+                "❌",
                 callback_data=f"admin_decline_withdraw:{req.id}",
                 style="danger",
             ),
         )
-    builder.row(InlineKeyboardButton(text="◀️ Назад", callback_data="admin_back", style="primary"))
+    builder.row(_btn("◀️ Назад", callback_data="admin_back", style="primary"))
     return builder.as_markup()
 
 
 def admin_promocodes_keyboard() -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
     builder.row(
-        InlineKeyboardButton(text="➕ Создать промокод", callback_data="admin_create_promo", style="success"),
-        InlineKeyboardButton(text="📋 Список промокодов", callback_data="admin_list_promos", style="primary"),
+        _btn("➕ Создать промокод", callback_data="admin_create_promo", style="success"),
+        _btn("📋 Список промокодов", callback_data="admin_list_promos", style="primary"),
     )
-    builder.row(InlineKeyboardButton(text="◀️ Назад", callback_data="admin_back", style="primary"))
+    builder.row(_btn("◀️ Назад", callback_data="admin_back", style="primary"))
     return builder.as_markup()
 
 
@@ -540,20 +559,20 @@ def admin_promo_list_keyboard(promocodes: list[Promocode]) -> InlineKeyboardMark
     for promo in promocodes:
         status = "✅" if promo.uses_count >= promo.max_uses else "🟢"
         builder.row(
-            InlineKeyboardButton(
-                text=f"{status} {promo.code} ({promo.duration_days}д) [{promo.uses_count}/{promo.max_uses}]",
+            _btn(
+                f"{status} {promo.code} ({promo.duration_days}д) [{promo.uses_count}/{promo.max_uses}]",
                 callback_data=f"admin_promo_info:{promo.id}",
                 style="primary",
             ),
-            InlineKeyboardButton(text="🗑️", callback_data=f"admin_delete_promo:{promo.id}", style="danger"),
+            _btn("🗑️", callback_data=f"admin_delete_promo:{promo.id}", style="danger"),
         )
-    builder.row(InlineKeyboardButton(text="◀️ Назад", callback_data="admin_promocodes", style="primary"))
+    builder.row(_btn("◀️ Назад", callback_data="admin_promocodes", style="primary"))
     return builder.as_markup()
 
 
 def cancel_keyboard() -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
-    builder.row(InlineKeyboardButton(text="◀️ Назад", callback_data="cancel", style="primary"))
+    builder.row(_btn("◀️ Назад", callback_data="cancel", style="primary"))
     return builder.as_markup()
 
 
@@ -576,12 +595,12 @@ def code_input_keyboard(current_code: str = "") -> InlineKeyboardMarkup:
         InlineKeyboardButton(text="9️⃣", callback_data="code_digit:9", style="primary"),
     )
     builder.row(
-        InlineKeyboardButton(text="🗑️", callback_data="code_clear", style="danger"),
+        _btn("🗑️", callback_data="code_clear", style="danger"),
         InlineKeyboardButton(text="0️⃣", callback_data="code_digit:0", style="primary"),
-        InlineKeyboardButton(text="⬅️", callback_data="code_backspace", style="primary"),
+        _btn("⬅️", callback_data="code_backspace", style="primary"),
     )
     builder.row(
-        InlineKeyboardButton(text="◀️ Назад", callback_data="cancel", style="primary"),
-        InlineKeyboardButton(text="✅ Подтвердить", callback_data="code_confirm", style="success"),
+        _btn("◀️ Назад", callback_data="cancel", style="primary"),
+        _btn("✅ Подтвердить", callback_data="code_confirm", style="success"),
     )
     return builder.as_markup()

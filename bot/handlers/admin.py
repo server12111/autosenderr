@@ -28,6 +28,7 @@ from ..keyboards.inline import (
     main_menu_keyboard,
 )
 from ..config import config
+from ..utils.premium_emoji import pe
 
 router = Router()
 
@@ -55,7 +56,8 @@ async def cmd_admin(message: Message, db: Database):
     if not is_admin(message.from_user.id):
         return
     await message.answer(
-        "🔧 Админ-панель\n\nВыберите действие:",
+        pe("🔧 Админ-панель\n\nВыберите действие:"),
+        parse_mode="HTML",
         reply_markup=admin_keyboard(),
     )
 
@@ -116,7 +118,7 @@ async def _send_stats(callback: CallbackQuery, db: Database, period: str, bot):
     period_label = _PERIOD_LABELS.get(period, period)
     chart_buf = _build_chart_image(chart_data, f"Новые пользователи — {period_label}")
 
-    caption = (
+    caption = pe(
         f"📊 <b>Статистика бота</b> — {period_label}\n\n"
         f"👥 Всего пользователей: <b>{total_users}</b>\n"
         f"✅ Активных подписок: <b>{active_subs}</b>\n"
@@ -184,7 +186,7 @@ async def process_broadcast(message: Message, state: FSMContext, db: Database):
 
     has_photo = bool(message.photo)
     if not has_photo and not message.text:
-        await message.answer("❌ Отправьте текст или фото.", reply_markup=cancel_keyboard())
+        await message.answer(pe("❌ Отправьте текст или фото."), parse_mode="HTML", reply_markup=cancel_keyboard())
         return
 
     users = await db.get_all_users()
@@ -208,7 +210,8 @@ async def process_broadcast(message: Message, state: FSMContext, db: Database):
 
     await state.clear()
     await status_msg.edit_text(
-        f"✅ Рассылка завершена\n\nОтправлено: {sent}\nОшибок: {failed}",
+        pe(f"✅ Рассылка завершена\n\nОтправлено: {sent}\nОшибок: {failed}"),
+        parse_mode="HTML",
         reply_markup=admin_keyboard(),
     )
 
@@ -262,10 +265,10 @@ async def process_promo_days(message: Message, state: FSMContext, db: Database):
     try:
         days = int(message.text.strip())
     except ValueError:
-        await message.answer("❌ Введите число. Попробуйте снова:", reply_markup=cancel_keyboard())
+        await message.answer(pe("❌ Введите число. Попробуйте снова:"), parse_mode="HTML", reply_markup=cancel_keyboard())
         return
     if days <= 0:
-        await message.answer("❌ Количество дней должно быть больше 0.", reply_markup=cancel_keyboard())
+        await message.answer(pe("❌ Количество дней должно быть больше 0."), parse_mode="HTML", reply_markup=cancel_keyboard())
         return
     await state.update_data(promo_days=days)
     await state.set_state(AdminStates.waiting_promo_max_uses)
@@ -286,10 +289,10 @@ async def process_promo_max_uses(message: Message, state: FSMContext, db: Databa
     try:
         max_uses = int(message.text.strip())
     except ValueError:
-        await message.answer("❌ Введите число. Попробуйте снова:", reply_markup=cancel_keyboard())
+        await message.answer(pe("❌ Введите число. Попробуйте снова:"), parse_mode="HTML", reply_markup=cancel_keyboard())
         return
     if max_uses <= 0:
-        await message.answer("❌ Количество использований должно быть больше 0.", reply_markup=cancel_keyboard())
+        await message.answer(pe("❌ Количество использований должно быть больше 0."), parse_mode="HTML", reply_markup=cancel_keyboard())
         return
 
     data = await state.get_data()
@@ -300,7 +303,8 @@ async def process_promo_max_uses(message: Message, state: FSMContext, db: Databa
 
     uses_text = f"{max_uses}x" if max_uses > 1 else "одноразовый"
     await message.answer(
-        f"✅ Промокод создан!\n\nКод: <b>{code}</b>\nДней подписки: {days}\nИспользований: {uses_text}",
+        pe(f"✅ Промокод создан!\n\nКод: <b>{code}</b>\nДней подписки: {days}\nИспользований: {uses_text}"),
+        parse_mode="HTML",
         reply_markup=admin_promocodes_keyboard(),
     )
 
@@ -364,7 +368,7 @@ async def callback_admin_settings(callback: CallbackQuery, db: Database):
     ref_percent = await db.get_ref_percent()
     min_withdraw = await db.get_ref_min_withdraw()
     card_manager = await db.get_setting("card_manager_username") or "autosenderkarta"
-    text = (
+    text = pe(
         "⚙️ Настройки бота\n\n"
         f"💰 Цена подписки 7 дней: {price_7d} USDT\n"
         f"💰 Цена подписки 30 дней: {price_30d} USDT\n"
@@ -372,7 +376,7 @@ async def callback_admin_settings(callback: CallbackQuery, db: Database):
         f"📤 Минимум вывода реф. баланса: {min_withdraw} USDT\n"
         f"💳 Менеджер (оплата картой): @{card_manager}\n"
     )
-    await callback.message.edit_text(text, reply_markup=admin_settings_keyboard())
+    await callback.message.edit_text(text, parse_mode="HTML", reply_markup=admin_settings_keyboard())
     await callback.answer()
 
 
@@ -399,11 +403,11 @@ async def process_price_7d(message: Message, state: FSMContext, db: Database):
         if price <= 0:
             raise ValueError
     except ValueError:
-        await message.answer("❌ Введите корректную сумму:", reply_markup=cancel_keyboard())
+        await message.answer(pe("❌ Введите корректную сумму:"), parse_mode="HTML", reply_markup=cancel_keyboard())
         return
     await db.set_price(7, price)
     await state.clear()
-    await message.answer(f"✅ Цена на 7 дней обновлена: {price} USDT", reply_markup=admin_settings_keyboard())
+    await message.answer(pe(f"✅ Цена на 7 дней обновлена: {price} USDT"), parse_mode="HTML", reply_markup=admin_settings_keyboard())
 
 
 @router.callback_query(F.data == "admin_set_price_30d")
@@ -429,11 +433,11 @@ async def process_price_30d(message: Message, state: FSMContext, db: Database):
         if price <= 0:
             raise ValueError
     except ValueError:
-        await message.answer("❌ Введите корректную сумму:", reply_markup=cancel_keyboard())
+        await message.answer(pe("❌ Введите корректную сумму:"), parse_mode="HTML", reply_markup=cancel_keyboard())
         return
     await db.set_price(30, price)
     await state.clear()
-    await message.answer(f"✅ Цена на 30 дней обновлена: {price} USDT", reply_markup=admin_settings_keyboard())
+    await message.answer(pe(f"✅ Цена на 30 дней обновлена: {price} USDT"), parse_mode="HTML", reply_markup=admin_settings_keyboard())
 
 
 @router.callback_query(F.data == "admin_set_ref_percent")
@@ -459,11 +463,11 @@ async def process_ref_percent(message: Message, state: FSMContext, db: Database)
         if pct < 0 or pct > 100:
             raise ValueError
     except ValueError:
-        await message.answer("❌ Введите число от 0 до 100:", reply_markup=cancel_keyboard())
+        await message.answer(pe("❌ Введите число от 0 до 100:"), parse_mode="HTML", reply_markup=cancel_keyboard())
         return
     await db.set_setting("ref_percent", str(pct))
     await state.clear()
-    await message.answer(f"✅ Реферальный процент обновлён: {pct}%", reply_markup=admin_settings_keyboard())
+    await message.answer(pe(f"✅ Реферальный процент обновлён: {pct}%"), parse_mode="HTML", reply_markup=admin_settings_keyboard())
 
 
 @router.callback_query(F.data == "admin_set_min_withdraw")
@@ -489,11 +493,11 @@ async def process_min_withdraw(message: Message, state: FSMContext, db: Database
         if amount <= 0:
             raise ValueError
     except ValueError:
-        await message.answer("❌ Введите корректную сумму:", reply_markup=cancel_keyboard())
+        await message.answer(pe("❌ Введите корректную сумму:"), parse_mode="HTML", reply_markup=cancel_keyboard())
         return
     await db.set_setting("ref_min_withdraw", str(amount))
     await state.clear()
-    await message.answer(f"✅ Минимум для вывода обновлён: {amount} USDT", reply_markup=admin_settings_keyboard())
+    await message.answer(pe(f"✅ Минимум для вывода обновлён: {amount} USDT"), parse_mode="HTML", reply_markup=admin_settings_keyboard())
 
 
 @router.callback_query(F.data == "admin_set_card_manager")
@@ -518,12 +522,13 @@ async def process_card_manager(message: Message, state: FSMContext, db: Database
         return
     username = message.text.strip().lstrip("@")
     if not username:
-        await message.answer("❌ Введите корректный юзернейм:", reply_markup=cancel_keyboard())
+        await message.answer(pe("❌ Введите корректный юзернейм:"), parse_mode="HTML", reply_markup=cancel_keyboard())
         return
     await db.set_setting("card_manager_username", username)
     await state.clear()
     await message.answer(
-        f"✅ Менеджер обновлён: @{username}",
+        pe(f"✅ Менеджер обновлён: @{username}"),
+        parse_mode="HTML",
         reply_markup=admin_settings_keyboard(),
     )
 
@@ -664,7 +669,7 @@ async def callback_admin_withdrawals(callback: CallbackQuery, db: Database):
             text += f"• {username} — {req.amount:.2f} USDT\n  Кошелёк: <code>{req.wallet}</code>\n\n"
     else:
         text += "Активных запросов нет."
-    await callback.message.edit_text(text, reply_markup=admin_withdrawals_keyboard(requests))
+    await callback.message.edit_text(pe(text), parse_mode="HTML", reply_markup=admin_withdrawals_keyboard(requests))
     await callback.answer()
 
 
@@ -730,12 +735,12 @@ async def callback_admin_back(callback: CallbackQuery):
         await callback.answer("Нет доступа", show_alert=True)
         return
     await callback.answer()
-    text = "🔧 Админ-панель\n\nВыберите действие:"
+    text = pe("🔧 Админ-панель\n\nВыберите действие:")
     try:
-        await callback.message.edit_text(text, reply_markup=admin_keyboard())
+        await callback.message.edit_text(text, parse_mode="HTML", reply_markup=admin_keyboard())
     except Exception:
         await callback.message.delete()
-        await callback.message.answer(text, reply_markup=admin_keyboard())
+        await callback.message.answer(text, parse_mode="HTML", reply_markup=admin_keyboard())
 
 
 @router.callback_query(F.data == "admin_export_db")
@@ -776,7 +781,7 @@ async def callback_admin_import_db(callback: CallbackQuery, state: FSMContext):
 async def process_import_db(message: Message, state: FSMContext, db: Database):
     doc = message.document
     if not doc.file_name or not doc.file_name.endswith(".db"):
-        await message.answer("❌ Файл должен иметь расширение .db")
+        await message.answer(pe("❌ Файл должен иметь расширение .db"), parse_mode="HTML")
         return
 
     tmp = tempfile.mktemp(suffix=".db")
@@ -792,7 +797,7 @@ async def process_import_db(message: Message, state: FSMContext, db: Database):
         with open(tmp, "rb") as f:
             header = f.read(16)
         if b"SQLite format 3" not in header:
-            await message.answer(f"❌ Файл не является базой данных SQLite.\nПолучено: {header[:16]}")
+            await message.answer(pe(f"❌ Файл не является базой данных SQLite.\nПолучено: {header[:16]}"), parse_mode="HTML")
             return
 
         await state.clear()
@@ -810,8 +815,9 @@ async def process_import_db(message: Message, state: FSMContext, db: Database):
         await db.connect()
 
         await message.answer(
-            "✅ База данных успешно заменена!\n"
-            "Все данные обновлены.",
+            pe("✅ База данных успешно заменена!\n"
+            "Все данные обновлены."),
+            parse_mode="HTML",
             reply_markup=admin_keyboard(),
         )
     except Exception as e:
@@ -820,7 +826,7 @@ async def process_import_db(message: Message, state: FSMContext, db: Database):
             await db.connect()
         except Exception:
             pass
-        await message.answer(f"❌ Ошибка при импорте: {e}")
+        await message.answer(pe(f"❌ Ошибка при импорте: {e}"), parse_mode="HTML")
     finally:
         if os.path.exists(tmp):
             os.remove(tmp)
@@ -838,7 +844,8 @@ async def callback_admin_cleanup_accounts(callback: CallbackQuery, db: Database)
 
     if count == 0:
         await callback.message.edit_text(
-            "✅ Мёртвых аккаунтов нет — база чистая.",
+            pe("✅ Мёртвых аккаунтов нет — база чистая."),
+            parse_mode="HTML",
             reply_markup=admin_keyboard(),
         )
         await callback.answer()
@@ -851,11 +858,14 @@ async def callback_admin_cleanup_accounts(callback: CallbackQuery, db: Database)
     )
 
     await callback.message.edit_text(
-        f"⚠️ <b>Очистка мёртвых аккаунтов</b>\n\n"
-        f"Найдено неактивных аккаунтов: <b>{count}</b>\n\n"
-        f"Это аккаунты с истёкшими сессиями, забаненные или использованные с двух IP.\n"
-        f"Они будут <b>удалены из базы навсегда</b>.\n\n"
-        f"Подтвердить удаление?",
+        pe(
+            f"⚠️ <b>Очистка мёртвых аккаунтов</b>\n\n"
+            f"Найдено неактивных аккаунтов: <b>{count}</b>\n\n"
+            f"Это аккаунты с истёкшими сессиями, забаненные или использованные с двух IP.\n"
+            f"Они будут <b>удалены из базы навсегда</b>.\n\n"
+            f"Подтвердить удаление?"
+        ),
+        parse_mode="HTML",
         reply_markup=builder.as_markup(),
     )
     await callback.answer()
@@ -869,8 +879,9 @@ async def callback_admin_cleanup_accounts_confirm(callback: CallbackQuery, db: D
 
     deleted = await db.purge_inactive_accounts()
     await callback.message.edit_text(
-        f"✅ Удалено <b>{deleted}</b> мёртвых аккаунтов.\n\n"
-        f"База данных очищена. При следующем перезапуске бот стартует быстрее.",
+        pe(f"✅ Удалено <b>{deleted}</b> мёртвых аккаунтов.\n\n"
+        f"База данных очищена. При следующем перезапуске бот стартует быстрее."),
+        parse_mode="HTML",
         reply_markup=admin_keyboard(),
     )
     await callback.answer()

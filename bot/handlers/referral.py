@@ -5,6 +5,7 @@ from aiogram.fsm.state import State, StatesGroup
 
 from ..database.db import Database
 from ..keyboards.inline import referral_keyboard, withdraw_wallet_keyboard, main_menu_keyboard
+from ..utils.premium_emoji import pe
 
 router = Router()
 
@@ -39,7 +40,7 @@ async def callback_referral(callback: CallbackQuery, db: Database):
         "Вы получаете процент от каждой покупки подписки вашими рефералами!"
     )
 
-    await callback.message.edit_text(text, reply_markup=referral_keyboard(can_withdraw))
+    await callback.message.edit_text(pe(text), parse_mode="HTML", reply_markup=referral_keyboard(can_withdraw))
     await callback.answer()
 
 
@@ -57,9 +58,10 @@ async def callback_withdraw(callback: CallbackQuery, state: FSMContext, db: Data
 
     await state.set_state(ReferralStates.waiting_wallet)
     await callback.message.edit_text(
-        f"💸 Вывод реферального баланса\n\n"
+        pe(f"💸 Вывод реферального баланса\n\n"
         f"Сумма к выводу: <b>{user.ref_balance:.2f} USDT</b>\n\n"
-        "Введите адрес USDT кошелька (TRC20):",
+        "Введите адрес USDT кошелька (TRC20):"),
+        parse_mode="HTML",
         reply_markup=withdraw_wallet_keyboard(),
     )
     await callback.answer()
@@ -71,7 +73,8 @@ async def process_wallet(message: Message, state: FSMContext, db: Database):
 
     if len(wallet) < 10:
         await message.answer(
-            "❌ Неверный адрес кошелька. Попробуйте ещё раз:",
+            pe("❌ Неверный адрес кошелька. Попробуйте ещё раз:"),
+            parse_mode="HTML",
             reply_markup=withdraw_wallet_keyboard(),
         )
         return
@@ -84,9 +87,10 @@ async def process_wallet(message: Message, state: FSMContext, db: Database):
     await state.clear()
 
     await message.answer(
-        f"✅ Заявка на вывод создана!\n\n"
+        pe(f"✅ Заявка на вывод создана!\n\n"
         f"Сумма: <b>{amount:.2f} USDT</b>\n"
         f"Кошелёк: <code>{wallet}</code>\n\n"
-        "Администратор обработает заявку в ближайшее время.",
+        "Администратор обработает заявку в ближайшее время."),
+        parse_mode="HTML",
         reply_markup=main_menu_keyboard(),
     )
