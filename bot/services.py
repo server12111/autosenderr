@@ -218,6 +218,62 @@ class TonPaymentService:
             return False
 
 
+def _extract_button_urls(message) -> list:
+    """Extract all URLs from inline keyboard buttons."""
+    urls = []
+    try:
+        if message.buttons:
+            for row in message.buttons:
+                for btn in row:
+                    url = getattr(btn, 'url', None)
+                    if url:
+                        urls.append(url)
+            return urls
+    except Exception:
+        pass
+    # Fallback: read from raw reply_markup
+    try:
+        from telethon.tl.types import ReplyInlineMarkup
+        rm = getattr(message, 'reply_markup', None)
+        if isinstance(rm, ReplyInlineMarkup):
+            for row in rm.rows:
+                for btn in row.buttons:
+                    url = getattr(btn, 'url', None)
+                    if url:
+                        urls.append(url)
+    except Exception:
+        pass
+    return urls
+
+
+def _parse_telegram_links(urls: list) -> tuple:
+    """Parse t.me URLs into (public_usernames, invite_hashes)."""
+    channel_usernames = []
+    invite_hashes = []
+    for url in urls:
+        # Private invite: t.me/+HASH or t.me/joinchat/HASH
+        m = re.search(r't\.me/(?:joinchat/|\+)([A-Za-z0-9_\-]+)', url)
+        if m:
+            h = m.group(1)
+            if h not in invite_hashes:
+                invite_hashes.append(h)
+            continue
+        # Public channel: t.me/username
+        m = re.search(r't\.me/([A-Za-z0-9_]+)', url)
+        if m:
+            username = m.group(1)
+            if username not in channel_usernames:
+                channel_usernames.append(username)
+            continue
+        # Deep link: tg://resolve?domain=username
+        m = re.search(r'tg://resolve\?domain=([A-Za-z0-9_]+)', url)
+        if m:
+            username = m.group(1)
+            if username not in channel_usernames:
+                channel_usernames.append(username)
+    return channel_usernames, invite_hashes
+
+
 class AutoresponderService:
     def __init__(self, db: Database):
         self.db = db
@@ -310,110 +366,60 @@ class AutoresponderService:
         except Exception as e:
             logger.error(f"Group autoresponder error: {e}")
 
-    async def handle_sponsor_check(self, event, account):
+    async def handle_sponsor_check(self, event, account, me_id: int):
         """
-        Detect messages in groups that mention this account and contain
-        URL buttons with t.me/ links (sponsor subscription gates). Auto-join those channels.
+        Auto-join sponsor channels when a bot replies to this account's message
+        in a group chat and the reply contains buttons with t.me/ links.
         """
         if not account.auto_subscribe_sponsors:
             return
+        if event.is_private:
+            return
+        if not event.reply_to:
+            return
 
         try:
-            # 1. Check buttons FIRST — fast exit if none
-            if not event.message.buttons:
+            # Check: the reply is directed at our message
+            original = await event.get_reply_message()
+            if not original:
                 return
-
-            # 2. Collect channel links from buttons (public @username and private invite hashes)
-            channel_usernames = []   # @username → JoinChannelRequest
-            invite_hashes = []       # hash → ImportChatInviteRequest
-
-            for row in event.message.buttons:
-                for button in row:
-                    url = getattr(button, 'url', None) or ""
-                    if not url:
-                        continue
-
-                    # Format 1: t.me/+HASH or t.me/joinchat/HASH (private invite)
-                    m = re.search(r't\.me/(?:joinchat/|\+)([A-Za-z0-9_\-]+)', url)
-                    if m:
-                        h = m.group(1)
-                        if h not in invite_hashes:
-                            invite_hashes.append(h)
-                        continue
-
-                    # Format 2: t.me/username (public channel)
-                    m = re.search(r't\.me/([A-Za-z0-9_]+)', url)
-                    if m:
-                        username = m.group(1)
-                        if username not in channel_usernames:
-                            channel_usernames.append(username)
-                        continue
-
-                    # Format 3: tg://resolve?domain=username
-                    m = re.search(r'tg://resolve\?domain=([A-Za-z0-9_]+)', url)
-                    if m:
-                        username = m.group(1)
-                        if username not in channel_usernames:
-                            channel_usernames.append(username)
-
-            if not channel_usernames and not invite_hashes:
+            orig_sender = await original.get_sender()
+            if not orig_sender or orig_sender.id != me_id:
                 return
+        except Exception:
+            return
 
-            # 3. Check if message is relevant to our account
-            me = await event.client.get_me()
-            msg_text = (event.message.text or event.message.message or "").lower()
-            me_username = (me.username or "").lower()
-            is_relevant = False
-
-            # 3a. @username present in text
-            if me_username and f"@{me_username}" in msg_text:
-                is_relevant = True
-
-            # 3b. Entity mentions: MessageEntityMentionName (by user_id) or MessageEntityMention (@username in text)
-            if not is_relevant and event.message.entities:
-                from telethon.tl.types import MessageEntityMentionName, MessageEntityMention
-                for entity in event.message.entities:
-                    if isinstance(entity, MessageEntityMentionName) and entity.user_id == me.id:
-                        is_relevant = True
-                        break
-                    if isinstance(entity, MessageEntityMention):
-                        raw = (event.message.text or "")[entity.offset:entity.offset + entity.length]
-                        if me_username and raw.lstrip('@').lower() == me_username:
-                            is_relevant = True
-                            break
-
-            # 3c. Fallback: if sender is a bot, consider relevant anyway
-            if not is_relevant:
-                try:
-                    sender = await event.get_sender()
-                    if sender and getattr(sender, 'bot', False):
-                        is_relevant = True
-                except Exception:
-                    pass
-
-            if not is_relevant:
+        try:
+            # Check: the sender of the reply is a bot
+            sender = await event.get_sender()
+            if not sender or not getattr(sender, 'bot', False):
                 return
+        except Exception:
+            return
 
-            # 4. Subscribe to detected channels
-            logger.info(f"Account {account.phone}: sponsor gate detected, public={channel_usernames} invites={invite_hashes}")
-            for username in channel_usernames:
-                try:
-                    await event.client(JoinChannelRequest(f"@{username}"))
-                    logger.info(f"Account {account.phone} auto-joined sponsor @{username}")
-                    await asyncio.sleep(1)
-                except Exception as e:
-                    logger.warning(f"Account {account.phone} failed to join @{username}: {e}")
+        urls = _extract_button_urls(event.message)
+        channel_usernames, invite_hashes = _parse_telegram_links(urls)
 
-            for h in invite_hashes:
-                try:
-                    await event.client(ImportChatInviteRequest(h))
-                    logger.info(f"Account {account.phone} auto-joined sponsor via invite hash {h}")
-                    await asyncio.sleep(1)
-                except Exception as e:
-                    logger.warning(f"Account {account.phone} failed to join invite {h}: {e}")
+        if not channel_usernames and not invite_hashes:
+            return
 
-        except Exception as e:
-            logger.error(f"Sponsor check error for account {account.phone}: {e}")
+        logger.info(f"Account {account.phone}: sponsor gate reply detected, public={channel_usernames} invites={invite_hashes}")
+
+        for username in channel_usernames:
+            try:
+                await event.client(JoinChannelRequest(f"@{username}"))
+                logger.info(f"Account {account.phone} auto-joined sponsor @{username}")
+                await asyncio.sleep(1)
+            except Exception as e:
+                logger.warning(f"Account {account.phone} failed to join @{username}: {e}")
+
+        for h in invite_hashes:
+            try:
+                await event.client(ImportChatInviteRequest(h))
+                logger.info(f"Account {account.phone} auto-joined sponsor via invite hash {h}")
+                await asyncio.sleep(1)
+            except Exception as e:
+                logger.warning(f"Account {account.phone} failed to join invite {h}: {e}")
 
 
 def _build_telethon_entities(entities_json: str) -> list:

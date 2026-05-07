@@ -141,8 +141,8 @@ class UserbotManager:
                         await self._group_reply_handler(event, fresh_account, me_id, self._bot_notify_callback)
 
                     # Auto-subscribe to sponsor channels
-                    if self._sponsor_check_handler and not event.is_private:
-                        await self._sponsor_check_handler(event, fresh_account)
+                    if self._sponsor_check_handler and not event.is_private and event.reply_to:
+                        await self._sponsor_check_handler(event, fresh_account, me_id)
 
                 except Exception as e:
                     logger.error(f"Error in message handler for account {account_id}: {e}", exc_info=True)
