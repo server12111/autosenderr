@@ -288,6 +288,7 @@ def mailing_targets_keyboard(mailing_id: int, targets: list[MailingTarget]) -> I
         _btn("➕ Добавить чат", callback_data=f"add_mailing_target:{mailing_id}", style="primary"),
         _btn("📁 Добавить папку", callback_data=f"add_folder_target:{mailing_id}", style="primary"),
     )
+    builder.row(_btn("📄 Загрузить .txt", callback_data=f"add_txt_target:{mailing_id}", style="primary"))
     builder.row(_btn("◀️ Назад", callback_data=f"mailing:{mailing_id}", style="primary"))
     return builder.as_markup()
 
@@ -336,6 +337,7 @@ def mailing_creation_targets_keyboard(mailing_id: int, targets: list[MailingTarg
         _btn("➕ Добавить чат", callback_data=f"create_add_target:{mailing_id}", style="primary"),
         _btn("📁 Добавить папку", callback_data=f"create_add_folder:{mailing_id}", style="primary"),
     )
+    builder.row(_btn("📄 Загрузить .txt", callback_data=f"create_add_txt:{mailing_id}", style="primary"))
     if targets:
         builder.row(
             _btn("✅ Готово", callback_data=f"create_targets_done:{mailing_id}", style="success"),

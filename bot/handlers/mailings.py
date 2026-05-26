@@ -126,6 +126,29 @@ def parse_folder_slug(text: str) -> str | None:
     return None
 
 
+def _parse_txt_targets(content: str) -> list:
+    """Parse .txt file content into deduplicated list of chat identifiers."""
+    raw = content.replace(',', ' ').replace(';', ' ')
+    tokens = raw.split()
+    result = []
+    seen = set()
+    for token in tokens:
+        token = token.strip()
+        if not token:
+            continue
+        parsed = parse_chat_link(token)
+        if parsed:
+            identifier = parsed
+        elif token.startswith('@') or token.lstrip('-').isdigit():
+            identifier = token
+        else:
+            continue
+        if identifier not in seen:
+            seen.add(identifier)
+            result.append(identifier)
+    return result
+
+
 class CreateMailingStates(StatesGroup):
     waiting_name = State()
     waiting_account = State()
@@ -136,6 +159,7 @@ class CreateMailingStates(StatesGroup):
     adding_targets = State()
     waiting_target = State()
     waiting_folder = State()
+    waiting_txt_file = State()
     waiting_hours = State()
 
 
@@ -144,6 +168,7 @@ class EditMailingStates(StatesGroup):
     waiting_forward_message = State()
     waiting_target = State()
     waiting_folder = State()
+    waiting_txt_file = State()
     waiting_hours = State()
     waiting_target_interval = State()
 
@@ -714,6 +739,88 @@ async def process_edit_folder(
         )
 
 
+# === TXT file targets (edit mode) ===
+@router.callback_query(F.data.startswith("add_txt_target:"))
+async def callback_add_txt_target(callback: CallbackQuery, state: FSMContext):
+    mailing_id = int(callback.data.split(":")[1])
+    await state.update_data(mailing_id=mailing_id)
+    await state.set_state(EditMailingStates.waiting_txt_file)
+    await callback.message.edit_text(
+        pe("📄 Отправьте .txt файл со списком чатов.\n\n"
+        "Формат: каждый чат на новой строке или через пробел.\n\n"
+        "Примеры:\n"
+        "• @username\n"
+        "• -1001234567890\n"
+        "• https://t.me/chatname"),
+        parse_mode="HTML",
+        reply_markup=cancel_keyboard(),
+    )
+    await callback.answer()
+
+
+@router.message(EditMailingStates.waiting_txt_file, F.document)
+async def process_edit_txt_file(message: Message, state: FSMContext, db: Database):
+    doc = message.document
+    if not doc.file_name or not doc.file_name.lower().endswith('.txt'):
+        await message.answer(
+            pe("❌ Пожалуйста, отправьте файл с расширением .txt"),
+            parse_mode="HTML",
+            reply_markup=cancel_keyboard(),
+        )
+        return
+    if doc.file_size and doc.file_size > 500_000:
+        await message.answer(
+            pe("❌ Файл слишком большой. Максимум 500 КБ."),
+            parse_mode="HTML",
+            reply_markup=cancel_keyboard(),
+        )
+        return
+
+    data = await state.get_data()
+    mailing_id = data["mailing_id"]
+
+    file_io = await message.bot.download(doc)
+    try:
+        content = file_io.read().decode('utf-8')
+    except UnicodeDecodeError:
+        file_io.seek(0)
+        content = file_io.read().decode('cp1251', errors='replace')
+
+    identifiers = _parse_txt_targets(content)
+    if not identifiers:
+        await message.answer(
+            pe("❌ В файле не найдено ни одного чата."),
+            parse_mode="HTML",
+            reply_markup=cancel_keyboard(),
+        )
+        return
+
+    added = 0
+    for identifier in identifiers:
+        try:
+            await db.add_mailing_target(mailing_id, identifier)
+            added += 1
+        except Exception:
+            pass
+
+    await state.clear()
+    targets = await db.get_mailing_targets(mailing_id)
+    await message.answer(
+        pe(f"✅ Добавлено {added} чатов из файла! Всего чатов: {len(targets)}"),
+        parse_mode="HTML",
+        reply_markup=mailing_targets_keyboard(mailing_id, targets),
+    )
+
+
+@router.message(EditMailingStates.waiting_txt_file)
+async def process_edit_txt_wrong(message: Message):
+    await message.answer(
+        pe("❌ Отправьте .txt файл, а не текст."),
+        parse_mode="HTML",
+        reply_markup=cancel_keyboard(),
+    )
+
+
 # === Active Hours ===
 @router.callback_query(F.data.startswith("mailing_hours:"))
 async def callback_mailing_hours(callback: CallbackQuery, db: Database, state: FSMContext):
@@ -1247,6 +1354,91 @@ async def process_create_folder(
             pe(f"❌ Ошибка при получении чатов из папки: {e}"),
             parse_mode="HTML",
         )
+
+
+# === TXT file targets (create mode) ===
+@router.callback_query(
+    CreateMailingStates.adding_targets, F.data.startswith("create_add_txt:")
+)
+async def callback_create_add_txt(callback: CallbackQuery, state: FSMContext):
+    mailing_id = int(callback.data.split(":")[1])
+    await state.update_data(mailing_id=mailing_id)
+    await state.set_state(CreateMailingStates.waiting_txt_file)
+    await callback.message.edit_text(
+        pe("📄 Отправьте .txt файл со списком чатов.\n\n"
+        "Формат: каждый чат на новой строке или через пробел.\n\n"
+        "Примеры:\n"
+        "• @username\n"
+        "• -1001234567890\n"
+        "• https://t.me/chatname"),
+        parse_mode="HTML",
+        reply_markup=cancel_keyboard(),
+    )
+    await callback.answer()
+
+
+@router.message(CreateMailingStates.waiting_txt_file, F.document)
+async def process_create_txt_file(message: Message, state: FSMContext, db: Database):
+    doc = message.document
+    if not doc.file_name or not doc.file_name.lower().endswith('.txt'):
+        await message.answer(
+            pe("❌ Пожалуйста, отправьте файл с расширением .txt"),
+            parse_mode="HTML",
+            reply_markup=cancel_keyboard(),
+        )
+        return
+    if doc.file_size and doc.file_size > 500_000:
+        await message.answer(
+            pe("❌ Файл слишком большой. Максимум 500 КБ."),
+            parse_mode="HTML",
+            reply_markup=cancel_keyboard(),
+        )
+        return
+
+    data = await state.get_data()
+    mailing_id = data["mailing_id"]
+
+    file_io = await message.bot.download(doc)
+    try:
+        content = file_io.read().decode('utf-8')
+    except UnicodeDecodeError:
+        file_io.seek(0)
+        content = file_io.read().decode('cp1251', errors='replace')
+
+    identifiers = _parse_txt_targets(content)
+    if not identifiers:
+        await message.answer(
+            pe("❌ В файле не найдено ни одного чата."),
+            parse_mode="HTML",
+            reply_markup=cancel_keyboard(),
+        )
+        return
+
+    added = 0
+    for identifier in identifiers:
+        try:
+            await db.add_mailing_target(mailing_id, identifier)
+            added += 1
+        except Exception:
+            pass
+
+    await state.set_state(CreateMailingStates.adding_targets)
+    targets = await db.get_mailing_targets(mailing_id)
+    await message.answer(
+        pe(f"✅ Добавлено {added} чатов из файла! Всего чатов: {len(targets)}\n\n"
+        "Добавьте ещё или нажмите «Готово»:"),
+        parse_mode="HTML",
+        reply_markup=mailing_creation_targets_keyboard(mailing_id, targets),
+    )
+
+
+@router.message(CreateMailingStates.waiting_txt_file)
+async def process_create_txt_wrong(message: Message):
+    await message.answer(
+        pe("❌ Отправьте .txt файл, а не текст."),
+        parse_mode="HTML",
+        reply_markup=cancel_keyboard(),
+    )
 
 
 @router.callback_query(
