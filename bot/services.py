@@ -533,7 +533,7 @@ class MailingService:
         except Exception:
             return True  # якщо не можемо перевірити — дозволяємо відправку
 
-    async def _send_msg(self, client, target: str, msg, pm: Optional[str]) -> None:
+    async def _send_msg(self, client, target: str, msg, pm: Optional[str], reply_to=None) -> None:
         """Send one mailing message to target (forward / text / photo)."""
         if msg.is_forward:
             peer = int(msg.forward_peer) if msg.forward_peer.lstrip('-').isdigit() else msg.forward_peer
@@ -550,13 +550,13 @@ class MailingService:
         photos = [p for p in msg.photo_paths if os.path.exists(p)]
         if len(photos) > 1:
             await client.send_file(target, photos, caption=text, parse_mode=eff_pm,
-                                   formatting_entities=entities)
+                                   formatting_entities=entities, reply_to=reply_to)
         elif len(photos) == 1:
             await client.send_file(target, photos[0], caption=text, parse_mode=eff_pm,
-                                   formatting_entities=entities)
+                                   formatting_entities=entities, reply_to=reply_to)
         else:
             await client.send_message(target, text, parse_mode=eff_pm,
-                                      formatting_entities=entities)
+                                      formatting_entities=entities, reply_to=reply_to)
 
     async def _start_mailing_task(self, mailing_id: int):
         if mailing_id in self._tasks:
@@ -628,8 +628,26 @@ class MailingService:
                         if pm == 'plain':
                             pm = None
 
+                        reply_to_id = None
+                        if mailing.reply_mode:
+                            try:
+                                if mailing.reply_mode == 'last':
+                                    offset = 0
+                                elif mailing.reply_mode == 'fixed':
+                                    offset = mailing.reply_offset - 1
+                                else:  # random
+                                    offset = random.randint(
+                                        mailing.reply_random_min - 1,
+                                        mailing.reply_random_max - 1
+                                    )
+                                msgs_list = await client.get_messages(target, limit=offset + 1)
+                                if msgs_list and len(msgs_list) > offset:
+                                    reply_to_id = msgs_list[offset].id
+                            except Exception as e:
+                                logger.warning(f"Mailing {mailing_id}: failed to get reply target: {e}")
+
                         try:
-                            await self._send_msg(client, target, msg, pm)
+                            await self._send_msg(client, target, msg, pm, reply_to=reply_to_id)
                             logger.info(f"Mailing {mailing_id} sent to {target}")
                             await self.db.update_target_last_sent(target_obj.id)
                             sent_any = True
@@ -640,7 +658,7 @@ class MailingService:
                             await self._handle_chat_ban(mailing_id, mailing.account_id, target_obj, e)
                         except _NOT_MEMBER_ERRORS:
                             logger.info(f"Mailing {mailing_id}: not participant/forbidden in '{target}', attempting auto-join")
-                            joined = await self._try_join_and_send(client, target, target_obj, msg, pm, mailing_id, mailing.account_id)
+                            joined = await self._try_join_and_send(client, target, target_obj, msg, pm, mailing_id, mailing.account_id, reply_to=reply_to_id)
                             if joined:
                                 sent_any = True
                         except FloodWaitError as e:
@@ -748,7 +766,7 @@ class MailingService:
             except Exception as e:
                 logger.error(f"Failed to notify about chat ban for account {account_id}: {e}")
 
-    async def _try_join_and_send(self, client, target: str, target_obj, msg, pm, mailing_id: int, account_id: Optional[int] = None) -> bool:
+    async def _try_join_and_send(self, client, target: str, target_obj, msg, pm, mailing_id: int, account_id: Optional[int] = None, reply_to=None) -> bool:
         """Try to join target channel/group, then retry sending. Returns True if message was sent."""
         try:
             await client(JoinChannelRequest(target))
@@ -765,7 +783,7 @@ class MailingService:
             return False
 
         try:
-            await self._send_msg(client, target, msg, pm)
+            await self._send_msg(client, target, msg, pm, reply_to=reply_to)
             await self.db.update_target_last_sent(target_obj.id)
             logger.info(f"Mailing {mailing_id}: sent to '{target}' after auto-join")
             return True

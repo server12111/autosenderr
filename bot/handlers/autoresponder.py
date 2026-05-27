@@ -58,6 +58,15 @@ async def callback_toggle_autoresponder(callback: CallbackQuery, db: Database):
 
     new_status = not account.autoresponder_enabled
 
+    if new_status:
+        user = await db.get_user(callback.from_user.id)
+        if not await db.has_paid_subscription(user.id):
+            await callback.answer(
+                "⛔️ Автоответ в ЛС доступен только при платной подписке.",
+                show_alert=True
+            )
+            return
+
     if new_status and not account.autoresponder_text:
         await callback.answer(
             "⚠️ Сначала задайте текст автоответа", show_alert=True
@@ -218,6 +227,15 @@ async def callback_toggle_group_autoresponder(callback: CallbackQuery, db: Datab
         return
 
     new_status = not account.group_autoresponder_enabled
+
+    if new_status:
+        user = await db.get_user(callback.from_user.id)
+        if not await db.has_paid_subscription(user.id):
+            await callback.answer(
+                "⛔️ Автоответ в чате доступен только при платной подписке.",
+                show_alert=True
+            )
+            return
 
     if new_status and not account.group_autoresponder_text:
         await callback.answer("⚠️ Сначала задайте текст автоответа для групп", show_alert=True)

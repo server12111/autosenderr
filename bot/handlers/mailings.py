@@ -38,6 +38,8 @@ from ..keyboards.inline import (
     photo_collection_keyboard,
     parse_mode_keyboard,
     select_account_for_mailing_keyboard,
+    reply_mode_select_keyboard,
+    reply_mode_fixed_keyboard,
 )
 from ..utils.time_utils import format_active_hours, parse_time_range, create_active_hours_json
 from ..services import MailingService
@@ -171,6 +173,7 @@ class EditMailingStates(StatesGroup):
     waiting_txt_file = State()
     waiting_hours = State()
     waiting_target_interval = State()
+    waiting_reply_range = State()
 
 
 @router.callback_query(F.data.startswith("account_mailings:"))
@@ -1647,3 +1650,183 @@ async def callback_cancel_creation(
         reply_markup=main_menu_keyboard(),
     )
     await callback.answer()
+
+
+# === Reply Mode ===
+@router.callback_query(F.data.startswith("mailing_reply_mode:"))
+async def callback_mailing_reply_mode(callback: CallbackQuery, db: Database):
+    mailing_id = int(callback.data.split(":")[1])
+    mailing = await db.get_mailing(mailing_id)
+
+    if not mailing:
+        await callback.answer("Рассылка не найдена", show_alert=True)
+        return
+
+    if not mailing.reply_mode:
+        text = pe(
+            "↩️ Ответная рассылка\n\n"
+            "Когда включена — бот отвечает на существующие сообщения в чате, "
+            "а не отправляет новое сообщение.\n\n"
+            "Выберите режим:\n"
+            "• На последнее — отвечает на самое новое сообщение\n"
+            "• На N-е с конца — на конкретную позицию (2–10)\n"
+            "• Случайно — случайная позиция из диапазона (макс. 10)"
+        )
+        await callback.message.edit_text(
+            text, parse_mode="HTML",
+            reply_markup=reply_mode_select_keyboard(mailing_id)
+        )
+    else:
+        await db.update_mailing_reply_mode(mailing_id, None, 1, 1, 5)
+        mailing = await db.get_mailing(mailing_id)
+        account = await db.get_account(mailing.account_id)
+        messages = await db.get_mailing_messages(mailing_id)
+        targets = await db.get_mailing_targets(mailing_id)
+        status = "🟢 Активна" if mailing.is_active else "🔴 Остановлена"
+        last_sent = _fmt_dt(mailing.last_sent_at)
+        active_hours = format_active_hours(mailing.active_hours_json)
+        text = pe(
+            f"📋 Рассылка: {mailing.name}\n\n"
+            f"Статус: {status}\n"
+            f"Аккаунт: {account.phone if account else 'не найден'}\n"
+            f"Интервал: {mailing.interval_seconds} сек\n"
+            f"Время активности: {active_hours}\n"
+            f"Сообщений: {len(messages)}\n"
+            f"Целевых чатов: {len(targets)}\n"
+            f"Последняя отправка: {last_sent}\n\n"
+            "Выберите действие:"
+        )
+        await callback.message.edit_text(text, parse_mode="HTML", reply_markup=mailing_menu_keyboard(mailing))
+
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("reply_mode_last:"))
+async def callback_reply_mode_last(callback: CallbackQuery, db: Database):
+    mailing_id = int(callback.data.split(":")[1])
+    await db.update_mailing_reply_mode(mailing_id, 'last', 1, 1, 5)
+    mailing = await db.get_mailing(mailing_id)
+    account = await db.get_account(mailing.account_id)
+    messages = await db.get_mailing_messages(mailing_id)
+    targets = await db.get_mailing_targets(mailing_id)
+    status = "🟢 Активна" if mailing.is_active else "🔴 Остановлена"
+    last_sent = _fmt_dt(mailing.last_sent_at)
+    active_hours = format_active_hours(mailing.active_hours_json)
+    text = pe(
+        f"📋 Рассылка: {mailing.name}\n\n"
+        f"Статус: {status}\n"
+        f"Аккаунт: {account.phone if account else 'не найден'}\n"
+        f"Интервал: {mailing.interval_seconds} сек\n"
+        f"Время активности: {active_hours}\n"
+        f"Сообщений: {len(messages)}\n"
+        f"Целевых чатов: {len(targets)}\n"
+        f"Последняя отправка: {last_sent}\n\n"
+        "Выберите действие:"
+    )
+    await callback.message.edit_text(text, parse_mode="HTML", reply_markup=mailing_menu_keyboard(mailing))
+    await callback.answer("✅ Режим: на последнее сообщение")
+
+
+@router.callback_query(F.data.startswith("reply_mode_fixed:"))
+async def callback_reply_mode_fixed(callback: CallbackQuery, db: Database):
+    mailing_id = int(callback.data.split(":")[1])
+    await callback.message.edit_text(
+        pe("🔢 Выберите позицию с конца (2–10):"),
+        parse_mode="HTML",
+        reply_markup=reply_mode_fixed_keyboard(mailing_id),
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("reply_mode_fixed_pos:"))
+async def callback_reply_mode_fixed_pos(callback: CallbackQuery, db: Database):
+    parts = callback.data.split(":")
+    mailing_id = int(parts[1])
+    n = int(parts[2])
+    await db.update_mailing_reply_mode(mailing_id, 'fixed', n, 1, 5)
+    mailing = await db.get_mailing(mailing_id)
+    account = await db.get_account(mailing.account_id)
+    messages = await db.get_mailing_messages(mailing_id)
+    targets = await db.get_mailing_targets(mailing_id)
+    status = "🟢 Активна" if mailing.is_active else "🔴 Остановлена"
+    last_sent = _fmt_dt(mailing.last_sent_at)
+    active_hours = format_active_hours(mailing.active_hours_json)
+    text = pe(
+        f"📋 Рассылка: {mailing.name}\n\n"
+        f"Статус: {status}\n"
+        f"Аккаунт: {account.phone if account else 'не найден'}\n"
+        f"Интервал: {mailing.interval_seconds} сек\n"
+        f"Время активности: {active_hours}\n"
+        f"Сообщений: {len(messages)}\n"
+        f"Целевых чатов: {len(targets)}\n"
+        f"Последняя отправка: {last_sent}\n\n"
+        "Выберите действие:"
+    )
+    await callback.message.edit_text(text, parse_mode="HTML", reply_markup=mailing_menu_keyboard(mailing))
+    await callback.answer(f"✅ Режим: {n}-е с конца")
+
+
+@router.callback_query(F.data.startswith("reply_mode_random:"))
+async def callback_reply_mode_random(callback: CallbackQuery, state: FSMContext):
+    mailing_id = int(callback.data.split(":")[1])
+    await state.update_data(mailing_id=mailing_id)
+    await state.set_state(EditMailingStates.waiting_reply_range)
+    await callback.message.edit_text(
+        pe("🎲 Введите диапазон в формате: МИН-МАКС\n\n"
+        "Пример: 1-5 (случайное сообщение с 1-й по 5-ю позицию с конца)\n"
+        "Максимальное значение: 10"),
+        parse_mode="HTML",
+        reply_markup=cancel_keyboard(),
+    )
+    await callback.answer()
+
+
+@router.message(EditMailingStates.waiting_reply_range)
+async def process_reply_range(message: Message, state: FSMContext, db: Database):
+    text = message.text.strip()
+    data = await state.get_data()
+    mailing_id = data["mailing_id"]
+
+    m = re.match(r'^(\d+)\s*[-–]\s*(\d+)$', text)
+    if not m:
+        await message.answer(
+            pe("❌ Неверный формат. Введите диапазон как: 1-8"),
+            parse_mode="HTML",
+            reply_markup=cancel_keyboard(),
+        )
+        return
+
+    rmin, rmax = int(m.group(1)), int(m.group(2))
+    if rmin < 1 or rmax > 10 or rmin > rmax:
+        await message.answer(
+            pe("❌ Диапазон должен быть от 1 до 10, минимум ≤ максимум."),
+            parse_mode="HTML",
+            reply_markup=cancel_keyboard(),
+        )
+        return
+
+    await db.update_mailing_reply_mode(mailing_id, 'random', 1, rmin, rmax)
+    await state.clear()
+
+    mailing = await db.get_mailing(mailing_id)
+    account = await db.get_account(mailing.account_id)
+    messages_list = await db.get_mailing_messages(mailing_id)
+    targets = await db.get_mailing_targets(mailing_id)
+    status = "🟢 Активна" if mailing.is_active else "🔴 Остановлена"
+    last_sent = _fmt_dt(mailing.last_sent_at)
+    active_hours = format_active_hours(mailing.active_hours_json)
+    text_out = pe(
+        f"📋 Рассылка: {mailing.name}\n\n"
+        f"Статус: {status}\n"
+        f"Аккаунт: {account.phone if account else 'не найден'}\n"
+        f"Интервал: {mailing.interval_seconds} сек\n"
+        f"Время активности: {active_hours}\n"
+        f"Сообщений: {len(messages_list)}\n"
+        f"Целевых чатов: {len(targets)}\n"
+        f"Последняя отправка: {last_sent}\n\n"
+        "Выберите действие:"
+    )
+    await message.answer(
+        text_out, parse_mode="HTML",
+        reply_markup=mailing_menu_keyboard(mailing),
+    )

@@ -919,6 +919,16 @@ async def callback_toggle_auto_subscribe(callback: CallbackQuery, db: Database):
         return
 
     new_val = not account.auto_subscribe_sponsors
+
+    if new_val:
+        user = await db.get_user(callback.from_user.id)
+        if not await db.has_paid_subscription(user.id):
+            await callback.answer(
+                "⛔️ Авто-подписка доступна только при платной подписке.",
+                show_alert=True
+            )
+            return
+
     await db.update_auto_subscribe_sponsors(account_id, new_val)
     status = "включена" if new_val else "выключена"
     await callback.answer(f"Авто-подписка на спонсоров {status}")

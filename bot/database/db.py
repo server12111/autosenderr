@@ -67,6 +67,10 @@ class Mailing:
     active_hours_json: Optional[str]
     last_sent_at: Optional[datetime]
     created_at: datetime
+    reply_mode: Optional[str] = None
+    reply_offset: int = 1
+    reply_random_min: int = 1
+    reply_random_max: int = 5
 
 
 @dataclass
@@ -210,6 +214,11 @@ class Database:
         # mailing_targets
         await _add_col("mailing_targets", "interval_seconds", "INTEGER")
         await _add_col("mailing_targets", "last_sent_at",     "DATETIME")
+        # mailings — reply mode
+        await _add_col("mailings", "reply_mode",       "TEXT DEFAULT NULL")
+        await _add_col("mailings", "reply_offset",     "INTEGER DEFAULT 1")
+        await _add_col("mailings", "reply_random_min", "INTEGER DEFAULT 1")
+        await _add_col("mailings", "reply_random_max", "INTEGER DEFAULT 5")
         # payments
         await _add_col("payments", "payment_method", "TEXT DEFAULT 'cryptobot'")
         await _add_col("payments", "plan_days",       "INTEGER DEFAULT 30")
@@ -485,54 +494,44 @@ class Database:
         return count
 
     # === Mailings ===
+    def _row_to_mailing(self, r) -> Mailing:
+        keys = r.keys() if hasattr(r, 'keys') else []
+        return Mailing(
+            id=r["id"], user_id=r["user_id"], account_id=r["account_id"],
+            name=r["name"], is_active=bool(r["is_active"]),
+            interval_seconds=r["interval_seconds"],
+            active_hours_json=r["active_hours_json"],
+            last_sent_at=self._parse_datetime(r["last_sent_at"]),
+            created_at=self._parse_datetime(r["created_at"]),
+            reply_mode=r["reply_mode"] if "reply_mode" in keys else None,
+            reply_offset=r["reply_offset"] if "reply_offset" in keys else 1,
+            reply_random_min=r["reply_random_min"] if "reply_random_min" in keys else 1,
+            reply_random_max=r["reply_random_max"] if "reply_random_max" in keys else 5,
+        )
+
     async def get_mailing(self, mailing_id: int) -> Optional[Mailing]:
         async with self._conn.execute("SELECT * FROM mailings WHERE id = ?", (mailing_id,)) as cur:
             row = await cur.fetchone()
             if row:
-                return Mailing(
-                    id=row["id"], user_id=row["user_id"], account_id=row["account_id"],
-                    name=row["name"], is_active=bool(row["is_active"]),
-                    interval_seconds=row["interval_seconds"],
-                    active_hours_json=row["active_hours_json"],
-                    last_sent_at=self._parse_datetime(row["last_sent_at"]),
-                    created_at=self._parse_datetime(row["created_at"]),
-                )
+                return self._row_to_mailing(row)
         return None
 
     async def get_user_mailings(self, user_id: int) -> list[Mailing]:
         async with self._conn.execute("SELECT * FROM mailings WHERE user_id = ?", (user_id,)) as cur:
             rows = await cur.fetchall()
-            return [Mailing(
-                id=r["id"], user_id=r["user_id"], account_id=r["account_id"],
-                name=r["name"], is_active=bool(r["is_active"]),
-                interval_seconds=r["interval_seconds"], active_hours_json=r["active_hours_json"],
-                last_sent_at=self._parse_datetime(r["last_sent_at"]),
-                created_at=self._parse_datetime(r["created_at"]),
-            ) for r in rows]
+            return [self._row_to_mailing(r) for r in rows]
 
     async def get_active_mailings(self) -> list[Mailing]:
         async with self._conn.execute("SELECT * FROM mailings WHERE is_active = 1") as cur:
             rows = await cur.fetchall()
-            return [Mailing(
-                id=r["id"], user_id=r["user_id"], account_id=r["account_id"],
-                name=r["name"], is_active=bool(r["is_active"]),
-                interval_seconds=r["interval_seconds"], active_hours_json=r["active_hours_json"],
-                last_sent_at=self._parse_datetime(r["last_sent_at"]),
-                created_at=self._parse_datetime(r["created_at"]),
-            ) for r in rows]
+            return [self._row_to_mailing(r) for r in rows]
 
     async def get_user_active_mailings(self, user_id: int) -> list[Mailing]:
         async with self._conn.execute(
             "SELECT * FROM mailings WHERE user_id = ? AND is_active = 1", (user_id,)
         ) as cur:
             rows = await cur.fetchall()
-            return [Mailing(
-                id=r["id"], user_id=r["user_id"], account_id=r["account_id"],
-                name=r["name"], is_active=bool(r["is_active"]),
-                interval_seconds=r["interval_seconds"], active_hours_json=r["active_hours_json"],
-                last_sent_at=self._parse_datetime(r["last_sent_at"]),
-                created_at=self._parse_datetime(r["created_at"]),
-            ) for r in rows]
+            return [self._row_to_mailing(r) for r in rows]
 
     async def create_mailing(self, user_id: int, account_id: int, name: str,
                               interval_seconds: int, active_hours_json: Optional[str] = None) -> int:
@@ -561,6 +560,14 @@ class Database:
     async def update_mailing_active_hours(self, mailing_id: int, active_hours_json: Optional[str]):
         await self._conn.execute(
             "UPDATE mailings SET active_hours_json = ? WHERE id = ?", (active_hours_json, mailing_id)
+        )
+        await self._conn.commit()
+
+    async def update_mailing_reply_mode(self, mailing_id: int, mode: Optional[str],
+                                         offset: int, rmin: int, rmax: int):
+        await self._conn.execute(
+            "UPDATE mailings SET reply_mode=?, reply_offset=?, reply_random_min=?, reply_random_max=? WHERE id=?",
+            (mode, offset, rmin, rmax, mailing_id)
         )
         await self._conn.commit()
 
@@ -778,6 +785,13 @@ class Database:
             rows = await cur.fetchall()
         by_hour = {r["h"]: r["cnt"] for r in rows}
         return [(h, by_hour.get(h, 0)) for h in range(24)]
+
+    async def has_paid_subscription(self, user_id: int) -> bool:
+        async with self._conn.execute(
+            "SELECT 1 FROM payments WHERE user_id = ? AND status = 'paid' LIMIT 1",
+            (user_id,)
+        ) as cur:
+            return await cur.fetchone() is not None
 
     async def count_paid_subscriptions(self) -> int:
         async with self._conn.execute(

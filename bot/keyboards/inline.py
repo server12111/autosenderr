@@ -202,10 +202,35 @@ def mailing_menu_keyboard(mailing: Mailing) -> InlineKeyboardMarkup:
         _btn("⏰ Время активности", callback_data=f"mailing_hours:{mailing.id}", style="primary"),
         InlineKeyboardButton(text="🔄 Аккаунт", callback_data=f"change_mailing_account:{mailing.id}", style="primary"),
     )
+    reply_label = "↩️ Ответная рассылка: ВКЛ" if mailing.reply_mode else "↩️ Ответная рассылка: ВЫКЛ"
+    builder.row(InlineKeyboardButton(text=reply_label, callback_data=f"mailing_reply_mode:{mailing.id}", style="primary"))
     builder.row(
         _btn("❌ Удалить рассылку", callback_data=f"delete_mailing:{mailing.id}", style="danger"),
         _btn("◀️ Назад", callback_data="mailings", style="primary"),
     )
+    return builder.as_markup()
+
+
+def reply_mode_select_keyboard(mailing_id: int) -> InlineKeyboardMarkup:
+    builder = InlineKeyboardBuilder()
+    builder.row(InlineKeyboardButton(text="🔁 На последнее", callback_data=f"reply_mode_last:{mailing_id}", style="primary"))
+    builder.row(InlineKeyboardButton(text="🔢 На N-е с конца", callback_data=f"reply_mode_fixed:{mailing_id}", style="primary"))
+    builder.row(InlineKeyboardButton(text="🎲 Случайно", callback_data=f"reply_mode_random:{mailing_id}", style="primary"))
+    builder.row(_btn("◀️ Назад", callback_data=f"mailing:{mailing_id}", style="primary"))
+    return builder.as_markup()
+
+
+def reply_mode_fixed_keyboard(mailing_id: int) -> InlineKeyboardMarkup:
+    builder = InlineKeyboardBuilder()
+    builder.row(*[
+        InlineKeyboardButton(text=str(n), callback_data=f"reply_mode_fixed_pos:{mailing_id}:{n}")
+        for n in range(2, 8)
+    ])
+    builder.row(*[
+        InlineKeyboardButton(text=str(n), callback_data=f"reply_mode_fixed_pos:{mailing_id}:{n}")
+        for n in range(8, 11)
+    ])
+    builder.row(_btn("◀️ Назад", callback_data=f"mailing_reply_mode:{mailing_id}", style="primary"))
     return builder.as_markup()
 
 
