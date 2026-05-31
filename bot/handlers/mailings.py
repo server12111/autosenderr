@@ -347,8 +347,8 @@ async def callback_add_mailing_forward(callback: CallbackQuery, state: FSMContex
     await state.update_data(mailing_id=mailing_id)
     await state.set_state(EditMailingStates.waiting_forward_message)
     await callback.message.edit_text(
-        pe("📨 Перешлите любое сообщение из канала или группы.\n"
-        "Бот сохранит ссылку на оригинал и при рассылке будет пересылать его."),
+        pe("📨 Перешлите любое сообщение из канала, группы или от пользователя.\n"
+        "Бот сохранит его и будет использовать при рассылке."),
         parse_mode="HTML",
         reply_markup=cancel_keyboard(),
     )
@@ -357,32 +357,52 @@ async def callback_add_mailing_forward(callback: CallbackQuery, state: FSMContex
 
 @router.message(EditMailingStates.waiting_forward_message)
 async def process_edit_forward_message(message: Message, state: FSMContext, db: Database):
-    from aiogram.types import MessageOriginChannel, MessageOriginChat
+    from aiogram.types import MessageOriginChannel, MessageOriginChat, MessageOriginUser
     origin = message.forward_origin
+    data = await state.get_data()
+    mailing_id = data["mailing_id"]
+
     if isinstance(origin, MessageOriginChannel):
         peer = f"@{origin.chat.username}" if origin.chat.username else str(origin.chat.id)
         msg_id = origin.message_id
+        await db.add_mailing_forward(mailing_id, peer, msg_id)
+        await state.clear()
+        messages = await db.get_mailing_messages(mailing_id)
+        await message.answer(
+            pe(f"✅ Пересылка сохранена!\n📌 Источник: {peer} / сообщение #{msg_id}\n"
+            f"Всего записей: {len(messages)}"),
+            parse_mode="HTML",
+            reply_markup=mailing_messages_keyboard(mailing_id, messages),
+        )
     elif isinstance(origin, MessageOriginChat):
         peer = f"@{origin.sender_chat.username}" if origin.sender_chat.username else str(origin.sender_chat.id)
         msg_id = origin.message_id
+        await db.add_mailing_forward(mailing_id, peer, msg_id)
+        await state.clear()
+        messages = await db.get_mailing_messages(mailing_id)
+        await message.answer(
+            pe(f"✅ Пересылка сохранена!\n📌 Источник: {peer} / сообщение #{msg_id}\n"
+            f"Всего записей: {len(messages)}"),
+            parse_mode="HTML",
+            reply_markup=mailing_messages_keyboard(mailing_id, messages),
+        )
+    elif isinstance(origin, MessageOriginUser):
+        text = message.text or message.caption or ""
+        entities_json = serialize_entities(message.entities or message.caption_entities)
+        photo_path = await save_photo_from_message(message) if message.photo else None
+        await db.add_mailing_message(mailing_id, text, photo_path=photo_path, entities_json=entities_json)
+        await state.clear()
+        messages = await db.get_mailing_messages(mailing_id)
+        await message.answer(
+            pe(f"✅ Сообщение от пользователя сохранено!\n"
+            f"Всего записей: {len(messages)}"),
+            parse_mode="HTML",
+            reply_markup=mailing_messages_keyboard(mailing_id, messages),
+        )
     else:
         await message.answer(
-            "❌ Не удалось определить источник. Перешлите сообщение из канала или группы."
+            "❌ Не удалось определить источник. Перешлите сообщение из канала, группы или от пользователя."
         )
-        return
-
-    data = await state.get_data()
-    mailing_id = data["mailing_id"]
-    await db.add_mailing_forward(mailing_id, peer, msg_id)
-    await state.clear()
-
-    messages = await db.get_mailing_messages(mailing_id)
-    await message.answer(
-        pe(f"✅ Пересылка сохранена!\n📌 Источник: {peer} / сообщение #{msg_id}\n"
-        f"Всего записей: {len(messages)}"),
-        parse_mode="HTML",
-        reply_markup=mailing_messages_keyboard(mailing_id, messages),
-    )
 
 
 @router.message(EditMailingStates.waiting_message_text, F.photo)
@@ -1086,8 +1106,8 @@ async def callback_create_add_message(callback: CallbackQuery, state: FSMContext
 async def callback_create_add_forward(callback: CallbackQuery, state: FSMContext):
     await state.set_state(CreateMailingStates.waiting_forward_message)
     await callback.message.edit_text(
-        pe("📨 Перешлите любое сообщение из канала или группы.\n"
-        "Бот сохранит ссылку на оригинал и при рассылке будет пересылать его."),
+        pe("📨 Перешлите любое сообщение из канала, группы или от пользователя.\n"
+        "Бот сохранит его и будет использовать при рассылке."),
         parse_mode="HTML",
         reply_markup=cancel_keyboard(),
     )
@@ -1096,32 +1116,52 @@ async def callback_create_add_forward(callback: CallbackQuery, state: FSMContext
 
 @router.message(CreateMailingStates.waiting_forward_message)
 async def process_create_forward_message(message: Message, state: FSMContext, db: Database):
-    from aiogram.types import MessageOriginChannel, MessageOriginChat
+    from aiogram.types import MessageOriginChannel, MessageOriginChat, MessageOriginUser
     origin = message.forward_origin
+    data = await state.get_data()
+    mailing_id = data["mailing_id"]
+
     if isinstance(origin, MessageOriginChannel):
         peer = f"@{origin.chat.username}" if origin.chat.username else str(origin.chat.id)
         msg_id = origin.message_id
+        await db.add_mailing_forward(mailing_id, peer, msg_id)
+        await state.set_state(CreateMailingStates.adding_messages)
+        messages = await db.get_mailing_messages(mailing_id)
+        await message.answer(
+            pe(f"✅ Пересылка сохранена!\n📌 Источник: {peer} / сообщение #{msg_id}\n"
+            f"Всего записей: {len(messages)}\n\nДобавьте ещё или нажмите «Готово»:"),
+            parse_mode="HTML",
+            reply_markup=mailing_creation_messages_keyboard(mailing_id, messages),
+        )
     elif isinstance(origin, MessageOriginChat):
         peer = f"@{origin.sender_chat.username}" if origin.sender_chat.username else str(origin.sender_chat.id)
         msg_id = origin.message_id
+        await db.add_mailing_forward(mailing_id, peer, msg_id)
+        await state.set_state(CreateMailingStates.adding_messages)
+        messages = await db.get_mailing_messages(mailing_id)
+        await message.answer(
+            pe(f"✅ Пересылка сохранена!\n📌 Источник: {peer} / сообщение #{msg_id}\n"
+            f"Всего записей: {len(messages)}\n\nДобавьте ещё или нажмите «Готово»:"),
+            parse_mode="HTML",
+            reply_markup=mailing_creation_messages_keyboard(mailing_id, messages),
+        )
+    elif isinstance(origin, MessageOriginUser):
+        text = message.text or message.caption or ""
+        entities_json = serialize_entities(message.entities or message.caption_entities)
+        photo_path = await save_photo_from_message(message) if message.photo else None
+        await db.add_mailing_message(mailing_id, text, photo_path=photo_path, entities_json=entities_json)
+        await state.set_state(CreateMailingStates.adding_messages)
+        messages = await db.get_mailing_messages(mailing_id)
+        await message.answer(
+            pe(f"✅ Сообщение от пользователя сохранено!\n"
+            f"Всего записей: {len(messages)}\n\nДобавьте ещё или нажмите «Готово»:"),
+            parse_mode="HTML",
+            reply_markup=mailing_creation_messages_keyboard(mailing_id, messages),
+        )
     else:
         await message.answer(
-            "❌ Не удалось определить источник. Перешлите сообщение из канала или группы."
+            "❌ Не удалось определить источник. Перешлите сообщение из канала, группы или от пользователя."
         )
-        return
-
-    data = await state.get_data()
-    mailing_id = data["mailing_id"]
-    await db.add_mailing_forward(mailing_id, peer, msg_id)
-    await state.set_state(CreateMailingStates.adding_messages)
-
-    messages = await db.get_mailing_messages(mailing_id)
-    await message.answer(
-        pe(f"✅ Пересылка сохранена!\n📌 Источник: {peer} / сообщение #{msg_id}\n"
-        f"Всего записей: {len(messages)}\n\nДобавьте ещё или нажмите «Готово»:"),
-        parse_mode="HTML",
-        reply_markup=mailing_creation_messages_keyboard(mailing_id, messages),
-    )
 
 
 @router.message(CreateMailingStates.waiting_message_text, F.photo)
