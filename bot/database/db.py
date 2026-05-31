@@ -75,6 +75,7 @@ class Mailing:
     reply_random_min: int = 1
     reply_random_max: int = 5
     keep_targets_on_ban: bool = False
+    account_rotation_mode: str = "per_target"
 
 
 @dataclass
@@ -238,6 +239,8 @@ class Database:
         await _add_col("mailing_targets", "is_forum",  "INTEGER DEFAULT 0")
         # mailings — keep targets on ban
         await _add_col("mailings", "keep_targets_on_ban", "INTEGER DEFAULT 0")
+        # mailings — account rotation mode for multi-account mailings
+        await _add_col("mailings", "account_rotation_mode", "TEXT DEFAULT 'per_target'")
         # users
         await _add_col("users", "ref_code",       "TEXT")
         await _add_col("users", "referred_by",    "INTEGER")
@@ -580,6 +583,7 @@ class Database:
             reply_random_min=r["reply_random_min"] if "reply_random_min" in keys else 1,
             reply_random_max=r["reply_random_max"] if "reply_random_max" in keys else 5,
             keep_targets_on_ban=bool(r["keep_targets_on_ban"]) if "keep_targets_on_ban" in keys else False,
+        account_rotation_mode=r["account_rotation_mode"] if "account_rotation_mode" in keys else "per_target",
         )
 
     async def get_mailing(self, mailing_id: int) -> Optional[Mailing]:
@@ -617,6 +621,10 @@ class Database:
 
     async def update_mailing_status(self, mailing_id: int, is_active: bool):
         await self._conn.execute("UPDATE mailings SET is_active = ? WHERE id = ?", (is_active, mailing_id))
+        await self._conn.commit()
+
+    async def update_mailing_rotation_mode(self, mailing_id: int, mode: str):
+        await self._conn.execute("UPDATE mailings SET account_rotation_mode = ? WHERE id = ?", (mode, mailing_id))
         await self._conn.commit()
 
     async def update_mailing_account(self, mailing_id: int, account_id: int):

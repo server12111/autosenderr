@@ -1752,11 +1752,13 @@ async def callback_mailing_multi_accounts(callback: CallbackQuery, db: Database)
         return
 
     selected_ids = await db.get_mailing_extra_account_ids(mailing_id)
+    mailing = await db.get_mailing(mailing_id)
     await callback.message.edit_text(
         pe("👥 Выберите аккаунты для чередования.\n"
-           "Нажмите на аккаунт чтобы добавить/убрать. Затем нажмите «Готово»."),
+           "Нажмите на аккаунт чтобы добавить/убрать.\n"
+           "Выберите режим чередования, затем «Готово»."),
         parse_mode="HTML",
-        reply_markup=multi_account_select_keyboard(accounts, selected_ids, mailing_id),
+        reply_markup=multi_account_select_keyboard(accounts, selected_ids, mailing_id, mailing.account_rotation_mode),
     )
     await callback.answer()
 
@@ -1772,8 +1774,25 @@ async def callback_toggle_mailing_account(callback: CallbackQuery, db: Database)
     user = await db.get_user(callback.from_user.id)
     accounts = await db.get_user_accounts(user.id)
     selected_ids = await db.get_mailing_extra_account_ids(mailing_id)
+    mailing = await db.get_mailing(mailing_id)
     await callback.message.edit_reply_markup(
-        reply_markup=multi_account_select_keyboard(accounts, selected_ids, mailing_id)
+        reply_markup=multi_account_select_keyboard(accounts, selected_ids, mailing_id, mailing.account_rotation_mode)
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("toggle_rotation_mode:"))
+async def callback_toggle_rotation_mode(callback: CallbackQuery, db: Database):
+    mailing_id = int(callback.data.split(":")[1])
+    mailing = await db.get_mailing(mailing_id)
+    new_mode = "per_cycle" if mailing.account_rotation_mode == "per_target" else "per_target"
+    await db.update_mailing_rotation_mode(mailing_id, new_mode)
+
+    user = await db.get_user(callback.from_user.id)
+    accounts = await db.get_user_accounts(user.id)
+    selected_ids = await db.get_mailing_extra_account_ids(mailing_id)
+    await callback.message.edit_reply_markup(
+        reply_markup=multi_account_select_keyboard(accounts, selected_ids, mailing_id, new_mode)
     )
     await callback.answer()
 

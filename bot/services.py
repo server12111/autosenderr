@@ -680,6 +680,26 @@ class MailingService:
 
                     extra_accounts = await self.db.get_mailing_extra_accounts(mailing_id)
                     account_pool = extra_accounts if extra_accounts else None
+                    rotation_mode = mailing.account_rotation_mode  # 'per_target' or 'per_cycle'
+
+                    # Pre-resolve clients/me for the entire pool to avoid per-target overhead
+                    pool_clients: list[tuple] = []  # list of (account_id, client, me)
+                    if account_pool:
+                        for pool_acc in account_pool:
+                            pc = await self.userbot_manager.get_client(pool_acc.id)
+                            if pc:
+                                if not pc.is_connected():
+                                    try:
+                                        await pc.connect()
+                                    except Exception:
+                                        continue
+                                try:
+                                    pm_user = await pc.get_me()
+                                    pool_clients.append((pool_acc.id, pc, pm_user))
+                                except Exception:
+                                    continue
+                        if not pool_clients:
+                            account_pool = None  # all extra accounts failed, fall back
 
                     client = await self.userbot_manager.get_client(mailing.account_id)
                     if not client:
@@ -701,27 +721,15 @@ class MailingService:
                     sent_any = False
                     me = await client.get_me()
 
-                    for target_obj in targets:
-                        # Resolve which account/client to use for this target
-                        current_account_id = mailing.account_id
-                        target_client = client
-                        target_me = me
-                        if account_pool:
-                            idx = self._account_indices.get(mailing_id, 0)
-                            acc = account_pool[idx % len(account_pool)]
-                            self._account_indices[mailing_id] = idx + 1
-                            ac = await self.userbot_manager.get_client(acc.id)
-                            if ac:
-                                if not ac.is_connected():
-                                    try:
-                                        await ac.connect()
-                                    except Exception:
-                                        ac = None
-                                if ac:
-                                    target_client = ac
-                                    target_me = await ac.get_me()
-                                    current_account_id = acc.id
+                    # per_cycle: pick one account for the entire iteration over all targets
+                    if account_pool and rotation_mode == "per_cycle" and pool_clients:
+                        cycle_idx = self._account_indices.get(mailing_id, 0)
+                        cycle_account_id, cycle_client, cycle_me = pool_clients[cycle_idx % len(pool_clients)]
+                        self._account_indices[mailing_id] = cycle_idx + 1
+                    else:
+                        cycle_account_id, cycle_client, cycle_me = None, None, None
 
+                    for target_obj in targets:
                         # Each target uses its own interval or falls back to mailing default
                         target_interval = target_obj.interval_seconds or mailing.interval_seconds
                         if target_obj.last_sent_at is not None:
@@ -729,6 +737,23 @@ class MailingService:
                             if elapsed < target_interval:
                                 logger.debug(f"Mailing {mailing_id}: {target_obj.chat_identifier} — interval not elapsed ({elapsed:.0f}/{target_interval}s), skip")
                                 continue  # Not due yet for this target
+
+                        # Resolve client for this target (after interval check to not waste rotation slots)
+                        if cycle_client:
+                            # per_cycle: same account for all targets
+                            current_account_id = cycle_account_id
+                            target_client = cycle_client
+                            target_me = cycle_me
+                        elif account_pool and pool_clients and rotation_mode == "per_target":
+                            # per_target: advance to next account only for targets that will actually send
+                            idx = self._account_indices.get(mailing_id, 0)
+                            target_account_id, target_client, target_me = pool_clients[idx % len(pool_clients)]
+                            current_account_id = target_account_id
+                            self._account_indices[mailing_id] = idx + 1
+                        else:
+                            current_account_id = mailing.account_id
+                            target_client = client
+                            target_me = me
 
                         target = target_obj.chat_identifier
                         if not target.startswith('-') and not target.startswith('@') and not target.isdigit():

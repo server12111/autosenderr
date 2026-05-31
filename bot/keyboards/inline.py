@@ -378,7 +378,7 @@ def select_account_for_mailing_keyboard(accounts: list[Account], mailing_id: int
     return builder.as_markup()
 
 
-def multi_account_select_keyboard(accounts: list[Account], selected_ids: list[int], mailing_id: int) -> InlineKeyboardMarkup:
+def multi_account_select_keyboard(accounts: list[Account], selected_ids: list[int], mailing_id: int, rotation_mode: str = "per_target") -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
     for acc in accounts:
         prefix = "✅ " if acc.id in selected_ids else "📱 "
@@ -387,6 +387,11 @@ def multi_account_select_keyboard(accounts: list[Account], selected_ids: list[in
             callback_data=f"toggle_mailing_account:{acc.id}:{mailing_id}",
             style="primary",
         ))
+    if rotation_mode == "per_cycle":
+        mode_label = "🔄 Режим: все чаты одним акк."
+    else:
+        mode_label = "🔄 Режим: по одному чату"
+    builder.row(_btn(mode_label, callback_data=f"toggle_rotation_mode:{mailing_id}", style="primary"))
     builder.row(_btn("✅ Готово", callback_data=f"mailing:{mailing_id}", style="success"))
     return builder.as_markup()
 
