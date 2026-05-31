@@ -678,29 +678,9 @@ class MailingService:
                         await asyncio.sleep(60)
                         continue
 
-                    extra_accounts = await self.db.get_mailing_extra_accounts(mailing_id)
-                    account_pool = extra_accounts if extra_accounts else None
                     rotation_mode = mailing.account_rotation_mode  # 'per_target' or 'per_cycle'
 
-                    # Pre-resolve clients/me for the entire pool to avoid per-target overhead
-                    pool_clients: list[tuple] = []  # list of (account_id, client, me)
-                    if account_pool:
-                        for pool_acc in account_pool:
-                            pc = await self.userbot_manager.get_client(pool_acc.id)
-                            if pc:
-                                if not pc.is_connected():
-                                    try:
-                                        await pc.connect()
-                                    except Exception:
-                                        continue
-                                try:
-                                    pm_user = await pc.get_me()
-                                    pool_clients.append((pool_acc.id, pc, pm_user))
-                                except Exception:
-                                    continue
-                        if not pool_clients:
-                            account_pool = None  # all extra accounts failed, fall back
-
+                    # Always resolve main client first
                     client = await self.userbot_manager.get_client(mailing.account_id)
                     if not client:
                         await asyncio.sleep(60)
@@ -721,8 +701,29 @@ class MailingService:
                     sent_any = False
                     me = await client.get_me()
 
+                    # Build pool: main account first, then extra accounts
+                    extra_accounts = await self.db.get_mailing_extra_accounts(mailing_id)
+                    pool_clients: list[tuple] = []  # list of (account_id, client, me)
+                    if extra_accounts:
+                        pool_clients.append((mailing.account_id, client, me))
+                        for pool_acc in extra_accounts:
+                            pc = await self.userbot_manager.get_client(pool_acc.id)
+                            if pc:
+                                if not pc.is_connected():
+                                    try:
+                                        await pc.connect()
+                                    except Exception:
+                                        continue
+                                try:
+                                    pm_user = await pc.get_me()
+                                    pool_clients.append((pool_acc.id, pc, pm_user))
+                                except Exception:
+                                    continue
+                    # pool_clients has 2+ entries only when extra accounts exist and at least one connected
+                    account_pool = pool_clients if len(pool_clients) > 1 else None
+
                     # per_cycle: pick one account for the entire iteration over all targets
-                    if account_pool and rotation_mode == "per_cycle" and pool_clients:
+                    if account_pool and rotation_mode == "per_cycle":
                         cycle_idx = self._account_indices.get(mailing_id, 0)
                         cycle_account_id, cycle_client, cycle_me = pool_clients[cycle_idx % len(pool_clients)]
                         self._account_indices[mailing_id] = cycle_idx + 1
