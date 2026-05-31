@@ -730,6 +730,10 @@ class MailingService:
                     else:
                         cycle_account_id, cycle_client, cycle_me = None, None, None
 
+                    # per_target: base offset shifts +1 each full iteration so every account advances one chat
+                    pt_base = self._account_indices.get(mailing_id, 0) if (account_pool and rotation_mode == "per_target") else 0
+                    pt_send_idx = 0
+
                     for target_obj in targets:
                         # Each target uses its own interval or falls back to mailing default
                         target_interval = target_obj.interval_seconds or mailing.interval_seconds
@@ -746,11 +750,13 @@ class MailingService:
                             target_client = cycle_client
                             target_me = cycle_me
                         elif account_pool and pool_clients and rotation_mode == "per_target":
-                            # per_target: advance to next account only for targets that will actually send
-                            idx = self._account_indices.get(mailing_id, 0)
-                            target_account_id, target_client, target_me = pool_clients[idx % len(pool_clients)]
+                            # per_target: account = pool[(send_idx - base) % N]
+                            # so on iteration k, target i uses pool[(i - k) % N]
+                            # → each account advances one chat per iteration
+                            acc_idx = (pt_send_idx - pt_base) % len(pool_clients)
+                            target_account_id, target_client, target_me = pool_clients[acc_idx]
                             current_account_id = target_account_id
-                            self._account_indices[mailing_id] = idx + 1
+                            pt_send_idx += 1
                         else:
                             current_account_id = mailing.account_id
                             target_client = client
@@ -824,6 +830,10 @@ class MailingService:
                                 logger.error(f"Error sending mailing {mailing_id} to {target}: {e}")
 
                         await asyncio.sleep(3)
+
+                    # per_target: shift base by +1 so each account moves to next chat next iteration
+                    if account_pool and rotation_mode == "per_target" and pool_clients:
+                        self._account_indices[mailing_id] = pt_base + 1
 
                     if sent_any:
                         await self.db.update_mailing_last_sent(mailing_id)
