@@ -6,8 +6,9 @@ from aiogram.fsm.context import FSMContext
 from ..database.db import Database
 from ..keyboards.inline import (
     main_menu_keyboard, back_to_menu_keyboard, channel_check_keyboard,
-    accounts_keyboard, admin_keyboard, mailings_keyboard,
+    accounts_keyboard, admin_keyboard, mailings_keyboard, help_keyboard,
 )
+from ..config import config
 from ..utils.premium_emoji import pe
 
 router = Router()
@@ -131,7 +132,12 @@ async def callback_help(callback: CallbackQuery, db: Database):
         "• <i>Групповой</i> — отвечает на реплаи в группах (каждый раз)\n\n"
         f"🆘 <b>Поддержка:</b> @{support}"
     )
-    await callback.message.edit_text(text, parse_mode="HTML", reply_markup=back_to_menu_keyboard())
+    privacy_url = getattr(config, 'PRIVACY_URL', None) or None
+    terms_url = getattr(config, 'TERMS_URL', None) or None
+    await callback.message.edit_text(
+        text, parse_mode="HTML",
+        reply_markup=help_keyboard(support_username=support, privacy_url=privacy_url, terms_url=terms_url)
+    )
     await callback.answer()
 
 

@@ -885,3 +885,80 @@ async def callback_admin_cleanup_accounts_confirm(callback: CallbackQuery, db: D
         reply_markup=admin_keyboard(),
     )
     await callback.answer()
+
+
+# === Subscription Stats ===
+@router.callback_query(F.data.startswith("admin_subscriptions"))
+async def callback_admin_subscriptions(callback: CallbackQuery, db: Database):
+    if not is_admin(callback.from_user.id):
+        await callback.answer("Нет доступа", show_alert=True)
+        return
+
+    parts = callback.data.split(":")
+    page = int(parts[1]) if len(parts) > 1 else 0
+    per_page = 8
+
+    stats = await db.get_subscription_stats()
+    total = len(stats)
+    chunk = stats[page * per_page: (page + 1) * per_page]
+
+    now = datetime.now()
+    text = pe(f"💳 <b>Подписки ({total} пользователей)</b>\n\n")
+
+    for row in chunk:
+        sub_end = row.get("subscription_end")
+        if sub_end:
+            if isinstance(sub_end, str):
+                sub_end = datetime.fromisoformat(sub_end)
+            is_active = sub_end > now
+            days_left = (sub_end - now).days if is_active else 0
+            status = f"✅ активна, {days_left}д" if is_active else "❌ истекла"
+            end_str = sub_end.strftime("%d.%m.%Y")
+        else:
+            status = "❌ нет подписки"
+            end_str = "—"
+
+        purchase_count = row.get("purchase_count") or 0
+        last_paid = row.get("last_paid_at")
+        if last_paid:
+            if isinstance(last_paid, str):
+                last_paid = datetime.fromisoformat(last_paid)
+            paid_str = last_paid.strftime("%d.%m.%Y")
+        else:
+            paid_str = "—"
+
+        last_method = row.get("last_method") or ("промокод" if not purchase_count else "—")
+        last_days = row.get("last_plan_days") or "—"
+        username = f"@{row['username']}" if row.get("username") else str(row["telegram_id"])
+
+        sub_type = "оплата" if purchase_count else "промокод"
+
+        text += (
+            f"👤 {username}\n"
+            f"  Статус: {status}\n"
+            f"  До: {end_str} | Тип: {sub_type}\n"
+            f"  Покупок: {purchase_count} | Посл. платёж: {paid_str}\n"
+            f"  Последний план: {last_days}д | Метод: {last_method}\n\n"
+        )
+
+    if not chunk:
+        text += "Нет данных."
+
+    from aiogram.utils.keyboard import InlineKeyboardBuilder as IKB
+    from aiogram.types import InlineKeyboardButton as IKBtn
+    builder = IKB()
+    nav = []
+    if page > 0:
+        nav.append(IKBtn(text="◀️", callback_data=f"admin_subscriptions:{page - 1}"))
+    if (page + 1) * per_page < total:
+        nav.append(IKBtn(text="▶️", callback_data=f"admin_subscriptions:{page + 1}"))
+    if nav:
+        builder.row(*nav)
+    builder.row(IKBtn(text="◀️ Назад", callback_data="admin_back"))
+
+    try:
+        await callback.message.edit_text(text, parse_mode="HTML", reply_markup=builder.as_markup())
+    except Exception:
+        await callback.message.delete()
+        await callback.message.answer(text, parse_mode="HTML", reply_markup=builder.as_markup())
+    await callback.answer()

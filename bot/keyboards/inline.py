@@ -1,5 +1,6 @@
 import re
 import html as _html_lib
+from typing import Optional
 
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 from aiogram.utils.keyboard import InlineKeyboardBuilder
@@ -18,8 +19,7 @@ _SORTED_EMOJI = sorted(EMOJI_MAP.keys(), key=len, reverse=True)
 
 
 def _btn(text: str, **kwargs) -> InlineKeyboardButton:
-    """Create InlineKeyboardButton: if text starts with a mapped emoji,
-    strip it from text and pass it as icon_custom_emoji_id."""
+    """Create InlineKeyboardButton with premium animated emoji icon if text starts with a mapped emoji."""
     for emoji in _SORTED_EMOJI:
         if text.startswith(emoji):
             clean = text[len(emoji):].lstrip()
@@ -51,6 +51,38 @@ def back_to_menu_keyboard() -> InlineKeyboardMarkup:
     return builder.as_markup()
 
 
+def help_keyboard(support_username: Optional[str] = None,
+                  privacy_url: Optional[str] = None,
+                  terms_url: Optional[str] = None) -> InlineKeyboardMarkup:
+    builder = InlineKeyboardBuilder()
+    if privacy_url:
+        builder.row(InlineKeyboardButton(
+            text="Политика конфиденциальности", url=privacy_url,
+            icon_custom_emoji_id="5429405838345265327"
+        ))
+    if terms_url:
+        builder.row(InlineKeyboardButton(
+            text="Пользовательское соглашение", url=terms_url,
+            icon_custom_emoji_id="5188639433544447819"
+        ))
+    if support_username:
+        builder.row(InlineKeyboardButton(
+            text="Поддержка", url=f"https://t.me/{support_username.lstrip('@')}",
+            icon_custom_emoji_id="5388805667114988189"
+        ))
+    builder.row(_btn("◀️ Главное меню", callback_data="main_menu", style="primary"))
+    return builder.as_markup()
+
+
+def skip_thread_keyboard(mailing_id: int, target_identifier: str) -> InlineKeyboardMarkup:
+    builder = InlineKeyboardBuilder()
+    builder.row(InlineKeyboardButton(
+        text="⏭️ Пропустить (General)",
+        callback_data=f"skip_thread:{mailing_id}:{target_identifier}"
+    ))
+    return builder.as_markup()
+
+
 # === Accounts ===
 def accounts_keyboard(accounts: list[Account]) -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
@@ -64,23 +96,18 @@ def accounts_keyboard(accounts: list[Account]) -> InlineKeyboardMarkup:
     return builder.as_markup()
 
 
-def account_menu_keyboard(account_id: int, auto_subscribe: bool = False) -> InlineKeyboardMarkup:
+def account_menu_keyboard(account_id: int) -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
     builder.row(_btn("✉️ Рассылки аккаунта", callback_data=f"account_mailings:{account_id}", style="primary"))
     builder.row(
         _btn("🤖 Автоответ (личные)", callback_data=f"autoresponder:{account_id}", style="primary"),
         _btn("💬 Автоответ (группы)", callback_data=f"group_autoresponder:{account_id}", style="primary"),
     )
-    sub_text = "🔔 Авто-подписка: ВКЛ" if auto_subscribe else "🔔 Авто-подписка: ВЫКЛ"
-    sub_style = "danger" if auto_subscribe else "success"
     builder.row(
-        _btn(sub_text, callback_data=f"toggle_auto_subscribe:{account_id}", style=sub_style),
         _btn("🌐 Прокси", callback_data=f"set_proxy:{account_id}", style="primary"),
-    )
-    builder.row(
         _btn("✏️ Переименовать", callback_data=f"rename_account:{account_id}", style="primary"),
-        _btn("❌ Удалить", callback_data=f"delete_account:{account_id}", style="danger"),
     )
+    builder.row(_btn("❌ Удалить", callback_data=f"delete_account:{account_id}", style="danger"))
     builder.row(_btn("◀️ Назад", callback_data="accounts", style="primary"))
     return builder.as_markup()
 
@@ -106,6 +133,7 @@ def account_payment_keyboard(pay_url: str, invoice_id: str) -> InlineKeyboardMar
 
 def add_account_proxy_keyboard() -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
+    builder.row(InlineKeyboardButton(text="Купить аккаунт и прокси", url="https://t.me/FeTgAccountbot", icon_custom_emoji_id="5312361253610475399"))
     builder.row(
         _btn("✅ Да, добавить прокси", callback_data="add_account_set_proxy", style="success"),
         _btn("➡️ Продолжить", callback_data="add_account_skip_proxy", style="primary"),
@@ -200,10 +228,10 @@ def mailing_menu_keyboard(mailing: Mailing) -> InlineKeyboardMarkup:
     )
     builder.row(
         _btn("⏰ Время активности", callback_data=f"mailing_hours:{mailing.id}", style="primary"),
-        InlineKeyboardButton(text="🔄 Аккаунт", callback_data=f"change_mailing_account:{mailing.id}", style="primary"),
+        _btn("🔃 Аккаунт", callback_data=f"change_mailing_account:{mailing.id}", style="primary"),
     )
     reply_label = "↩️ Ответная рассылка: ВКЛ" if mailing.reply_mode else "↩️ Ответная рассылка: ВЫКЛ"
-    builder.row(InlineKeyboardButton(text=reply_label, callback_data=f"mailing_reply_mode:{mailing.id}", style="primary"))
+    builder.row(_btn(reply_label, callback_data=f"mailing_reply_mode:{mailing.id}", style="primary"))
     builder.row(
         _btn("❌ Удалить рассылку", callback_data=f"delete_mailing:{mailing.id}", style="danger"),
         _btn("◀️ Назад", callback_data="mailings", style="primary"),
@@ -213,9 +241,9 @@ def mailing_menu_keyboard(mailing: Mailing) -> InlineKeyboardMarkup:
 
 def reply_mode_select_keyboard(mailing_id: int) -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
-    builder.row(InlineKeyboardButton(text="🔁 На последнее", callback_data=f"reply_mode_last:{mailing_id}", style="primary"))
-    builder.row(InlineKeyboardButton(text="🔢 На N-е с конца", callback_data=f"reply_mode_fixed:{mailing_id}", style="primary"))
-    builder.row(InlineKeyboardButton(text="🎲 Случайно", callback_data=f"reply_mode_random:{mailing_id}", style="primary"))
+    builder.row(_btn("🔃 На последнее", callback_data=f"reply_mode_last:{mailing_id}", style="primary"))
+    builder.row(_btn("🔢 На N-е с конца", callback_data=f"reply_mode_fixed:{mailing_id}", style="primary"))
+    builder.row(_btn("🎲 Случайно", callback_data=f"reply_mode_random:{mailing_id}", style="primary"))
     builder.row(_btn("◀️ Назад", callback_data=f"mailing:{mailing_id}", style="primary"))
     return builder.as_markup()
 
@@ -512,10 +540,11 @@ def admin_keyboard() -> InlineKeyboardMarkup:
         _btn("💸 Запросы вывода", callback_data="admin_withdrawals", style="primary"),
     )
     builder.row(
+        _btn("💳 Подписки", callback_data="admin_subscriptions", style="primary"),
         _btn("📤 Экспорт БД", callback_data="admin_export_db", style="primary"),
-        _btn("📥 Импорт БД", callback_data="admin_import_db", style="primary"),
     )
     builder.row(
+        _btn("📥 Импорт БД", callback_data="admin_import_db", style="primary"),
         _btn("🗑 Очистить мёртвые аккаунты", callback_data="admin_cleanup_accounts", style="danger"),
     )
     builder.row(_btn("◀️ Главное меню", callback_data="main_menu", style="primary"))

@@ -24,6 +24,9 @@ class User:
     ref_balance: float
     created_at: datetime
     last_activity: Optional[datetime] = None
+    subscription_expired_notified_at: Optional[datetime] = None
+    reminder_3d_sent_at: Optional[datetime] = None
+    reminder_1d_sent_at: Optional[datetime] = None
 
     @property
     def display_name(self) -> str:
@@ -71,6 +74,7 @@ class Mailing:
     reply_offset: int = 1
     reply_random_min: int = 1
     reply_random_max: int = 5
+    keep_targets_on_ban: bool = False
 
 
 @dataclass
@@ -108,6 +112,7 @@ class MailingTarget:
     chat_identifier: str
     interval_seconds: Optional[int] = None
     last_sent_at: Optional[datetime] = None
+    thread_id: Optional[int] = None
 
 
 @dataclass
@@ -225,11 +230,18 @@ class Database:
         # promocodes
         await _add_col("promocodes", "max_uses",   "INTEGER NOT NULL DEFAULT 1")
         await _add_col("promocodes", "uses_count", "INTEGER NOT NULL DEFAULT 0")
+        # mailing_targets — topics support
+        await _add_col("mailing_targets", "thread_id", "INTEGER DEFAULT NULL")
+        # mailings — keep targets on ban
+        await _add_col("mailings", "keep_targets_on_ban", "INTEGER DEFAULT 0")
         # users
         await _add_col("users", "ref_code",       "TEXT")
         await _add_col("users", "referred_by",    "INTEGER")
         await _add_col("users", "ref_balance",    "REAL DEFAULT 0")
         await _add_col("users", "last_activity",  "DATETIME")
+        await _add_col("users", "subscription_expired_notified_at", "DATETIME DEFAULT NULL")
+        await _add_col("users", "reminder_3d_sent_at", "DATETIME DEFAULT NULL")
+        await _add_col("users", "reminder_1d_sent_at", "DATETIME DEFAULT NULL")
 
     async def close(self):
         if self._conn:
@@ -243,17 +255,21 @@ class Database:
         return datetime.fromisoformat(value)
 
     def _row_to_user(self, row) -> "User":
+        keys = row.keys()
         return User(
             id=row["id"],
             telegram_id=row["telegram_id"],
             username=row["username"],
             subscription_end=self._parse_datetime(row["subscription_end"]),
             is_admin=bool(row["is_admin"]),
-            ref_code=row["ref_code"] if "ref_code" in row.keys() else None,
-            referred_by=row["referred_by"] if "referred_by" in row.keys() else None,
-            ref_balance=float(row["ref_balance"]) if "ref_balance" in row.keys() and row["ref_balance"] else 0.0,
+            ref_code=row["ref_code"] if "ref_code" in keys else None,
+            referred_by=row["referred_by"] if "referred_by" in keys else None,
+            ref_balance=float(row["ref_balance"]) if "ref_balance" in keys and row["ref_balance"] else 0.0,
             created_at=self._parse_datetime(row["created_at"]),
-            last_activity=self._parse_datetime(row["last_activity"]) if "last_activity" in row.keys() else None,
+            last_activity=self._parse_datetime(row["last_activity"]) if "last_activity" in keys else None,
+            subscription_expired_notified_at=self._parse_datetime(row["subscription_expired_notified_at"]) if "subscription_expired_notified_at" in keys else None,
+            reminder_3d_sent_at=self._parse_datetime(row["reminder_3d_sent_at"]) if "reminder_3d_sent_at" in keys else None,
+            reminder_1d_sent_at=self._parse_datetime(row["reminder_1d_sent_at"]) if "reminder_1d_sent_at" in keys else None,
         )
 
     def _row_to_account(self, row) -> "Account":
@@ -340,7 +356,8 @@ class Database:
 
     async def update_subscription(self, user_id: int, subscription_end: datetime):
         await self._conn.execute(
-            "UPDATE users SET subscription_end = ? WHERE id = ?",
+            "UPDATE users SET subscription_end = ?, subscription_expired_notified_at = NULL, "
+            "reminder_3d_sent_at = NULL, reminder_1d_sent_at = NULL WHERE id = ?",
             (subscription_end.isoformat(), user_id),
         )
         await self._conn.commit()
@@ -507,6 +524,7 @@ class Database:
             reply_offset=r["reply_offset"] if "reply_offset" in keys else 1,
             reply_random_min=r["reply_random_min"] if "reply_random_min" in keys else 1,
             reply_random_max=r["reply_random_max"] if "reply_random_max" in keys else 5,
+            keep_targets_on_ban=bool(r["keep_targets_on_ban"]) if "keep_targets_on_ban" in keys else False,
         )
 
     async def get_mailing(self, mailing_id: int) -> Optional[Mailing]:
@@ -662,6 +680,7 @@ class Database:
                     chat_identifier=r["chat_identifier"],
                     interval_seconds=r["interval_seconds"] if "interval_seconds" in keys else None,
                     last_sent_at=self._parse_datetime(r["last_sent_at"]) if "last_sent_at" in keys else None,
+                    thread_id=r["thread_id"] if "thread_id" in keys else None,
                 ))
             return result
 
@@ -787,11 +806,62 @@ class Database:
         return [(h, by_hour.get(h, 0)) for h in range(24)]
 
     async def has_paid_subscription(self, user_id: int) -> bool:
+        """True if user has an active subscription (paid or promo)."""
         async with self._conn.execute(
-            "SELECT 1 FROM payments WHERE user_id = ? AND status = 'paid' LIMIT 1",
-            (user_id,)
+            "SELECT subscription_end FROM users WHERE id = ? LIMIT 1", (user_id,)
         ) as cur:
-            return await cur.fetchone() is not None
+            row = await cur.fetchone()
+            if row and row[0]:
+                end = self._parse_datetime(row[0])
+                return end is not None and end > datetime.now()
+        return False
+
+    async def set_subscription_expired_notified(self, user_id: int):
+        await self._conn.execute(
+            "UPDATE users SET subscription_expired_notified_at = ? WHERE id = ?",
+            (datetime.now().isoformat(), user_id)
+        )
+        await self._conn.commit()
+
+    async def set_user_reminder_sent(self, user_id: int, days: int):
+        col = "reminder_3d_sent_at" if days == 3 else "reminder_1d_sent_at"
+        await self._conn.execute(
+            f"UPDATE users SET {col} = ? WHERE id = ?",
+            (datetime.now().isoformat(), user_id)
+        )
+        await self._conn.commit()
+
+    async def update_mailing_keep_targets(self, mailing_id: int, value: bool):
+        await self._conn.execute(
+            "UPDATE mailings SET keep_targets_on_ban = ? WHERE id = ?",
+            (1 if value else 0, mailing_id)
+        )
+        await self._conn.commit()
+
+    async def update_target_thread(self, target_id: int, thread_id: Optional[int]):
+        await self._conn.execute(
+            "UPDATE mailing_targets SET thread_id = ? WHERE id = ?",
+            (thread_id, target_id)
+        )
+        await self._conn.commit()
+
+    async def get_subscription_stats(self) -> list[dict]:
+        """Return subscription info for all users who have payments or active subscription."""
+        async with self._conn.execute("""
+            SELECT u.id, u.telegram_id, u.username, u.subscription_end,
+                   COUNT(p.id) as purchase_count,
+                   MAX(p.paid_at) as last_paid_at,
+                   MAX(p.plan_days) as last_plan_days,
+                   MAX(p.amount) as last_amount,
+                   MAX(p.payment_method) as last_method
+            FROM users u
+            LEFT JOIN payments p ON p.user_id = u.id AND p.status = 'paid'
+            WHERE u.subscription_end IS NOT NULL OR p.id IS NOT NULL
+            GROUP BY u.id
+            ORDER BY u.subscription_end IS NULL, u.subscription_end DESC
+        """) as cur:
+            rows = await cur.fetchall()
+            return [dict(r) for r in rows]
 
     async def count_paid_subscriptions(self) -> int:
         async with self._conn.execute(

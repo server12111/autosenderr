@@ -174,6 +174,8 @@ class EditMailingStates(StatesGroup):
     waiting_hours = State()
     waiting_target_interval = State()
     waiting_reply_range = State()
+    waiting_thread_id = State()
+    waiting_thread_id_for_target = State()
 
 
 @router.callback_query(F.data.startswith("account_mailings:"))
@@ -345,7 +347,7 @@ async def callback_add_mailing_forward(callback: CallbackQuery, state: FSMContex
     await state.set_state(EditMailingStates.waiting_forward_message)
     await callback.message.edit_text(
         pe("📨 Перешлите любое сообщение из канала или группы.\n"
-        "Бот збереже посилання на оригінал і при розсилці буде пересилати його."),
+        "Бот сохранит ссылку на оригинал и при рассылке будет пересылать его."),
         parse_mode="HTML",
         reply_markup=cancel_keyboard(),
     )
@@ -515,18 +517,22 @@ async def callback_delete_message(callback: CallbackQuery, db: Database):
 async def callback_mailing_targets(callback: CallbackQuery, db: Database):
     mailing_id = int(callback.data.split(":")[1])
     targets = await db.get_mailing_targets(mailing_id)
+    mailing = await db.get_mailing(mailing_id)
 
     text = f"🎯 Целевые чаты ({len(targets)} шт.):\n\n"
     if targets:
         for i, target in enumerate(targets, 1):
-            text += f"{i}. {target.chat_identifier}\n"
+            thread_info = f" [тема #{target.thread_id}]" if target.thread_id else ""
+            text += f"{i}. {target.chat_identifier}{thread_info}\n"
     else:
         text += "Целевых чатов пока нет.\n"
 
     text += "\nНажмите на чат, чтобы удалить его:"
 
+    keep = mailing.keep_targets_on_ban if mailing else False
     await callback.message.edit_text(
-        pe(text), parse_mode="HTML", reply_markup=mailing_targets_keyboard(mailing_id, targets)
+        pe(text), parse_mode="HTML",
+        reply_markup=mailing_targets_keyboard(mailing_id, targets)
     )
     await callback.answer()
 
@@ -556,7 +562,6 @@ async def process_edit_target(message: Message, state: FSMContext, db: Database)
     data = await state.get_data()
     mailing_id = data["mailing_id"]
 
-    # Try to parse as t.me link
     parsed = parse_chat_link(text)
     target = parsed if parsed else text
 
@@ -564,7 +569,6 @@ async def process_edit_target(message: Message, state: FSMContext, db: Database)
     await state.clear()
 
     targets = await db.get_mailing_targets(mailing_id)
-
     await message.answer(
         pe(f"✅ Чат добавлен! Всего чатов: {len(targets)}"),
         parse_mode="HTML",
@@ -1036,7 +1040,7 @@ async def callback_create_add_forward(callback: CallbackQuery, state: FSMContext
     await state.set_state(CreateMailingStates.waiting_forward_message)
     await callback.message.edit_text(
         pe("📨 Перешлите любое сообщение из канала или группы.\n"
-        "Бот збереже посилання на оригінал і при розсилці буде пересилати його."),
+        "Бот сохранит ссылку на оригинал и при рассылке будет пересылать его."),
         parse_mode="HTML",
         reply_markup=cancel_keyboard(),
     )
@@ -1239,7 +1243,6 @@ async def process_create_target(message: Message, state: FSMContext, db: Databas
     data = await state.get_data()
     mailing_id = data["mailing_id"]
 
-    # Try to parse as t.me link
     parsed = parse_chat_link(text)
     target = parsed if parsed else text
 
@@ -1247,7 +1250,6 @@ async def process_create_target(message: Message, state: FSMContext, db: Databas
     await state.set_state(CreateMailingStates.adding_targets)
 
     targets = await db.get_mailing_targets(mailing_id)
-
     await message.answer(
         pe(f"✅ Чат добавлен! Всего чатов: {len(targets)}\n\n"
         "Добавьте ещё или нажмите «Готово»:"),
@@ -1648,6 +1650,120 @@ async def callback_cancel_creation(
         pe("❌ Создание рассылки отменено"),
         parse_mode="HTML",
         reply_markup=main_menu_keyboard(),
+    )
+    await callback.answer()
+
+
+# === Keep Targets Toggle ===
+@router.callback_query(F.data.startswith("toggle_keep_targets:"))
+async def callback_toggle_keep_targets(callback: CallbackQuery, db: Database):
+    mailing_id = int(callback.data.split(":")[1])
+    mailing = await db.get_mailing(mailing_id)
+    if not mailing:
+        await callback.answer("Рассылка не найдена", show_alert=True)
+        return
+    new_val = not mailing.keep_targets_on_ban
+    await db.update_mailing_keep_targets(mailing_id, new_val)
+    status = "включена" if new_val else "выключена"
+    await callback.answer(f"Настройка {status}")
+
+    targets = await db.get_mailing_targets(mailing_id)
+    text = f"🎯 Целевые чаты ({len(targets)} шт.):\n\n"
+    if targets:
+        for i, target in enumerate(targets, 1):
+            thread_info = f" [тема #{target.thread_id}]" if target.thread_id else ""
+            text += f"{i}. {target.chat_identifier}{thread_info}\n"
+    else:
+        text += "Целевых чатов пока нет.\n"
+    text += "\nНажмите на чат, чтобы удалить его:"
+    await callback.message.edit_text(
+        pe(text), parse_mode="HTML",
+        reply_markup=mailing_targets_keyboard(mailing_id, targets)
+    )
+
+
+# === Topics (Threads) ===
+@router.callback_query(F.data.startswith("set_target_thread:"))
+async def callback_set_target_thread(callback: CallbackQuery, state: FSMContext):
+    parts = callback.data.split(":")
+    target_id = int(parts[1])
+    mailing_id = int(parts[2])
+    await state.update_data(target_id=target_id, mailing_id=mailing_id)
+    await state.set_state(EditMailingStates.waiting_thread_id_for_target)
+    await callback.message.edit_text(
+        pe("🧵 Отправьте ссылку на тему или её ID:\n\n"
+           "Примеры:\n"
+           "• https://t.me/chatname/123\n"
+           "• 123 (числовой ID темы)\n\n"
+           "Отправьте 0 — сбросить привязку к теме."),
+        parse_mode="HTML",
+        reply_markup=cancel_keyboard(),
+    )
+    await callback.answer()
+
+
+@router.message(EditMailingStates.waiting_thread_id_for_target)
+async def process_thread_id_for_target(message: Message, state: FSMContext, db: Database):
+    text = message.text.strip()
+    data = await state.get_data()
+    target_id = data["target_id"]
+    mailing_id = data["mailing_id"]
+
+    if text == "0":
+        await db.update_target_thread(target_id, None)
+        await state.clear()
+        targets = await db.get_mailing_targets(mailing_id)
+        mailing = await db.get_mailing(mailing_id)
+        keep = mailing.keep_targets_on_ban if mailing else False
+        await message.answer(
+            pe("✅ Привязка к теме удалена."),
+            parse_mode="HTML",
+            reply_markup=mailing_targets_keyboard(mailing_id, targets),
+        )
+        return
+
+    # Try to parse thread_id from link or number
+    thread_id = None
+    m = re.search(r't\.me/\S+/(\d+)', text)
+    if m:
+        thread_id = int(m.group(1))
+    elif text.isdigit():
+        thread_id = int(text)
+
+    if not thread_id:
+        await message.answer(
+            pe("❌ Не удалось определить ID темы. Отправьте ссылку или число."),
+            parse_mode="HTML",
+            reply_markup=cancel_keyboard(),
+        )
+        return
+
+    await db.update_target_thread(target_id, thread_id)
+    await state.clear()
+
+    targets = await db.get_mailing_targets(mailing_id)
+    mailing = await db.get_mailing(mailing_id)
+    keep = mailing.keep_targets_on_ban if mailing else False
+    await message.answer(
+        pe(f"✅ Тема #{thread_id} привязана к чату."),
+        parse_mode="HTML",
+        reply_markup=mailing_targets_keyboard(mailing_id, targets),
+    )
+
+
+@router.callback_query(F.data.startswith("skip_thread:"))
+async def callback_skip_thread(callback: CallbackQuery, state: FSMContext, db: Database):
+    parts = callback.data.split(":", 2)
+    mailing_id = int(parts[1])
+    target_identifier = parts[2] if len(parts) > 2 else ""
+    await state.clear()
+    targets = await db.get_mailing_targets(mailing_id)
+    mailing = await db.get_mailing(mailing_id)
+    keep = mailing.keep_targets_on_ban if mailing else False
+    await callback.message.edit_text(
+        pe(f"✅ Чат добавлен без привязки к теме (General)."),
+        parse_mode="HTML",
+        reply_markup=mailing_targets_keyboard(mailing_id, targets),
     )
     await callback.answer()
 

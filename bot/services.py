@@ -20,6 +20,11 @@ from telethon.errors import (
     ChatWriteForbiddenError,
     UserBannedInChannelError,
     UserAlreadyParticipantError,
+    InviteRequestSentError,
+    ChatSendMediaForbiddenError,
+    ChatGuestSendForbiddenError,
+    SlowModeWaitError,
+    RightForbiddenError,
 )
 from telethon.tl.functions.channels import JoinChannelRequest
 from telethon.tl.functions.messages import ImportChatInviteRequest
@@ -274,6 +279,61 @@ def _parse_telegram_links(urls: list) -> tuple:
     return channel_usernames, invite_hashes
 
 
+async def _resolve_redirect_urls(urls: list) -> list:
+    """Follow redirects and scrape HTML/JS for t.me links in non-t.me URLs."""
+    from urllib.parse import unquote
+    result = list(urls)
+    non_tme = [u for u in urls if 't.me' not in u and 'tg://' not in u and u.startswith('http')]
+    if not non_tme:
+        return result
+
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "Accept-Language": "ru-RU,ru;q=0.9,en;q=0.8",
+    }
+
+    def _extract_tme(text: str) -> list:
+        found = []
+        # normal https://t.me/... and escaped https:\/\/t.me\/...
+        text_unesc = text.replace('\/', '/').replace('\\/', '/')
+        for pattern in [
+            r'https?://t\.me/[A-Za-z0-9_+/\-]+',
+            r'tg://[^\s"\'<>\\\]]+',
+        ]:
+            for m in re.finditer(pattern, text_unesc):
+                link = m.group(0).rstrip('.,);"\' ')
+                # URL-decode if needed
+                link = unquote(link)
+                if link not in found:
+                    found.append(link)
+        return found
+
+    try:
+        connector = aiohttp.TCPConnector(ssl=False)  # skip SSL verify for tracking domains
+        async with aiohttp.ClientSession(connector=connector) as session:
+            for url in non_tme:
+                try:
+                    async with session.get(
+                        url, allow_redirects=True,
+                        timeout=aiohttp.ClientTimeout(total=10),
+                        headers=headers,
+                    ) as resp:
+                        final = str(resp.url)
+                        if final not in result:
+                            result.append(final)
+                        body = await resp.text(errors="replace")
+                        for link in _extract_tme(body):
+                            if link not in result:
+                                result.append(link)
+                                logger.info(f"Sponsor track: found t.me link in page: {link}")
+                except Exception as e:
+                    logger.debug(f"Sponsor track: failed to resolve {url}: {e}")
+    except Exception:
+        pass
+    return result
+
+
 class AutoresponderService:
     def __init__(self, db: Database):
         self.db = db
@@ -371,8 +431,6 @@ class AutoresponderService:
         Auto-join sponsor channels when a bot replies to this account's message
         in a group chat and the reply contains buttons with t.me/ links.
         """
-        if not account.auto_subscribe_sponsors:
-            return
         if event.is_private:
             return
         if not event.reply_to:
@@ -398,6 +456,7 @@ class AutoresponderService:
             return
 
         urls = _extract_button_urls(event.message)
+        urls = await _resolve_redirect_urls(urls)
         channel_usernames, invite_hashes = _parse_telegram_links(urls)
 
         if not channel_usernames and not invite_hashes:
@@ -405,11 +464,17 @@ class AutoresponderService:
 
         logger.info(f"Account {account.phone}: sponsor gate reply detected, public={channel_usernames} invites={invite_hashes}")
 
+        joined_any = False
+
         for username in channel_usernames:
             try:
                 await event.client(JoinChannelRequest(f"@{username}"))
                 logger.info(f"Account {account.phone} auto-joined sponsor @{username}")
+                joined_any = True
                 await asyncio.sleep(1)
+            except InviteRequestSentError:
+                logger.info(f"Account {account.phone} sent join request for @{username} — pending approval")
+                joined_any = True
             except Exception as e:
                 logger.warning(f"Account {account.phone} failed to join @{username}: {e}")
 
@@ -417,9 +482,36 @@ class AutoresponderService:
             try:
                 await event.client(ImportChatInviteRequest(h))
                 logger.info(f"Account {account.phone} auto-joined sponsor via invite hash {h}")
+                joined_any = True
                 await asyncio.sleep(1)
+            except InviteRequestSentError:
+                logger.info(f"Account {account.phone} sent join request for invite {h} — pending approval")
+                joined_any = True
             except Exception as e:
                 logger.warning(f"Account {account.phone} failed to join invite {h}: {e}")
+
+        # After joining all sponsor channels — re-send the original mailing message
+        if joined_any:
+            try:
+                await asyncio.sleep(2)
+                text = getattr(original, 'text', None) or getattr(original, 'message', None)
+                entities = getattr(original, 'entities', None)
+                media = getattr(original, 'media', None)
+                if text:
+                    await event.client.send_message(
+                        event.chat_id,
+                        text,
+                        formatting_entities=entities if entities else None,
+                    )
+                    logger.info(f"Account {account.phone}: re-sent mailing message after sponsor join in {event.chat_id}")
+                elif media:
+                    await event.client.send_file(
+                        event.chat_id,
+                        media,
+                        caption=text or None,
+                    )
+            except Exception as e:
+                logger.warning(f"Account {account.phone}: failed to re-send after sponsor join: {e}")
 
 
 def _build_telethon_entities(entities_json: str) -> list:
@@ -610,6 +702,7 @@ class MailingService:
                         if target_obj.last_sent_at is not None:
                             elapsed = (now - target_obj.last_sent_at).total_seconds()
                             if elapsed < target_interval:
+                                logger.debug(f"Mailing {mailing_id}: {target_obj.chat_identifier} — interval not elapsed ({elapsed:.0f}/{target_interval}s), skip")
                                 continue  # Not due yet for this target
 
                         target = target_obj.chat_identifier
@@ -628,7 +721,7 @@ class MailingService:
                         if pm == 'plain':
                             pm = None
 
-                        reply_to_id = None
+                        reply_to_id = target_obj.thread_id  # use topic thread if set
                         if mailing.reply_mode:
                             try:
                                 if mailing.reply_mode == 'last':
@@ -661,11 +754,23 @@ class MailingService:
                             joined = await self._try_join_and_send(client, target, target_obj, msg, pm, mailing_id, mailing.account_id, reply_to=reply_to_id)
                             if joined:
                                 sent_any = True
+                        except SlowModeWaitError as e:
+                            logger.warning(f"Mailing {mailing_id}: slow mode in '{target}', wait {e.seconds}s")
+                            await asyncio.sleep(min(e.seconds, 60))
                         except FloodWaitError as e:
                             logger.warning(f"FloodWait {e.seconds}s for mailing {mailing_id}")
                             await asyncio.sleep(e.seconds)
+                        except (ChatSendMediaForbiddenError, ChatGuestSendForbiddenError, RightForbiddenError) as e:
+                            logger.warning(f"Mailing {mailing_id}: send forbidden in '{target}' ({type(e).__name__}) — chat restricts this message type, skipping")
                         except Exception as e:
-                            logger.error(f"Error sending mailing {mailing_id} to {target}: {e}")
+                            err_str = str(e)
+                            if "PLAIN_FORBIDDEN" in err_str or "SEND_PLAIN" in err_str:
+                                logger.warning(f"Mailing {mailing_id}: '{target}' — чат разрешает только медиа (PLAIN_FORBIDDEN), skipping")
+                            elif "PEER_FLOOD" in err_str:
+                                logger.warning(f"Mailing {mailing_id}: PEER_FLOOD на аккаунте, пауза 60с")
+                                await asyncio.sleep(60)
+                            else:
+                                logger.error(f"Error sending mailing {mailing_id} to {target}: {e}")
 
                         await asyncio.sleep(3)
 
@@ -729,8 +834,7 @@ class MailingService:
         return is_within_active_hours(active_hours_json)
 
     async def _handle_chat_ban(self, mailing_id: int, account_id: int, target_obj, error: Exception):
-        """Notify owner about chat-specific ban/mute, remove target from mailing."""
-        from .database.db import MailingTarget
+        """Notify owner about chat-specific ban/mute, optionally remove target from mailing."""
         chat = target_obj.chat_identifier
         error_name = type(error).__name__
 
@@ -741,10 +845,7 @@ class MailingService:
 
         logger.warning(f"Mailing {mailing_id}: chat ban on '{chat}': {error_name}")
 
-        try:
-            await self.db.delete_mailing_target(target_obj.id)
-        except Exception as e:
-            logger.error(f"Failed to delete banned target {target_obj.id}: {e}")
+        logger.info(f"Mailing {mailing_id}: chat '{chat}' restricted — target kept, skipping this cycle")
 
         notify = getattr(self.userbot_manager, '_bot_notify_callback', None)
         if notify:
@@ -772,11 +873,11 @@ class MailingService:
             await client(JoinChannelRequest(target))
             logger.info(f"Mailing {mailing_id}: auto-joined '{target}'")
             await asyncio.sleep(2)
-        except UserAlreadyParticipantError as e:
-            # Account IS already a member but can't write → muted/restricted
-            logger.warning(f"Mailing {mailing_id}: already participant in '{target}' but write forbidden — muted/restricted")
-            if account_id is not None:
-                await self._handle_chat_ban(mailing_id, account_id, target_obj, e)
+        except UserAlreadyParticipantError:
+            logger.warning(f"Mailing {mailing_id}: already participant in '{target}' — slow mode or temporary restriction, skipping")
+            return False
+        except InviteRequestSentError:
+            logger.info(f"Mailing {mailing_id}: join request sent for '{target}' — pending approval, skipping")
             return False
         except Exception as e:
             logger.warning(f"Mailing {mailing_id}: failed to join '{target}': {e}")
@@ -787,11 +888,8 @@ class MailingService:
             await self.db.update_target_last_sent(target_obj.id)
             logger.info(f"Mailing {mailing_id}: sent to '{target}' after auto-join")
             return True
-        except ChatWriteForbiddenError as e:
-            # Joined successfully but still can't write → muted/restricted
-            logger.warning(f"Mailing {mailing_id}: still can't write to '{target}' after join — muted/restricted")
-            if account_id is not None:
-                await self._handle_chat_ban(mailing_id, account_id, target_obj, e)
+        except ChatWriteForbiddenError:
+            logger.warning(f"Mailing {mailing_id}: can't write to '{target}' after join — slow mode or temporary restriction, skipping")
             return False
         except Exception as e:
             logger.error(f"Mailing {mailing_id}: retry send to '{target}' failed after join: {e}")
@@ -818,20 +916,56 @@ class SubscriptionCheckerService:
             except Exception as e:
                 logger.error(f"Subscription checker error: {e}")
 
+    async def _send_reminder(self, bot, user, days: int):
+        from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+        keyboard = InlineKeyboardMarkup(inline_keyboard=[[
+            InlineKeyboardButton(text="💳 Продлить подписку", callback_data="subscription")
+        ]])
+        if days == 3:
+            text = pe("⏰ <b>Подписка заканчивается через 3 дня!</b>\n\nПродлите заранее, чтобы не потерять доступ к функциям.")
+        else:
+            text = pe("❗️ <b>Подписка заканчивается завтра!</b>\n\nПродлите сейчас, чтобы не потерять доступ к функциям.")
+        try:
+            await bot.send_message(user.telegram_id, text, parse_mode="HTML", reply_markup=keyboard)
+            await self.db.set_user_reminder_sent(user.id, days)
+        except Exception as e:
+            logger.warning(f"Failed to send {days}d reminder to {user.telegram_id}: {e}")
+
     async def _check(self, bot):
+        from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
         users = await self.db.get_all_users()
         now = datetime.now()
         for user in users:
-            if user.subscription_end and user.subscription_end < now:
+            if not user.subscription_end:
+                continue
+            delta = (user.subscription_end - now).total_seconds()
+
+            # Subscription expired
+            if delta < 0:
                 stopped = await self.mailing_service.stop_user_mailings(user.id)
-                if stopped > 0:
+                if not user.subscription_expired_notified_at:
                     try:
-                        await bot.send_message(
-                            user.telegram_id,
-                            pe("⚠️ <b>Ваша подписка истекла.</b>\n\n"
-                            f"Остановлено {stopped} рассылок.\n"
-                            "Продлите подписку в разделе «Подписка», чтобы возобновить работу."),
-                            parse_mode="HTML"
-                        )
+                        keyboard = InlineKeyboardMarkup(inline_keyboard=[[
+                            InlineKeyboardButton(text="💳 Купить подписку", callback_data="subscription")
+                        ]])
+                        msg = pe("⚠️ <b>Ваша подписка истекла.</b>\n\n"
+                                 "Доступ к автофункциям ограничен.\n"
+                                 "Продлите подписку, чтобы продолжить работу.")
+                        if stopped > 0:
+                            msg = pe(f"⚠️ <b>Ваша подписка истекла.</b>\n\n"
+                                     f"Остановлено {stopped} рассылок.\n"
+                                     "Доступ к автофункциям ограничен.\n"
+                                     "Продлите подписку, чтобы продолжить работу.")
+                        await bot.send_message(user.telegram_id, msg, parse_mode="HTML", reply_markup=keyboard)
+                        await self.db.set_subscription_expired_notified(user.id)
                     except Exception:
                         pass
+                continue
+
+            # Reminder 3 days before
+            if 71 * 3600 < delta < 73 * 3600 and not user.reminder_3d_sent_at:
+                await self._send_reminder(bot, user, 3)
+
+            # Reminder 1 day before
+            elif 23 * 3600 < delta < 25 * 3600 and not user.reminder_1d_sent_at:
+                await self._send_reminder(bot, user, 1)

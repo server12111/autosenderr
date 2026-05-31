@@ -25,6 +25,9 @@ class Config:
     TON_SUBSCRIPTION_PRICE: float = float(os.getenv("TON_SUBSCRIPTION_PRICE", "0.5"))
     TON_EXTRA_ACCOUNT_PRICE: float = float(os.getenv("TON_EXTRA_ACCOUNT_PRICE", "0.05"))
 
+    PRIVACY_URL: str = os.getenv("PRIVACY_URL", "https://telegra.ph/Politika-konfidencialnosti-05-31-36")
+    TERMS_URL: str = os.getenv("TERMS_URL", "https://telegra.ph/Polzovatelskoe-soglashenie-05-31-24")
+
     DATABASE_PATH: str = os.getenv("DATABASE_PATH", "data/bot.db")
     SESSIONS_PATH: str = os.getenv("SESSIONS_PATH", "sessions")
 
