@@ -113,6 +113,7 @@ class MailingTarget:
     interval_seconds: Optional[int] = None
     last_sent_at: Optional[datetime] = None
     thread_id: Optional[int] = None
+    is_forum: bool = False
 
 
 @dataclass
@@ -232,6 +233,7 @@ class Database:
         await _add_col("promocodes", "uses_count", "INTEGER NOT NULL DEFAULT 0")
         # mailing_targets — topics support
         await _add_col("mailing_targets", "thread_id", "INTEGER DEFAULT NULL")
+        await _add_col("mailing_targets", "is_forum",  "INTEGER DEFAULT 0")
         # mailings — keep targets on ban
         await _add_col("mailings", "keep_targets_on_ban", "INTEGER DEFAULT 0")
         # users
@@ -681,20 +683,27 @@ class Database:
                     interval_seconds=r["interval_seconds"] if "interval_seconds" in keys else None,
                     last_sent_at=self._parse_datetime(r["last_sent_at"]) if "last_sent_at" in keys else None,
                     thread_id=r["thread_id"] if "thread_id" in keys else None,
+                    is_forum=bool(r["is_forum"]) if "is_forum" in keys else False,
                 ))
             return result
 
-    async def add_mailing_target(self, mailing_id: int, chat_identifier: str) -> int:
+    async def add_mailing_target(self, mailing_id: int, chat_identifier: str, is_forum: bool = False) -> int:
         normalized = chat_identifier.strip()
         if not normalized.startswith('-') and not normalized.isdigit():
             if not normalized.startswith('@'):
                 normalized = f"@{normalized}"
         cursor = await self._conn.execute(
-            "INSERT INTO mailing_targets (mailing_id, chat_identifier) VALUES (?, ?)",
-            (mailing_id, normalized),
+            "INSERT INTO mailing_targets (mailing_id, chat_identifier, is_forum) VALUES (?, ?, ?)",
+            (mailing_id, normalized, 1 if is_forum else 0),
         )
         await self._conn.commit()
         return cursor.lastrowid
+
+    async def update_target_is_forum(self, target_id: int, value: bool):
+        await self._conn.execute(
+            "UPDATE mailing_targets SET is_forum=? WHERE id=?", (1 if value else 0, target_id)
+        )
+        await self._conn.commit()
 
     async def update_target_interval(self, target_id: int, interval_seconds: Optional[int]):
         await self._conn.execute(

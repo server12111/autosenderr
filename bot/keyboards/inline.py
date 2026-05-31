@@ -333,12 +333,18 @@ def mailing_targets_keyboard(mailing_id: int, targets: list[MailingTarget]) -> I
     builder = InlineKeyboardBuilder()
     for target in targets:
         iv_text = _format_target_interval(target)
-        thread_text = f"🧵#{target.thread_id}" if target.thread_id else "🧵"
-        builder.row(
-            _btn(f"🗑️ {target.chat_identifier}", callback_data=f"delete_target:{target.id}", style="danger"),
-            _btn(iv_text, callback_data=f"edit_target_interval:{target.id}:{mailing_id}", style="primary"),
-            InlineKeyboardButton(text=thread_text, callback_data=f"set_target_thread:{target.id}:{mailing_id}"),
-        )
+        if target.is_forum or target.thread_id:
+            thread_text = f"🧵#{target.thread_id}" if target.thread_id else "🧵"
+            builder.row(
+                _btn(f"🗑️ {target.chat_identifier}", callback_data=f"delete_target:{target.id}", style="danger"),
+                _btn(iv_text, callback_data=f"edit_target_interval:{target.id}:{mailing_id}", style="primary"),
+                InlineKeyboardButton(text=thread_text, callback_data=f"set_target_thread:{target.id}:{mailing_id}"),
+            )
+        else:
+            builder.row(
+                _btn(f"🗑️ {target.chat_identifier}", callback_data=f"delete_target:{target.id}", style="danger"),
+                _btn(iv_text, callback_data=f"edit_target_interval:{target.id}:{mailing_id}", style="primary"),
+            )
     builder.row(
         _btn("➕ Добавить чат", callback_data=f"add_mailing_target:{mailing_id}", style="primary"),
         _btn("📁 Добавить папку", callback_data=f"add_folder_target:{mailing_id}", style="primary"),

@@ -566,28 +566,27 @@ async def process_edit_target(message: Message, state: FSMContext, db: Database,
     parsed = parse_chat_link(text)
     target = parsed if parsed else text
 
-    target_id = await db.add_mailing_target(mailing_id, target)
-
     mailing = await db.get_mailing(mailing_id)
+    is_forum = False
     if mailing:
         client = await userbot_manager.get_client(mailing.account_id)
         if client:
-            try:
-                entity = await client.get_entity(target)
-                if getattr(entity, 'forum', False):
-                    await state.update_data(target_id=target_id, mailing_id=mailing_id)
-                    await state.set_state(EditMailingStates.waiting_thread_id_for_target)
-                    await message.answer(
-                        pe(f"💬 Чат <b>{target}</b> использует темы (Topics).\n\n"
-                           "Отправьте ссылку на тему или её ID.\n"
-                           "Примеры: <code>https://t.me/chatname/123</code> или <code>123</code>\n\n"
-                           "Нажмите «Пропустить» для отправки в General."),
-                        parse_mode="HTML",
-                        reply_markup=skip_thread_keyboard(mailing_id, target),
-                    )
-                    return
-            except Exception:
-                pass
+            is_forum = await _is_real_forum(client, target)
+
+    target_id = await db.add_mailing_target(mailing_id, target, is_forum=is_forum)
+
+    if is_forum:
+        await state.update_data(target_id=target_id, mailing_id=mailing_id)
+        await state.set_state(EditMailingStates.waiting_thread_id_for_target)
+        await message.answer(
+            pe(f"💬 Чат <b>{target}</b> использует темы (Topics).\n\n"
+               "Отправьте ссылку на тему или её ID.\n"
+               "Примеры: <code>https://t.me/chatname/123</code> или <code>123</code>\n\n"
+               "Нажмите «Пропустить» для отправки в General."),
+            parse_mode="HTML",
+            reply_markup=skip_thread_keyboard(mailing_id, target),
+        )
+        return
 
     await state.clear()
     targets = await db.get_mailing_targets(mailing_id)
@@ -759,6 +758,10 @@ async def process_edit_folder(
         new_targets = [t for t in targets if t.chat_identifier in added_identifiers]
         forums = await _find_forum_targets(client, new_targets)
         if forums:
+            for t in new_targets:
+                if t.chat_identifier in forums:
+                    await db.update_target_is_forum(t.id, True)
+            targets = await db.get_mailing_targets(mailing_id)
             forum_hint = pe(f"\n\n🧵 Найдено {len(forums)} форум-чатов с темами: {', '.join(forums[:5])}{'...' if len(forums) > 5 else ''}\nНастройте тему через кнопку 🧵 в списке чатов.")
 
         await message.answer(
@@ -850,6 +853,10 @@ async def process_edit_txt_file(message: Message, state: FSMContext, db: Databas
             new_targets = [t for t in targets if t.chat_identifier in identifiers]
             forums = await _find_forum_targets(client, new_targets)
             if forums:
+                for t in new_targets:
+                    if t.chat_identifier in forums:
+                        await db.update_target_is_forum(t.id, True)
+                targets = await db.get_mailing_targets(mailing_id)
                 forum_hint = pe(f"\n\n🧵 Найдено {len(forums)} форум-чатов с темами: {', '.join(forums[:5])}{'...' if len(forums) > 5 else ''}\nНастройте тему через кнопку 🧵 в списке чатов.")
 
     await message.answer(
@@ -1286,28 +1293,27 @@ async def process_create_target(message: Message, state: FSMContext, db: Databas
     parsed = parse_chat_link(text)
     target = parsed if parsed else text
 
-    target_id = await db.add_mailing_target(mailing_id, target)
-
     mailing = await db.get_mailing(mailing_id)
+    is_forum = False
     if mailing:
         client = await userbot_manager.get_client(mailing.account_id)
         if client:
-            try:
-                entity = await client.get_entity(target)
-                if getattr(entity, 'forum', False):
-                    await state.update_data(target_id=target_id, mailing_id=mailing_id)
-                    await state.set_state(EditMailingStates.waiting_thread_id_for_target)
-                    await message.answer(
-                        pe(f"💬 Чат <b>{target}</b> использует темы (Topics).\n\n"
-                           "Отправьте ссылку на тему или её ID.\n"
-                           "Примеры: <code>https://t.me/chatname/123</code> или <code>123</code>\n\n"
-                           "Нажмите «Пропустить» для отправки в General."),
-                        parse_mode="HTML",
-                        reply_markup=skip_thread_keyboard(mailing_id, target),
-                    )
-                    return
-            except Exception:
-                pass
+            is_forum = await _is_real_forum(client, target)
+
+    target_id = await db.add_mailing_target(mailing_id, target, is_forum=is_forum)
+
+    if is_forum:
+        await state.update_data(target_id=target_id, mailing_id=mailing_id)
+        await state.set_state(EditMailingStates.waiting_thread_id_for_target)
+        await message.answer(
+            pe(f"💬 Чат <b>{target}</b> использует темы (Topics).\n\n"
+               "Отправьте ссылку на тему или её ID.\n"
+               "Примеры: <code>https://t.me/chatname/123</code> или <code>123</code>\n\n"
+               "Нажмите «Пропустить» для отправки в General."),
+            parse_mode="HTML",
+            reply_markup=skip_thread_keyboard(mailing_id, target),
+        )
+        return
 
     await state.set_state(CreateMailingStates.adding_targets)
     targets = await db.get_mailing_targets(mailing_id)
@@ -1412,6 +1418,10 @@ async def process_create_folder(
         new_targets = [t for t in targets if t.chat_identifier in added_identifiers]
         forums = await _find_forum_targets(client, new_targets)
         if forums:
+            for t in new_targets:
+                if t.chat_identifier in forums:
+                    await db.update_target_is_forum(t.id, True)
+            targets = await db.get_mailing_targets(mailing_id)
             forum_hint = pe(f"\n\n🧵 Найдено {len(forums)} форум-чатов с темами: {', '.join(forums[:5])}{'...' if len(forums) > 5 else ''}\nНастройте тему через кнопку 🧵 в списке чатов.")
 
         await message.answer(
@@ -1505,6 +1515,10 @@ async def process_create_txt_file(message: Message, state: FSMContext, db: Datab
             new_targets = [t for t in targets if t.chat_identifier in identifiers]
             forums = await _find_forum_targets(client, new_targets)
             if forums:
+                for t in new_targets:
+                    if t.chat_identifier in forums:
+                        await db.update_target_is_forum(t.id, True)
+                targets = await db.get_mailing_targets(mailing_id)
                 forum_hint = pe(f"\n\n🧵 Найдено {len(forums)} форум-чатов с темами: {', '.join(forums[:5])}{'...' if len(forums) > 5 else ''}\nНастройте тему через кнопку 🧵 в списке чатов.")
 
     await message.answer(
@@ -1731,16 +1745,42 @@ async def callback_cancel_creation(
     await callback.answer()
 
 
+async def _is_real_forum(client, target) -> bool:
+    """True only if the chat has actual custom topics (not just General). Requires membership."""
+    try:
+        from telethon.tl.functions.channels import GetForumTopicsRequest
+        entity = await client.get_entity(target)
+        if not getattr(entity, 'forum', False):
+            return False
+        result = await client(GetForumTopicsRequest(
+            channel=entity,
+            q='',
+            offset_date=0,
+            offset_id=0,
+            offset_topic=0,
+            limit=10,
+        ))
+        custom_topics = [t for t in result.topics if t.id != 1]
+        return len(custom_topics) > 0
+    except Exception:
+        return False
+
+
+async def _has_forum_flag(client, target) -> bool:
+    """Lightweight check — only entity.forum flag, works without membership."""
+    try:
+        entity = await client.get_entity(target)
+        return bool(getattr(entity, 'forum', False))
+    except Exception:
+        return False
+
+
 async def _find_forum_targets(client, targets: list) -> list[str]:
-    """Check which chat identifiers are forum chats. Returns list of forum identifiers."""
+    """Check which chat identifiers have forum flag (lightweight, no membership needed)."""
     forums = []
     for t in targets:
-        try:
-            entity = await client.get_entity(t.chat_identifier)
-            if getattr(entity, 'forum', False):
-                forums.append(t.chat_identifier)
-        except Exception:
-            pass
+        if await _has_forum_flag(client, t.chat_identifier):
+            forums.append(t.chat_identifier)
     return forums
 
 
