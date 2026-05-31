@@ -38,6 +38,7 @@ from ..keyboards.inline import (
     photo_collection_keyboard,
     parse_mode_keyboard,
     select_account_for_mailing_keyboard,
+    multi_account_select_keyboard,
     reply_mode_select_keyboard,
     reply_mode_fixed_keyboard,
     skip_thread_keyboard,
@@ -1738,6 +1739,43 @@ async def callback_set_mailing_account(callback: CallbackQuery, db: Database):
     )
 
     await callback.message.edit_text(text, parse_mode="HTML", reply_markup=mailing_menu_keyboard(mailing))
+
+
+@router.callback_query(F.data.startswith("mailing_multi_accounts:"))
+async def callback_mailing_multi_accounts(callback: CallbackQuery, db: Database):
+    mailing_id = int(callback.data.split(":")[1])
+    user = await db.get_user(callback.from_user.id)
+    accounts = await db.get_user_accounts(user.id)
+
+    if not accounts:
+        await callback.answer("У вас нет аккаунтов", show_alert=True)
+        return
+
+    selected_ids = await db.get_mailing_extra_account_ids(mailing_id)
+    await callback.message.edit_text(
+        pe("👥 Выберите аккаунты для чередования.\n"
+           "Нажмите на аккаунт чтобы добавить/убрать. Затем нажмите «Готово»."),
+        parse_mode="HTML",
+        reply_markup=multi_account_select_keyboard(accounts, selected_ids, mailing_id),
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("toggle_mailing_account:"))
+async def callback_toggle_mailing_account(callback: CallbackQuery, db: Database):
+    parts = callback.data.split(":")
+    account_id = int(parts[1])
+    mailing_id = int(parts[2])
+
+    await db.toggle_mailing_extra_account(mailing_id, account_id)
+
+    user = await db.get_user(callback.from_user.id)
+    accounts = await db.get_user_accounts(user.id)
+    selected_ids = await db.get_mailing_extra_account_ids(mailing_id)
+    await callback.message.edit_reply_markup(
+        reply_markup=multi_account_select_keyboard(accounts, selected_ids, mailing_id)
+    )
+    await callback.answer()
 
 
 @router.callback_query(F.data.startswith("change_msg_format:"))

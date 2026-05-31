@@ -230,6 +230,9 @@ def mailing_menu_keyboard(mailing: Mailing) -> InlineKeyboardMarkup:
         _btn("⏰ Время активности", callback_data=f"mailing_hours:{mailing.id}", style="primary"),
         _btn("🔃 Аккаунт", callback_data=f"change_mailing_account:{mailing.id}", style="primary"),
     )
+    builder.row(
+        _btn("👥 Несколько аккаунтов", callback_data=f"mailing_multi_accounts:{mailing.id}", style="primary"),
+    )
     reply_label = "↩️ Ответная рассылка: ВКЛ" if mailing.reply_mode else "↩️ Ответная рассылка: ВЫКЛ"
     builder.row(_btn(reply_label, callback_data=f"mailing_reply_mode:{mailing.id}", style="primary"))
     builder.row(
@@ -372,6 +375,19 @@ def select_account_for_mailing_keyboard(accounts: list[Account], mailing_id: int
             style="primary",
         ))
     builder.row(_btn("◀️ Назад", callback_data=f"mailing:{mailing_id}", style="primary"))
+    return builder.as_markup()
+
+
+def multi_account_select_keyboard(accounts: list[Account], selected_ids: list[int], mailing_id: int) -> InlineKeyboardMarkup:
+    builder = InlineKeyboardBuilder()
+    for acc in accounts:
+        prefix = "✅ " if acc.id in selected_ids else "📱 "
+        builder.row(_btn(
+            f"{prefix}{acc.display_name}",
+            callback_data=f"toggle_mailing_account:{acc.id}:{mailing_id}",
+            style="primary",
+        ))
+    builder.row(_btn("✅ Готово", callback_data=f"mailing:{mailing_id}", style="success"))
     return builder.as_markup()
 
 

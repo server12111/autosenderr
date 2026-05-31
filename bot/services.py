@@ -568,6 +568,7 @@ class MailingService:
         self.userbot_manager = userbot_manager
         self._tasks: dict[int, asyncio.Task] = {}
         self._running = False
+        self._account_indices: dict[int, int] = {}
 
     async def start(self):
         self._running = True
@@ -601,6 +602,7 @@ class MailingService:
         if mailing_id in self._tasks:
             self._tasks[mailing_id].cancel()
             del self._tasks[mailing_id]
+        self._account_indices.pop(mailing_id, None)
 
     async def stop_user_mailings(self, user_id: int):
         """Stop all active mailings for a user (called when subscription expires)."""
@@ -676,6 +678,9 @@ class MailingService:
                         await asyncio.sleep(60)
                         continue
 
+                    extra_accounts = await self.db.get_mailing_extra_accounts(mailing_id)
+                    account_pool = extra_accounts if extra_accounts else None
+
                     client = await self.userbot_manager.get_client(mailing.account_id)
                     if not client:
                         await asyncio.sleep(60)
@@ -697,6 +702,26 @@ class MailingService:
                     me = await client.get_me()
 
                     for target_obj in targets:
+                        # Resolve which account/client to use for this target
+                        current_account_id = mailing.account_id
+                        target_client = client
+                        target_me = me
+                        if account_pool:
+                            idx = self._account_indices.get(mailing_id, 0)
+                            acc = account_pool[idx % len(account_pool)]
+                            self._account_indices[mailing_id] = idx + 1
+                            ac = await self.userbot_manager.get_client(acc.id)
+                            if ac:
+                                if not ac.is_connected():
+                                    try:
+                                        await ac.connect()
+                                    except Exception:
+                                        ac = None
+                                if ac:
+                                    target_client = ac
+                                    target_me = await ac.get_me()
+                                    current_account_id = acc.id
+
                         # Each target uses its own interval or falls back to mailing default
                         target_interval = target_obj.interval_seconds or mailing.interval_seconds
                         if target_obj.last_sent_at is not None:
@@ -711,7 +736,7 @@ class MailingService:
 
                         # Перевіряємо активність у чаті після останньої відправки
                         if target_obj.last_sent_at is not None:
-                            has_activity = await self._has_chat_activity(client, target, target_obj.last_sent_at, me.id)
+                            has_activity = await self._has_chat_activity(target_client, target, target_obj.last_sent_at, target_me.id)
                             if not has_activity:
                                 logger.info(f"Mailing {mailing_id}: no activity in {target} since last send, skipping")
                                 continue
@@ -733,25 +758,25 @@ class MailingService:
                                         mailing.reply_random_min - 1,
                                         mailing.reply_random_max - 1
                                     )
-                                msgs_list = await client.get_messages(target, limit=offset + 1)
+                                msgs_list = await target_client.get_messages(target, limit=offset + 1)
                                 if msgs_list and len(msgs_list) > offset:
                                     reply_to_id = msgs_list[offset].id
                             except Exception as e:
                                 logger.warning(f"Mailing {mailing_id}: failed to get reply target: {e}")
 
                         try:
-                            await self._send_msg(client, target, msg, pm, reply_to=reply_to_id)
-                            logger.info(f"Mailing {mailing_id} sent to {target}")
+                            await self._send_msg(target_client, target, msg, pm, reply_to=reply_to_id)
+                            logger.info(f"Mailing {mailing_id} sent to {target} via account {current_account_id}")
                             await self.db.update_target_last_sent(target_obj.id)
                             sent_any = True
                         except _BAN_ERRORS as e:
-                            await self._handle_mailing_ban(mailing_id, mailing.account_id, e)
+                            await self._handle_mailing_ban(mailing_id, current_account_id, e)
                             return
                         except _CHAT_BAN_ERRORS as e:
-                            await self._handle_chat_ban(mailing_id, mailing.account_id, target_obj, e)
+                            await self._handle_chat_ban(mailing_id, current_account_id, target_obj, e)
                         except _NOT_MEMBER_ERRORS:
                             logger.info(f"Mailing {mailing_id}: not participant/forbidden in '{target}', attempting auto-join")
-                            joined = await self._try_join_and_send(client, target, target_obj, msg, pm, mailing_id, mailing.account_id, reply_to=reply_to_id)
+                            joined = await self._try_join_and_send(target_client, target, target_obj, msg, pm, mailing_id, current_account_id, reply_to=reply_to_id)
                             if joined:
                                 sent_any = True
                         except SlowModeWaitError as e:

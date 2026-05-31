@@ -246,6 +246,17 @@ class Database:
         await _add_col("users", "subscription_expired_notified_at", "DATETIME DEFAULT NULL")
         await _add_col("users", "reminder_3d_sent_at", "DATETIME DEFAULT NULL")
         await _add_col("users", "reminder_1d_sent_at", "DATETIME DEFAULT NULL")
+        # mailing_accounts — multiple accounts per mailing (round-robin)
+        await self._conn.execute("""
+            CREATE TABLE IF NOT EXISTS mailing_accounts (
+                mailing_id INTEGER NOT NULL,
+                account_id INTEGER NOT NULL,
+                PRIMARY KEY (mailing_id, account_id),
+                FOREIGN KEY (mailing_id) REFERENCES mailings(id) ON DELETE CASCADE,
+                FOREIGN KEY (account_id) REFERENCES accounts(id) ON DELETE CASCADE
+            )
+        """)
+        await self._conn.commit()
 
     async def close(self):
         if self._conn:
@@ -407,6 +418,38 @@ class Database:
             "SELECT * FROM accounts WHERE user_id = ? AND is_active = 1", (user_id,)
         ) as cur:
             return [self._row_to_account(r) for r in await cur.fetchall()]
+
+    async def get_mailing_extra_accounts(self, mailing_id: int) -> list[Account]:
+        async with self._conn.execute(
+            "SELECT a.* FROM accounts a "
+            "JOIN mailing_accounts ma ON a.id = ma.account_id "
+            "WHERE ma.mailing_id = ? ORDER BY ma.rowid", (mailing_id,)
+        ) as cur:
+            return [self._row_to_account(r) for r in await cur.fetchall()]
+
+    async def get_mailing_extra_account_ids(self, mailing_id: int) -> list[int]:
+        async with self._conn.execute(
+            "SELECT account_id FROM mailing_accounts WHERE mailing_id = ? ORDER BY rowid", (mailing_id,)
+        ) as cur:
+            return [r["account_id"] for r in await cur.fetchall()]
+
+    async def toggle_mailing_extra_account(self, mailing_id: int, account_id: int) -> bool:
+        async with self._conn.execute(
+            "SELECT 1 FROM mailing_accounts WHERE mailing_id = ? AND account_id = ?", (mailing_id, account_id)
+        ) as cur:
+            exists = await cur.fetchone()
+        if exists:
+            await self._conn.execute(
+                "DELETE FROM mailing_accounts WHERE mailing_id = ? AND account_id = ?", (mailing_id, account_id)
+            )
+            await self._conn.commit()
+            return False
+        else:
+            await self._conn.execute(
+                "INSERT INTO mailing_accounts (mailing_id, account_id) VALUES (?, ?)", (mailing_id, account_id)
+            )
+            await self._conn.commit()
+            return True
 
     async def count_user_accounts(self, user_id: int) -> int:
         async with self._conn.execute(
