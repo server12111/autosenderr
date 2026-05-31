@@ -754,8 +754,15 @@ async def process_edit_folder(
         await state.clear()
         targets = await db.get_mailing_targets(mailing_id)
 
+        forum_hint = ""
+        added_identifiers = [e.username and f"@{e.username}" or str(int(f"-100{e.id}")) for e in chats if hasattr(e, 'id')]
+        new_targets = [t for t in targets if t.chat_identifier in added_identifiers]
+        forums = await _find_forum_targets(client, new_targets)
+        if forums:
+            forum_hint = pe(f"\n\n🧵 Найдено {len(forums)} форум-чатов с темами: {', '.join(forums[:5])}{'...' if len(forums) > 5 else ''}\nНастройте тему через кнопку 🧵 в списке чатов.")
+
         await message.answer(
-            pe(f"✅ Добавлено {added} чатов из папки! Всего чатов: {len(targets)}"),
+            pe(f"✅ Добавлено {added} чатов из папки! Всего чатов: {len(targets)}") + forum_hint,
             parse_mode="HTML",
             reply_markup=mailing_targets_keyboard(mailing_id, targets),
         )
@@ -788,7 +795,7 @@ async def callback_add_txt_target(callback: CallbackQuery, state: FSMContext):
 
 
 @router.message(EditMailingStates.waiting_txt_file, F.document)
-async def process_edit_txt_file(message: Message, state: FSMContext, db: Database):
+async def process_edit_txt_file(message: Message, state: FSMContext, db: Database, userbot_manager: UserbotManager):
     doc = message.document
     if not doc.file_name or not doc.file_name.lower().endswith('.txt'):
         await message.answer(
@@ -834,8 +841,19 @@ async def process_edit_txt_file(message: Message, state: FSMContext, db: Databas
 
     await state.clear()
     targets = await db.get_mailing_targets(mailing_id)
+
+    forum_hint = ""
+    mailing = await db.get_mailing(mailing_id)
+    if mailing:
+        client = await userbot_manager.get_client(mailing.account_id)
+        if client:
+            new_targets = [t for t in targets if t.chat_identifier in identifiers]
+            forums = await _find_forum_targets(client, new_targets)
+            if forums:
+                forum_hint = pe(f"\n\n🧵 Найдено {len(forums)} форум-чатов с темами: {', '.join(forums[:5])}{'...' if len(forums) > 5 else ''}\nНастройте тему через кнопку 🧵 в списке чатов.")
+
     await message.answer(
-        pe(f"✅ Добавлено {added} чатов из файла! Всего чатов: {len(targets)}"),
+        pe(f"✅ Добавлено {added} чатов из файла! Всего чатов: {len(targets)}") + forum_hint,
         parse_mode="HTML",
         reply_markup=mailing_targets_keyboard(mailing_id, targets),
     )
@@ -1389,9 +1407,15 @@ async def process_create_folder(
         await state.set_state(CreateMailingStates.adding_targets)
         targets = await db.get_mailing_targets(mailing_id)
 
+        forum_hint = ""
+        added_identifiers = [e.username and f"@{e.username}" or str(int(f"-100{e.id}")) for e in chats if hasattr(e, 'id')]
+        new_targets = [t for t in targets if t.chat_identifier in added_identifiers]
+        forums = await _find_forum_targets(client, new_targets)
+        if forums:
+            forum_hint = pe(f"\n\n🧵 Найдено {len(forums)} форум-чатов с темами: {', '.join(forums[:5])}{'...' if len(forums) > 5 else ''}\nНастройте тему через кнопку 🧵 в списке чатов.")
+
         await message.answer(
-            pe(f"✅ Добавлено {added} чатов из папки! Всего чатов: {len(targets)}\n\n"
-            "Добавьте ещё или нажмите «Готово»:"),
+            pe(f"✅ Добавлено {added} чатов из папки! Всего чатов: {len(targets)}\n\nДобавьте ещё или нажмите «Готово»:") + forum_hint,
             parse_mode="HTML",
             reply_markup=mailing_creation_targets_keyboard(mailing_id, targets),
         )
@@ -1426,7 +1450,7 @@ async def callback_create_add_txt(callback: CallbackQuery, state: FSMContext):
 
 
 @router.message(CreateMailingStates.waiting_txt_file, F.document)
-async def process_create_txt_file(message: Message, state: FSMContext, db: Database):
+async def process_create_txt_file(message: Message, state: FSMContext, db: Database, userbot_manager: UserbotManager):
     doc = message.document
     if not doc.file_name or not doc.file_name.lower().endswith('.txt'):
         await message.answer(
@@ -1472,9 +1496,19 @@ async def process_create_txt_file(message: Message, state: FSMContext, db: Datab
 
     await state.set_state(CreateMailingStates.adding_targets)
     targets = await db.get_mailing_targets(mailing_id)
+
+    forum_hint = ""
+    mailing = await db.get_mailing(mailing_id)
+    if mailing:
+        client = await userbot_manager.get_client(mailing.account_id)
+        if client:
+            new_targets = [t for t in targets if t.chat_identifier in identifiers]
+            forums = await _find_forum_targets(client, new_targets)
+            if forums:
+                forum_hint = pe(f"\n\n🧵 Найдено {len(forums)} форум-чатов с темами: {', '.join(forums[:5])}{'...' if len(forums) > 5 else ''}\nНастройте тему через кнопку 🧵 в списке чатов.")
+
     await message.answer(
-        pe(f"✅ Добавлено {added} чатов из файла! Всего чатов: {len(targets)}\n\n"
-        "Добавьте ещё или нажмите «Готово»:"),
+        pe(f"✅ Добавлено {added} чатов из файла! Всего чатов: {len(targets)}\n\nДобавьте ещё или нажмите «Готово»:") + forum_hint,
         parse_mode="HTML",
         reply_markup=mailing_creation_targets_keyboard(mailing_id, targets),
     )
@@ -1695,6 +1729,19 @@ async def callback_cancel_creation(
         reply_markup=main_menu_keyboard(),
     )
     await callback.answer()
+
+
+async def _find_forum_targets(client, targets: list) -> list[str]:
+    """Check which chat identifiers are forum chats. Returns list of forum identifiers."""
+    forums = []
+    for t in targets:
+        try:
+            entity = await client.get_entity(t.chat_identifier)
+            if getattr(entity, 'forum', False):
+                forums.append(t.chat_identifier)
+        except Exception:
+            pass
+    return forums
 
 
 # === Keep Targets Toggle ===
