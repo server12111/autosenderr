@@ -834,38 +834,10 @@ class MailingService:
         return is_within_active_hours(active_hours_json)
 
     async def _handle_chat_ban(self, mailing_id: int, account_id: int, target_obj, error: Exception):
-        """Notify owner about chat-specific ban/mute, optionally remove target from mailing."""
+        """Log chat-specific ban/restriction — target is kept, just skip this cycle."""
         chat = target_obj.chat_identifier
         error_name = type(error).__name__
-
-        if isinstance(error, UserBannedInChannelError):
-            reason = "🚫 аккаунт забанен в этом чате"
-        else:
-            reason = "🔇 аккаунт замьючен или нет прав писать"
-
-        logger.warning(f"Mailing {mailing_id}: chat ban on '{chat}': {error_name}")
-
-        logger.info(f"Mailing {mailing_id}: chat '{chat}' restricted — target kept, skipping this cycle")
-
-        notify = getattr(self.userbot_manager, '_bot_notify_callback', None)
-        if notify:
-            try:
-                account = await self.db.get_account(account_id)
-                if account:
-                    user = await self.db.get_user_by_id(account.user_id)
-                    if user:
-                        await notify(
-                            user.telegram_id,
-                            pe(
-                                f"⚠️ <b>Проблема с рассылкой!</b>\n\n"
-                                f"📱 Аккаунт: <b>{account.display_name}</b>\n"
-                                f"💬 Чат: <code>{chat}</code>\n"
-                                f"❗️ {reason}\n\n"
-                                f"Цель автоматически удалена из рассылки."
-                            ),
-                        )
-            except Exception as e:
-                logger.error(f"Failed to notify about chat ban for account {account_id}: {e}")
+        logger.warning(f"Mailing {mailing_id}: restricted in '{chat}' ({error_name}) — skipping this cycle, target kept")
 
     async def _try_join_and_send(self, client, target: str, target_obj, msg, pm, mailing_id: int, account_id: Optional[int] = None, reply_to=None) -> bool:
         """Try to join target channel/group, then retry sending. Returns True if message was sent."""
