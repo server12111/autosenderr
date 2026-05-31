@@ -388,8 +388,13 @@ async def process_edit_forward_message(message: Message, state: FSMContext, db: 
         )
     elif isinstance(origin, MessageOriginUser):
         text = message.text or message.caption or ""
-        entities_json = serialize_entities(message.entities or message.caption_entities)
         photo_path = await save_photo_from_message(message) if message.photo else None
+        if not text and not photo_path:
+            await message.answer(
+                "❌ Поддерживаются только текст и фото. Видео, голосовые и стикеры не поддерживаются."
+            )
+            return
+        entities_json = serialize_entities(message.entities or message.caption_entities)
         await db.add_mailing_message(mailing_id, text, photo_path=photo_path, entities_json=entities_json)
         await state.clear()
         messages = await db.get_mailing_messages(mailing_id)
@@ -1147,8 +1152,13 @@ async def process_create_forward_message(message: Message, state: FSMContext, db
         )
     elif isinstance(origin, MessageOriginUser):
         text = message.text or message.caption or ""
-        entities_json = serialize_entities(message.entities or message.caption_entities)
         photo_path = await save_photo_from_message(message) if message.photo else None
+        if not text and not photo_path:
+            await message.answer(
+                "❌ Поддерживаются только текст и фото. Видео, голосовые и стикеры не поддерживаются."
+            )
+            return
+        entities_json = serialize_entities(message.entities or message.caption_entities)
         await db.add_mailing_message(mailing_id, text, photo_path=photo_path, entities_json=entities_json)
         await state.set_state(CreateMailingStates.adding_messages)
         messages = await db.get_mailing_messages(mailing_id)
