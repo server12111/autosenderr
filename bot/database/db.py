@@ -356,6 +356,14 @@ class Database:
         )
         await self._conn.commit()
 
+    async def disable_user_autoresponders(self, user_id: int):
+        """Disable all autoresponders for all accounts of a user."""
+        await self._conn.execute(
+            "UPDATE accounts SET autoresponder_enabled = 0, group_autoresponder_enabled = 0 WHERE user_id = ?",
+            (user_id,)
+        )
+        await self._conn.commit()
+
     async def update_subscription(self, user_id: int, subscription_end: datetime):
         await self._conn.execute(
             "UPDATE users SET subscription_end = ?, subscription_expired_notified_at = NULL, "

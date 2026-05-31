@@ -915,6 +915,7 @@ class SubscriptionCheckerService:
             # Subscription expired
             if delta < 0:
                 stopped = await self.mailing_service.stop_user_mailings(user.id)
+                await self.db.disable_user_autoresponders(user.id)
                 if not user.subscription_expired_notified_at:
                     try:
                         keyboard = InlineKeyboardMarkup(inline_keyboard=[[

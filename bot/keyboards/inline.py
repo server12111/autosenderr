@@ -24,7 +24,7 @@ def _btn(text: str, **kwargs) -> InlineKeyboardButton:
         if text.startswith(emoji):
             clean = text[len(emoji):].lstrip()
             return InlineKeyboardButton(
-                text=clean or emoji,
+                text=clean if clean else " ",
                 icon_custom_emoji_id=EMOJI_MAP[emoji],
                 **kwargs,
             )

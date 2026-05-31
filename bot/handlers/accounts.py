@@ -776,8 +776,9 @@ async def callback_rename_account(callback: CallbackQuery, state: FSMContext):
     await state.update_data(account_id=account_id)
     await state.set_state(RenameAccountStates.waiting_name)
     await callback.message.edit_text(
-        "✏️ Введите новое название для аккаунта:\n\n"
-        "(Например: Основной, Рабочий, Спам и т.д.)",
+        pe("✏️ Введите новое название для аккаунта:\n\n"
+        "(Например: Основной, Рабочий, Спам и т.д.)"),
+        parse_mode="HTML",
         reply_markup=cancel_keyboard(),
     )
     await callback.answer()
