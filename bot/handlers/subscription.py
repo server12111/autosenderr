@@ -365,6 +365,14 @@ async def process_promocode(message: Message, state: FSMContext, db: Database):
 
     await db.update_subscription(user.id, new_end)
     await db.use_promocode(code, user.id, promo.id)
+
+    if promo.is_subscription:
+        await db.create_paid_promo_payment(
+            user_id=user.id,
+            invoice_id=f"promo_{promo.code}_{user.id}",
+            plan_days=promo.duration_days,
+        )
+
     await state.clear()
 
     await message.answer(

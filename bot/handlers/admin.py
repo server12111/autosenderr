@@ -26,6 +26,7 @@ from ..keyboards.inline import (
     admin_withdrawals_keyboard,
     cancel_keyboard,
     main_menu_keyboard,
+    promo_subscription_keyboard,
 )
 from ..config import config
 from ..utils.premium_emoji import pe
@@ -38,6 +39,7 @@ class AdminStates(StatesGroup):
     waiting_promo_code = State()
     waiting_promo_days = State()
     waiting_promo_max_uses = State()
+    waiting_promo_is_subscription = State()
     waiting_price_7d = State()
     waiting_price_30d = State()
     waiting_ref_percent = State()
@@ -296,17 +298,42 @@ async def process_promo_max_uses(message: Message, state: FSMContext, db: Databa
         return
 
     data = await state.get_data()
+    await state.update_data(promo_max_uses=max_uses)
+    await state.set_state(AdminStates.waiting_promo_is_subscription)
+
+    await message.answer(
+        pe("💳 Этот промокод является платной подпиской?\n\n"
+           "• «Да» — будет отображаться в статистике подписок как покупка\n"
+           "• «Нет» — обычный промокод (не учитывается в статистике)"),
+        parse_mode="HTML",
+        reply_markup=promo_subscription_keyboard(),
+    )
+
+
+@router.callback_query(AdminStates.waiting_promo_is_subscription, F.data.startswith("promo_is_sub:"))
+async def process_promo_is_subscription(callback: CallbackQuery, state: FSMContext, db: Database):
+    if not is_admin(callback.from_user.id):
+        await state.clear()
+        await callback.answer()
+        return
+
+    is_sub = callback.data.split(":")[1] == "1"
+    data = await state.get_data()
     code = data["promo_code"]
     days = data["promo_days"]
-    await db.create_promocode(code, days, max_uses)
+    max_uses = data["promo_max_uses"]
+
+    await db.create_promocode(code, days, max_uses, is_subscription=is_sub)
     await state.clear()
 
     uses_text = f"{max_uses}x" if max_uses > 1 else "одноразовый"
-    await message.answer(
-        pe(f"✅ Промокод создан!\n\nКод: <b>{code}</b>\nДней подписки: {days}\nИспользований: {uses_text}"),
+    sub_label = "💳 платная подписка" if is_sub else "🎟 обычный промокод"
+    await callback.message.edit_text(
+        pe(f"✅ Промокод создан!\n\nКод: <b>{code}</b>\nДней подписки: {days}\nИспользований: {uses_text}\nТип: {sub_label}"),
         parse_mode="HTML",
         reply_markup=admin_promocodes_keyboard(),
     )
+    await callback.answer()
 
 
 @router.callback_query(F.data == "admin_list_promos")

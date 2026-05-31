@@ -140,6 +140,7 @@ class Promocode:
     used_by: Optional[int]
     used_at: Optional[datetime]
     created_at: datetime
+    is_subscription: bool = False
 
 
 @dataclass
@@ -229,8 +230,9 @@ class Database:
         await _add_col("payments", "payment_method", "TEXT DEFAULT 'cryptobot'")
         await _add_col("payments", "plan_days",       "INTEGER DEFAULT 30")
         # promocodes
-        await _add_col("promocodes", "max_uses",   "INTEGER NOT NULL DEFAULT 1")
-        await _add_col("promocodes", "uses_count", "INTEGER NOT NULL DEFAULT 0")
+        await _add_col("promocodes", "max_uses",        "INTEGER NOT NULL DEFAULT 1")
+        await _add_col("promocodes", "uses_count",      "INTEGER NOT NULL DEFAULT 0")
+        await _add_col("promocodes", "is_subscription", "INTEGER DEFAULT 0")
         # mailing_targets — topics support
         await _add_col("mailing_targets", "thread_id", "INTEGER DEFAULT NULL")
         await _add_col("mailing_targets", "is_forum",  "INTEGER DEFAULT 0")
@@ -863,7 +865,7 @@ class Database:
         await self._conn.commit()
 
     async def get_subscription_stats(self) -> list[dict]:
-        """Return subscription info for all users who have payments or active subscription."""
+        """Return subscription info for users who have at least one paid payment."""
         async with self._conn.execute("""
             SELECT u.id, u.telegram_id, u.username, u.subscription_end,
                    COUNT(p.id) as purchase_count,
@@ -872,8 +874,7 @@ class Database:
                    MAX(p.amount) as last_amount,
                    MAX(p.payment_method) as last_method
             FROM users u
-            LEFT JOIN payments p ON p.user_id = u.id AND p.status = 'paid'
-            WHERE u.subscription_end IS NOT NULL OR p.id IS NOT NULL
+            INNER JOIN payments p ON p.user_id = u.id AND p.status = 'paid'
             GROUP BY u.id
             ORDER BY u.subscription_end IS NULL, u.subscription_end DESC
         """) as cur:
@@ -925,24 +926,35 @@ class Database:
         return float(val) if val else 5.0
 
     # === Promocodes ===
-    async def create_promocode(self, code: str, duration_days: int = 30, max_uses: int = 1) -> int:
+    async def create_promocode(self, code: str, duration_days: int = 30, max_uses: int = 1, is_subscription: bool = False) -> int:
         cursor = await self._conn.execute(
-            "INSERT INTO promocodes (code, duration_days, max_uses) VALUES (?, ?, ?)",
-            (code, duration_days, max_uses),
+            "INSERT INTO promocodes (code, duration_days, max_uses, is_subscription) VALUES (?, ?, ?, ?)",
+            (code, duration_days, max_uses, 1 if is_subscription else 0),
         )
         await self._conn.commit()
         return cursor.lastrowid
+
+    async def create_paid_promo_payment(self, user_id: int, invoice_id: str, plan_days: int):
+        await self._conn.execute(
+            "INSERT OR IGNORE INTO payments "
+            "(user_id, invoice_id, amount, currency, payment_method, plan_days, status, paid_at) "
+            "VALUES (?, ?, 0, 'USDT', 'promocode', ?, 'paid', ?)",
+            (user_id, invoice_id, plan_days, datetime.now().isoformat())
+        )
+        await self._conn.commit()
 
     async def get_promocode(self, code: str) -> Optional[Promocode]:
         async with self._conn.execute("SELECT * FROM promocodes WHERE code = ?", (code,)) as cur:
             row = await cur.fetchone()
             if row:
+                keys = row.keys()
                 return Promocode(
                     id=row["id"], code=row["code"], duration_days=row["duration_days"],
                     max_uses=row["max_uses"], uses_count=row["uses_count"],
                     is_used=bool(row["is_used"]), used_by=row["used_by"],
                     used_at=self._parse_datetime(row["used_at"]),
                     created_at=self._parse_datetime(row["created_at"]),
+                    is_subscription=bool(row["is_subscription"]) if "is_subscription" in keys else False,
                 )
         return None
 
@@ -969,13 +981,18 @@ class Database:
     async def get_all_promocodes(self) -> list[Promocode]:
         async with self._conn.execute("SELECT * FROM promocodes ORDER BY created_at DESC") as cur:
             rows = await cur.fetchall()
-            return [Promocode(
-                id=r["id"], code=r["code"], duration_days=r["duration_days"],
-                max_uses=r["max_uses"], uses_count=r["uses_count"],
-                is_used=bool(r["is_used"]), used_by=r["used_by"],
-                used_at=self._parse_datetime(r["used_at"]),
-                created_at=self._parse_datetime(r["created_at"]),
-            ) for r in rows]
+            result = []
+            for r in rows:
+                keys = r.keys()
+                result.append(Promocode(
+                    id=r["id"], code=r["code"], duration_days=r["duration_days"],
+                    max_uses=r["max_uses"], uses_count=r["uses_count"],
+                    is_used=bool(r["is_used"]), used_by=r["used_by"],
+                    used_at=self._parse_datetime(r["used_at"]),
+                    created_at=self._parse_datetime(r["created_at"]),
+                    is_subscription=bool(r["is_subscription"]) if "is_subscription" in keys else False,
+                ))
+            return result
 
     async def delete_promocode(self, promo_id: int):
         await self._conn.execute("DELETE FROM promocodes WHERE id = ?", (promo_id,))

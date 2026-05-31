@@ -608,6 +608,15 @@ def admin_withdrawals_keyboard(requests) -> InlineKeyboardMarkup:
     return builder.as_markup()
 
 
+def promo_subscription_keyboard() -> InlineKeyboardMarkup:
+    builder = InlineKeyboardBuilder()
+    builder.row(
+        _btn("✅ Да, платная подписка", callback_data="promo_is_sub:1", style="success"),
+        _btn("❌ Нет, обычный промокод", callback_data="promo_is_sub:0", style="primary"),
+    )
+    return builder.as_markup()
+
+
 def admin_promocodes_keyboard() -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
     builder.row(
