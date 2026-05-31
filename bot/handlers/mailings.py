@@ -40,6 +40,7 @@ from ..keyboards.inline import (
     select_account_for_mailing_keyboard,
     reply_mode_select_keyboard,
     reply_mode_fixed_keyboard,
+    skip_thread_keyboard,
 )
 from ..utils.time_utils import format_active_hours, parse_time_range, create_active_hours_json
 from ..services import MailingService
@@ -557,7 +558,7 @@ async def callback_add_mailing_target(callback: CallbackQuery, state: FSMContext
 
 
 @router.message(EditMailingStates.waiting_target)
-async def process_edit_target(message: Message, state: FSMContext, db: Database):
+async def process_edit_target(message: Message, state: FSMContext, db: Database, userbot_manager: UserbotManager):
     text = message.text.strip()
     data = await state.get_data()
     mailing_id = data["mailing_id"]
@@ -565,9 +566,30 @@ async def process_edit_target(message: Message, state: FSMContext, db: Database)
     parsed = parse_chat_link(text)
     target = parsed if parsed else text
 
-    await db.add_mailing_target(mailing_id, target)
-    await state.clear()
+    target_id = await db.add_mailing_target(mailing_id, target)
 
+    mailing = await db.get_mailing(mailing_id)
+    if mailing:
+        client = await userbot_manager.get_client(mailing.account_id)
+        if client:
+            try:
+                entity = await client.get_entity(target)
+                if getattr(entity, 'forum', False):
+                    await state.update_data(target_id=target_id, mailing_id=mailing_id)
+                    await state.set_state(EditMailingStates.waiting_thread_id_for_target)
+                    await message.answer(
+                        pe(f"💬 Чат <b>{target}</b> использует темы (Topics).\n\n"
+                           "Отправьте ссылку на тему или её ID.\n"
+                           "Примеры: <code>https://t.me/chatname/123</code> или <code>123</code>\n\n"
+                           "Нажмите «Пропустить» для отправки в General."),
+                        parse_mode="HTML",
+                        reply_markup=skip_thread_keyboard(mailing_id, target),
+                    )
+                    return
+            except Exception:
+                pass
+
+    await state.clear()
     targets = await db.get_mailing_targets(mailing_id)
     await message.answer(
         pe(f"✅ Чат добавлен! Всего чатов: {len(targets)}"),
@@ -1238,7 +1260,7 @@ async def callback_create_add_target(callback: CallbackQuery, state: FSMContext)
 
 
 @router.message(CreateMailingStates.waiting_target)
-async def process_create_target(message: Message, state: FSMContext, db: Database):
+async def process_create_target(message: Message, state: FSMContext, db: Database, userbot_manager: UserbotManager):
     text = message.text.strip()
     data = await state.get_data()
     mailing_id = data["mailing_id"]
@@ -1246,9 +1268,30 @@ async def process_create_target(message: Message, state: FSMContext, db: Databas
     parsed = parse_chat_link(text)
     target = parsed if parsed else text
 
-    await db.add_mailing_target(mailing_id, target)
-    await state.set_state(CreateMailingStates.adding_targets)
+    target_id = await db.add_mailing_target(mailing_id, target)
 
+    mailing = await db.get_mailing(mailing_id)
+    if mailing:
+        client = await userbot_manager.get_client(mailing.account_id)
+        if client:
+            try:
+                entity = await client.get_entity(target)
+                if getattr(entity, 'forum', False):
+                    await state.update_data(target_id=target_id, mailing_id=mailing_id)
+                    await state.set_state(EditMailingStates.waiting_thread_id_for_target)
+                    await message.answer(
+                        pe(f"💬 Чат <b>{target}</b> использует темы (Topics).\n\n"
+                           "Отправьте ссылку на тему или её ID.\n"
+                           "Примеры: <code>https://t.me/chatname/123</code> или <code>123</code>\n\n"
+                           "Нажмите «Пропустить» для отправки в General."),
+                        parse_mode="HTML",
+                        reply_markup=skip_thread_keyboard(mailing_id, target),
+                    )
+                    return
+            except Exception:
+                pass
+
+    await state.set_state(CreateMailingStates.adding_targets)
     targets = await db.get_mailing_targets(mailing_id)
     await message.answer(
         pe(f"✅ Чат добавлен! Всего чатов: {len(targets)}\n\n"
