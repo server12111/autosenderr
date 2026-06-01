@@ -765,11 +765,9 @@ async def process_edit_folder(
         added = 0
         for entity in chats:
             try:
-                if hasattr(entity, 'username') and entity.username:
-                    identifier = f"@{entity.username}"
-                else:
-                    chat_id = int(f"-100{entity.id}")
-                    identifier = str(chat_id)
+                if type(entity).__name__ in ('ChannelForbidden', 'ChatForbidden'):
+                    continue
+                identifier = f"@{entity.username}" if getattr(entity, 'username', None) else str(int(f"-100{entity.id}"))
                 await db.add_mailing_target(mailing_id, identifier)
                 added += 1
             except Exception as e:
@@ -780,7 +778,11 @@ async def process_edit_folder(
         targets = await db.get_mailing_targets(mailing_id)
 
         forum_hint = ""
-        added_identifiers = [e.username and f"@{e.username}" or str(int(f"-100{e.id}")) for e in chats if hasattr(e, 'id')]
+        added_identifiers = [
+            f"@{getattr(e, 'username')}" if getattr(e, 'username', None) else str(int(f"-100{e.id}"))
+            for e in chats
+            if hasattr(e, 'id') and type(e).__name__ not in ('ChannelForbidden', 'ChatForbidden')
+        ]
         new_targets = [t for t in targets if t.chat_identifier in added_identifiers]
         forums = await _find_forum_targets(client, new_targets)
         if forums:
@@ -1450,11 +1452,9 @@ async def process_create_folder(
         added = 0
         for entity in chats:
             try:
-                if hasattr(entity, 'username') and entity.username:
-                    identifier = f"@{entity.username}"
-                else:
-                    chat_id = int(f"-100{entity.id}")
-                    identifier = str(chat_id)
+                if type(entity).__name__ in ('ChannelForbidden', 'ChatForbidden'):
+                    continue
+                identifier = f"@{entity.username}" if getattr(entity, 'username', None) else str(int(f"-100{entity.id}"))
                 await db.add_mailing_target(mailing_id, identifier)
                 added += 1
             except Exception as e:
@@ -1465,7 +1465,11 @@ async def process_create_folder(
         targets = await db.get_mailing_targets(mailing_id)
 
         forum_hint = ""
-        added_identifiers = [e.username and f"@{e.username}" or str(int(f"-100{e.id}")) for e in chats if hasattr(e, 'id')]
+        added_identifiers = [
+            f"@{getattr(e, 'username')}" if getattr(e, 'username', None) else str(int(f"-100{e.id}"))
+            for e in chats
+            if hasattr(e, 'id') and type(e).__name__ not in ('ChannelForbidden', 'ChatForbidden')
+        ]
         new_targets = [t for t in targets if t.chat_identifier in added_identifiers]
         forums = await _find_forum_targets(client, new_targets)
         if forums:
