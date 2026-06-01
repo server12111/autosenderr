@@ -314,6 +314,10 @@ class Database:
         )
 
     # === Users ===
+    async def update_user_username(self, telegram_id: int, username: Optional[str]):
+        await self._conn.execute("UPDATE users SET username = ? WHERE telegram_id = ?", (username, telegram_id))
+        await self._conn.commit()
+
     async def get_user(self, telegram_id: int) -> Optional[User]:
         async with self._conn.execute("SELECT * FROM users WHERE telegram_id = ?", (telegram_id,)) as cur:
             row = await cur.fetchone()

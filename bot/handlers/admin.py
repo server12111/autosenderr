@@ -916,7 +916,7 @@ async def callback_admin_cleanup_accounts_confirm(callback: CallbackQuery, db: D
 
 # === Subscription Stats ===
 @router.callback_query(F.data.startswith("admin_subscriptions"))
-async def callback_admin_subscriptions(callback: CallbackQuery, db: Database):
+async def callback_admin_subscriptions(callback: CallbackQuery, db: Database, bot):
     if not is_admin(callback.from_user.id):
         await callback.answer("Нет доступа", show_alert=True)
         return
@@ -928,6 +928,17 @@ async def callback_admin_subscriptions(callback: CallbackQuery, db: Database):
     stats = await db.get_subscription_stats()
     total = len(stats)
     chunk = stats[page * per_page: (page + 1) * per_page]
+
+    # Refresh usernames from Telegram for users on this page
+    for row in chunk:
+        try:
+            chat = await bot.get_chat(row["telegram_id"])
+            fresh_username = chat.username
+            if fresh_username != row.get("username"):
+                await db.update_user_username(row["telegram_id"], fresh_username)
+                row["username"] = fresh_username
+        except Exception:
+            pass
 
     now = datetime.now()
     text = pe(f"💳 <b>Подписки ({total} пользователей)</b>\n\n")
