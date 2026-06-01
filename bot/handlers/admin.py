@@ -956,12 +956,11 @@ async def callback_admin_subscriptions(callback: CallbackQuery, db: Database):
 
         last_method = row.get("last_method") or ("промокод" if not purchase_count else "—")
         last_days = row.get("last_plan_days") or "—"
-        username = f"@{row['username']}" if row.get("username") else str(row["telegram_id"])
-
+        uname = f"@{row['username']} " if row.get("username") else ""
         sub_type = "оплата" if purchase_count else "промокод"
 
         text += (
-            f"👤 {username}\n"
+            f"👤 {uname}(id: {row['telegram_id']})\n"
             f"  Статус: {status}\n"
             f"  До: {end_str} | Тип: {sub_type}\n"
             f"  Покупок: {purchase_count} | Посл. платёж: {paid_str}\n"

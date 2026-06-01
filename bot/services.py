@@ -456,6 +456,11 @@ class AutoresponderService:
             return
 
         urls = _extract_button_urls(event.message)
+        # Also extract links directly from message text (some bots send links in text, not buttons)
+        msg_text = getattr(event.message, 'text', None) or getattr(event.message, 'message', None) or ""
+        if msg_text:
+            import re as _re
+            urls += _re.findall(r'https?://t\.me/\S+|tg://[^\s]+', msg_text)
         urls = await _resolve_redirect_urls(urls)
         channel_usernames, invite_hashes = _parse_telegram_links(urls)
 
@@ -815,8 +820,23 @@ class MailingService:
                             logger.warning(f"Mailing {mailing_id}: slow mode in '{target}', wait {e.seconds}s")
                             await asyncio.sleep(min(e.seconds, 60))
                         except FloodWaitError as e:
-                            logger.warning(f"FloodWait {e.seconds}s for mailing {mailing_id}")
-                            await asyncio.sleep(e.seconds)
+                            fallback_sent = False
+                            if pool_clients and len(pool_clients) > 1:
+                                for fb_id, fb_client, _ in pool_clients:
+                                    if fb_id == current_account_id:
+                                        continue
+                                    try:
+                                        await self._send_msg(fb_client, target, msg, pm, reply_to=reply_to_id)
+                                        logger.info(f"Mailing {mailing_id}: FloodWait fallback → account {fb_id} → {target}")
+                                        await self.db.update_target_last_sent(target_obj.id)
+                                        sent_any = True
+                                        fallback_sent = True
+                                        break
+                                    except Exception:
+                                        continue
+                            if not fallback_sent:
+                                logger.warning(f"FloodWait {e.seconds}s for mailing {mailing_id}, no fallback available")
+                                await asyncio.sleep(e.seconds)
                         except (ChatSendMediaForbiddenError, ChatGuestSendForbiddenError, RightForbiddenError) as e:
                             logger.warning(f"Mailing {mailing_id}: send forbidden in '{target}' ({type(e).__name__}) — chat restricts this message type, skipping")
                         except Exception as e:
@@ -824,8 +844,23 @@ class MailingService:
                             if "PLAIN_FORBIDDEN" in err_str or "SEND_PLAIN" in err_str:
                                 logger.warning(f"Mailing {mailing_id}: '{target}' — чат разрешает только медиа (PLAIN_FORBIDDEN), skipping")
                             elif "PEER_FLOOD" in err_str:
-                                logger.warning(f"Mailing {mailing_id}: PEER_FLOOD на аккаунте, пауза 60с")
-                                await asyncio.sleep(60)
+                                fallback_sent = False
+                                if pool_clients and len(pool_clients) > 1:
+                                    for fb_id, fb_client, _ in pool_clients:
+                                        if fb_id == current_account_id:
+                                            continue
+                                        try:
+                                            await self._send_msg(fb_client, target, msg, pm, reply_to=reply_to_id)
+                                            logger.info(f"Mailing {mailing_id}: PEER_FLOOD fallback → account {fb_id} → {target}")
+                                            await self.db.update_target_last_sent(target_obj.id)
+                                            sent_any = True
+                                            fallback_sent = True
+                                            break
+                                        except Exception:
+                                            continue
+                                if not fallback_sent:
+                                    logger.warning(f"Mailing {mailing_id}: PEER_FLOOD на аккаунте, пауза 60с")
+                                    await asyncio.sleep(60)
                             else:
                                 logger.error(f"Error sending mailing {mailing_id} to {target}: {e}")
 
