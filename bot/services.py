@@ -574,6 +574,7 @@ class MailingService:
         self._tasks: dict[int, asyncio.Task] = {}
         self._running = False
         self._account_indices: dict[int, int] = {}
+        self._me_cache: dict[int, object] = {}  # account_id -> me object, avoids get_me() every loop
 
     async def start(self):
         self._running = True
@@ -707,6 +708,7 @@ class MailingService:
                     me = await client.get_me()
 
                     # Build pool: main account first, then extra accounts
+                    # Cache me objects — only re-fetch if not yet cached for this account
                     extra_accounts = await self.db.get_mailing_extra_accounts(mailing_id)
                     pool_clients: list[tuple] = []  # list of (account_id, client, me)
                     if extra_accounts:
@@ -719,11 +721,13 @@ class MailingService:
                                         await pc.connect()
                                     except Exception:
                                         continue
-                                try:
-                                    pm_user = await pc.get_me()
-                                    pool_clients.append((pool_acc.id, pc, pm_user))
-                                except Exception:
-                                    continue
+                                # Use cached me if available, only call get_me() once per account
+                                if pool_acc.id not in self._me_cache:
+                                    try:
+                                        self._me_cache[pool_acc.id] = await pc.get_me()
+                                    except Exception:
+                                        continue
+                                pool_clients.append((pool_acc.id, pc, self._me_cache[pool_acc.id]))
                     # pool_clients has 2+ entries only when extra accounts exist and at least one connected
                     account_pool = pool_clients if len(pool_clients) > 1 else None
 
@@ -756,12 +760,11 @@ class MailingService:
                             target_me = cycle_me
                         elif account_pool and pool_clients and rotation_mode == "per_target":
                             # per_target: account = pool[(send_idx - base) % N]
-                            # so on iteration k, target i uses pool[(i - k) % N]
                             # → each account advances one chat per iteration
                             acc_idx = (pt_send_idx - pt_base) % len(pool_clients)
                             target_account_id, target_client, target_me = pool_clients[acc_idx]
                             current_account_id = target_account_id
-                            pt_send_idx += 1
+                            # pt_send_idx increments AFTER activity check (below) to not waste slots
                         else:
                             current_account_id = mailing.account_id
                             target_client = client
@@ -777,6 +780,10 @@ class MailingService:
                             if not has_activity:
                                 logger.info(f"Mailing {mailing_id}: no activity in {target} since last send, skipping")
                                 continue
+
+                        # Consume the per_target rotation slot only for targets that will actually send
+                        if account_pool and pool_clients and rotation_mode == "per_target":
+                            pt_send_idx += 1
 
                         msg = random.choice(messages)
                         pm = msg.parse_mode or 'html'
@@ -866,8 +873,8 @@ class MailingService:
 
                         await asyncio.sleep(3)
 
-                    # per_target: shift base by +1 so each account moves to next chat next iteration
-                    if account_pool and rotation_mode == "per_target" and pool_clients:
+                    # per_target: shift base by +1 only if at least one send happened
+                    if account_pool and rotation_mode == "per_target" and pool_clients and pt_send_idx > 0:
                         self._account_indices[mailing_id] = pt_base + 1
 
                     if sent_any:
