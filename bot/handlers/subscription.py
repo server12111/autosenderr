@@ -90,7 +90,7 @@ async def callback_sub_plan(
     await state.update_data(plan_days=plan_days)
 
     price = await db.get_price(plan_days)
-    show_platega = bool(config.PLATEGA_API_KEY)
+    show_platega = bool(config.PLATEGA_MERCHANT_ID and config.PLATEGA_SECRET)
     has_ton = bool(config.TON_WALLET_ADDRESS and ton_service)
 
     if has_ton or show_platega:
