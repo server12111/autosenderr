@@ -224,18 +224,24 @@ class TonPaymentService:
 
 
 class PlategaService:
-    """Platega SBP payment service (rubles via СБП)."""
+    """Platega SBP payment service (rubles via СБП). API: https://docs.platega.io/"""
 
-    # Adjust these endpoints to match the actual Platega API docs
-    _CREATE_URL = "https://platega.ru/api"
-    _STATUS_URL = "https://platega.ru/api"
+    _BASE_URL = "https://app.platega.io"
 
     _usd_rub_cache: Optional[float] = None
     _usd_rub_cache_at: float = 0
     _CACHE_TTL: float = 3600  # 1 hour
 
-    def __init__(self, api_key: str):
-        self.api_key = api_key
+    def __init__(self, merchant_id: str, secret: str):
+        self.merchant_id = merchant_id
+        self.secret = secret
+
+    def _headers(self) -> dict:
+        return {
+            "X-MerchantId": self.merchant_id,
+            "X-Secret": self.secret,
+            "Content-Type": "application/json",
+        }
 
     async def get_usd_rub_rate(self) -> float:
         import time as _time
@@ -270,48 +276,53 @@ class PlategaService:
             ssl_ctx = ssl.create_default_context(cafile=certifi.where())
             connector = aiohttp.TCPConnector(ssl=ssl_ctx)
             payload = {
-                "key": self.api_key,
-                "action": "create",
-                "amount": amount_rub,
-                "order_id": order_id,
+                "paymentDetails": {
+                    "amount": amount_rub,
+                    "currency": "RUB",
+                },
                 "description": description,
+                "payload": order_id,  # store order_id in payload for reference
             }
             async with aiohttp.ClientSession(connector=connector) as session:
                 async with session.post(
-                    self._CREATE_URL,
+                    f"{self._BASE_URL}/v2/transaction/process",
                     json=payload,
+                    headers=self._headers(),
                     timeout=aiohttp.ClientTimeout(total=15),
                 ) as resp:
-                    data = await resp.json(content_type=None)
-                    if data.get("status") in (1, "success", "ok") or data.get("success"):
-                        pay_url = data.get("url") or data.get("payment_url") or data.get("link")
-                        pid = data.get("payment_id") or data.get("id") or order_id
-                        return {"payment_id": pid, "payment_url": pay_url}
-                    logger.error(f"Platega create_invoice error: {data}")
+                    raw = await resp.text()
+                    logger.info(f"Platega create_invoice HTTP {resp.status}: {raw[:500]}")
+                    try:
+                        data = json.loads(raw)
+                    except Exception:
+                        logger.error(f"Platega: non-JSON response: {raw[:200]}")
+                        return None
+                    transaction_id = data.get("transactionId")
+                    pay_url = data.get("url")
+                    if transaction_id and pay_url:
+                        return {"payment_id": transaction_id, "payment_url": pay_url}
+                    logger.error(f"Platega create_invoice bad response: {data}")
                     return None
         except Exception as e:
-            logger.error(f"Platega create_invoice exception: {e}")
+            logger.error(f"Platega create_invoice exception: {type(e).__name__}: {e}", exc_info=True)
             return None
 
-    async def check_payment(self, order_id: str) -> bool:
-        """Check if payment with given order_id is completed."""
+    async def check_payment(self, transaction_id: str) -> bool:
+        """Check if Platega transaction is confirmed (paid)."""
         try:
             ssl_ctx = ssl.create_default_context(cafile=certifi.where())
             connector = aiohttp.TCPConnector(ssl=ssl_ctx)
-            payload = {
-                "key": self.api_key,
-                "action": "check",
-                "order_id": order_id,
-            }
             async with aiohttp.ClientSession(connector=connector) as session:
-                async with session.post(
-                    self._STATUS_URL,
-                    json=payload,
+                async with session.get(
+                    f"{self._BASE_URL}/transaction/{transaction_id}",
+                    headers=self._headers(),
                     timeout=aiohttp.ClientTimeout(total=10),
                 ) as resp:
-                    data = await resp.json(content_type=None)
-                    status = str(data.get("status") or data.get("payment_status") or "").lower()
-                    return status in ("paid", "success", "1", "completed", "ok")
+                    raw = await resp.text()
+                    logger.info(f"Platega check_payment HTTP {resp.status}: {raw[:300]}")
+                    data = json.loads(raw)
+                    status = str(data.get("status") or "").upper()
+                    return status == "CONFIRMED"
         except Exception as e:
             logger.warning(f"Platega check_payment exception: {e}")
             return False

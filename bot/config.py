@@ -20,7 +20,8 @@ class Config:
     SUBSCRIPTION_CURRENCY: str = os.getenv("SUBSCRIPTION_CURRENCY", "USDT")
 
     # Platega SBP payments (rubles)
-    PLATEGA_API_KEY: str = os.getenv("PLATEGA_API_KEY", "")
+    PLATEGA_MERCHANT_ID: str = os.getenv("PLATEGA_MERCHANT_ID", "")
+    PLATEGA_SECRET: str = os.getenv("PLATEGA_SECRET", "")
 
     # TON payments
     TON_WALLET_ADDRESS: str = os.getenv("TON_WALLET_ADDRESS", "")

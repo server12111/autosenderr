@@ -316,7 +316,7 @@ async def callback_check_payment(
 async def callback_pay_platega(
     callback: CallbackQuery, state: FSMContext, db: Database, platega_service: PlategaService = None
 ):
-    if not platega_service or not config.PLATEGA_API_KEY:
+    if not platega_service or not config.PLATEGA_SECRET:
         await callback.answer("Platega не настроена", show_alert=True)
         return
 
@@ -345,9 +345,11 @@ async def callback_pay_platega(
         await callback.answer()
         return
 
+    transaction_id = invoice["payment_id"]  # UUID from Platega
+
     await db.create_payment(
         user_id=user.id,
-        invoice_id=order_id,
+        invoice_id=transaction_id,
         amount=amount_rub,
         currency="RUB",
         plan_days=plan_days,
@@ -363,7 +365,7 @@ async def callback_pay_platega(
     )
     await callback.message.edit_text(
         text, parse_mode="HTML",
-        reply_markup=platega_payment_keyboard(invoice["payment_url"], order_id),
+        reply_markup=platega_payment_keyboard(invoice["payment_url"], transaction_id),
     )
     await callback.answer()
 

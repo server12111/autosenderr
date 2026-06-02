@@ -103,7 +103,7 @@ async def main():
 
     dp.include_router(setup_routers())
 
-    platega_service = PlategaService(config.PLATEGA_API_KEY) if config.PLATEGA_API_KEY else None
+    platega_service = PlategaService(config.PLATEGA_MERCHANT_ID, config.PLATEGA_SECRET) if config.PLATEGA_MERCHANT_ID and config.PLATEGA_SECRET else None
 
     dp["db"] = db
     dp["cryptobot"] = cryptobot
