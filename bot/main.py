@@ -19,7 +19,7 @@ from .handlers import setup_routers
 from .middlewares.subscription import SubscriptionMiddleware
 from .middlewares.album import AlbumMiddleware
 from .userbot.manager import UserbotManager
-from .services import CryptoBotService, TonPaymentService, AutoresponderService, MailingService, SubscriptionCheckerService
+from .services import CryptoBotService, TonPaymentService, PlategaService, AutoresponderService, MailingService, SubscriptionCheckerService
 
 
 class ActivityMiddleware(BaseMiddleware):
@@ -103,9 +103,12 @@ async def main():
 
     dp.include_router(setup_routers())
 
+    platega_service = PlategaService(config.PLATEGA_API_KEY) if config.PLATEGA_API_KEY else None
+
     dp["db"] = db
     dp["cryptobot"] = cryptobot
     dp["ton_service"] = ton_service
+    dp["platega_service"] = platega_service
     dp["userbot_manager"] = userbot_manager
     dp["mailing_service"] = mailing_service
     dp["autoresponder_service"] = autoresponder_service

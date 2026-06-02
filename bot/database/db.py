@@ -809,10 +809,11 @@ class Database:
 
     # === Payments ===
     async def create_payment(self, user_id: int, invoice_id: str, amount: float,
-                              currency: str, plan_days: int = 30) -> int:
+                              currency: str, plan_days: int = 30,
+                              payment_method: str = "cryptobot") -> int:
         cursor = await self._conn.execute(
-            "INSERT INTO payments (user_id, invoice_id, amount, currency, plan_days) VALUES (?, ?, ?, ?, ?)",
-            (user_id, invoice_id, amount, currency, plan_days),
+            "INSERT INTO payments (user_id, invoice_id, amount, currency, plan_days, payment_method) VALUES (?, ?, ?, ?, ?, ?)",
+            (user_id, invoice_id, amount, currency, plan_days, payment_method),
         )
         await self._conn.commit()
         return cursor.lastrowid
@@ -849,6 +850,36 @@ class Database:
                 created_at=self._parse_datetime(r["created_at"]),
                 paid_at=self._parse_datetime(r["paid_at"]),
             ) for r in rows]
+
+    async def get_platega_stats(self) -> dict:
+        """Revenue stats for Platega payments."""
+        async with self._conn.execute("""
+            SELECT
+                COALESCE(SUM(p.amount), 0) as total_rub,
+                COALESCE(SUM(CASE WHEN date(p.paid_at) = date('now', '-1 day') THEN p.amount ELSE 0 END), 0) as yesterday_rub,
+                COALESCE(SUM(CASE WHEN date(p.paid_at) = date('now') THEN p.amount ELSE 0 END), 0) as today_rub,
+                COUNT(*) as total_count
+            FROM payments p
+            WHERE p.payment_method = 'platega' AND p.status = 'paid'
+        """) as cur:
+            row = await cur.fetchone()
+        totals = {
+            "total_rub": float(row["total_rub"] or 0),
+            "yesterday_rub": float(row["yesterday_rub"] or 0),
+            "today_rub": float(row["today_rub"] or 0),
+            "total_count": int(row["total_count"] or 0),
+        }
+        async with self._conn.execute("""
+            SELECT u.telegram_id, u.username, p.amount, p.paid_at, p.plan_days
+            FROM payments p
+            JOIN users u ON u.id = p.user_id
+            WHERE p.payment_method = 'platega' AND p.status = 'paid'
+            ORDER BY p.paid_at DESC
+            LIMIT 20
+        """) as cur:
+            rows = await cur.fetchall()
+        totals["recent"] = [dict(r) for r in rows]
+        return totals
 
     async def get_revenue_by_currency(self) -> dict:
         async with self._conn.execute(

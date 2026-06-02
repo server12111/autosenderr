@@ -223,6 +223,100 @@ class TonPaymentService:
             return False
 
 
+class PlategaService:
+    """Platega SBP payment service (rubles via СБП)."""
+
+    # Adjust these endpoints to match the actual Platega API docs
+    _CREATE_URL = "https://platega.ru/api"
+    _STATUS_URL = "https://platega.ru/api"
+
+    _usd_rub_cache: Optional[float] = None
+    _usd_rub_cache_at: float = 0
+    _CACHE_TTL: float = 3600  # 1 hour
+
+    def __init__(self, api_key: str):
+        self.api_key = api_key
+
+    async def get_usd_rub_rate(self) -> float:
+        import time as _time
+        now = _time.time()
+        if PlategaService._usd_rub_cache and (now - PlategaService._usd_rub_cache_at) < self._CACHE_TTL:
+            return PlategaService._usd_rub_cache
+        try:
+            ssl_ctx = ssl.create_default_context(cafile=certifi.where())
+            connector = aiohttp.TCPConnector(ssl=ssl_ctx)
+            async with aiohttp.ClientSession(connector=connector) as session:
+                async with session.get(
+                    "https://www.cbr-xml-daily.ru/daily_json.js",
+                    timeout=aiohttp.ClientTimeout(total=10),
+                ) as resp:
+                    data = await resp.json(content_type=None)
+                    rate = float(data["Valute"]["USD"]["Value"])
+                    PlategaService._usd_rub_cache = rate
+                    PlategaService._usd_rub_cache_at = now
+                    return rate
+        except Exception as e:
+            logger.warning(f"Platega: failed to get USD/RUB rate: {e}")
+            return PlategaService._usd_rub_cache or 90.0
+
+    async def calculate_rub_price(self, usdt_amount: float) -> float:
+        """Convert USDT amount to RUB with 8% markup."""
+        rate = await self.get_usd_rub_rate()
+        return round(usdt_amount * 1.08 * rate)
+
+    async def create_invoice(self, amount_rub: float, order_id: str, description: str) -> Optional[dict]:
+        """Create Platega payment. Returns {'payment_id': ..., 'payment_url': ...} or None."""
+        try:
+            ssl_ctx = ssl.create_default_context(cafile=certifi.where())
+            connector = aiohttp.TCPConnector(ssl=ssl_ctx)
+            payload = {
+                "key": self.api_key,
+                "action": "create",
+                "amount": amount_rub,
+                "order_id": order_id,
+                "description": description,
+            }
+            async with aiohttp.ClientSession(connector=connector) as session:
+                async with session.post(
+                    self._CREATE_URL,
+                    json=payload,
+                    timeout=aiohttp.ClientTimeout(total=15),
+                ) as resp:
+                    data = await resp.json(content_type=None)
+                    if data.get("status") in (1, "success", "ok") or data.get("success"):
+                        pay_url = data.get("url") or data.get("payment_url") or data.get("link")
+                        pid = data.get("payment_id") or data.get("id") or order_id
+                        return {"payment_id": pid, "payment_url": pay_url}
+                    logger.error(f"Platega create_invoice error: {data}")
+                    return None
+        except Exception as e:
+            logger.error(f"Platega create_invoice exception: {e}")
+            return None
+
+    async def check_payment(self, order_id: str) -> bool:
+        """Check if payment with given order_id is completed."""
+        try:
+            ssl_ctx = ssl.create_default_context(cafile=certifi.where())
+            connector = aiohttp.TCPConnector(ssl=ssl_ctx)
+            payload = {
+                "key": self.api_key,
+                "action": "check",
+                "order_id": order_id,
+            }
+            async with aiohttp.ClientSession(connector=connector) as session:
+                async with session.post(
+                    self._STATUS_URL,
+                    json=payload,
+                    timeout=aiohttp.ClientTimeout(total=10),
+                ) as resp:
+                    data = await resp.json(content_type=None)
+                    status = str(data.get("status") or data.get("payment_status") or "").lower()
+                    return status in ("paid", "success", "1", "completed", "ok")
+        except Exception as e:
+            logger.warning(f"Platega check_payment exception: {e}")
+            return False
+
+
 def _extract_button_urls(message) -> list:
     """Extract all URLs from inline keyboard buttons."""
     urls = []

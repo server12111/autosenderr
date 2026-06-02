@@ -481,14 +481,26 @@ def payment_keyboard(pay_url: str, invoice_id: str) -> InlineKeyboardMarkup:
     return builder.as_markup()
 
 
-def payment_method_keyboard() -> InlineKeyboardMarkup:
+def payment_method_keyboard(show_platega: bool = False) -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
     builder.row(
         _btn("💎 CryptoBot (USDT)", callback_data="pay_cryptobot", style="primary"),
         _btn("💠 TON", callback_data="pay_ton", style="primary"),
     )
+    if show_platega:
+        builder.row(_btn("💳 Оплата рублями (СБП)", callback_data="pay_platega", style="success"))
     builder.row(_btn("💳 На карту", callback_data="pay_card", style="primary"))
     builder.row(_btn("◀️ Назад", callback_data="subscription", style="primary"))
+    return builder.as_markup()
+
+
+def platega_payment_keyboard(pay_url: str, order_id: str) -> InlineKeyboardMarkup:
+    builder = InlineKeyboardBuilder()
+    builder.row(_btn("💳 Оплатить через СБП", url=pay_url, style="success"))
+    builder.row(
+        _btn("🔄 Проверить оплату", callback_data=f"check_platega:{order_id}", style="primary"),
+        _btn("◀️ Назад", callback_data="subscription", style="primary"),
+    )
     return builder.as_markup()
 
 
@@ -570,6 +582,9 @@ def admin_keyboard() -> InlineKeyboardMarkup:
     )
     builder.row(
         _btn("💳 Подписки", callback_data="admin_subscriptions", style="primary"),
+        _btn("🇷🇺 Platega", callback_data="admin_platega", style="primary"),
+    )
+    builder.row(
         _btn("📤 Экспорт БД", callback_data="admin_export_db", style="primary"),
     )
     builder.row(

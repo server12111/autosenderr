@@ -27,6 +27,7 @@ from ..keyboards.inline import (
     cancel_keyboard,
     main_menu_keyboard,
     promo_subscription_keyboard,
+    _btn,
 )
 from ..config import config
 from ..utils.premium_emoji import pe
@@ -911,6 +912,50 @@ async def callback_admin_cleanup_accounts_confirm(callback: CallbackQuery, db: D
         parse_mode="HTML",
         reply_markup=admin_keyboard(),
     )
+    await callback.answer()
+
+
+# === Platega Stats ===
+@router.callback_query(F.data == "admin_platega")
+async def callback_admin_platega(callback: CallbackQuery, db: Database):
+    if not is_admin(callback.from_user.id):
+        await callback.answer("Нет доступа", show_alert=True)
+        return
+
+    stats = await db.get_platega_stats()
+    total = stats["total_rub"]
+    today = stats["today_rub"]
+    yesterday = stats["yesterday_rub"]
+    count = stats["total_count"]
+    recent = stats["recent"]
+
+    text = pe(
+        f"🇷🇺 <b>Платежи Platega (СБП)</b>\n\n"
+        f"💰 Всего получено: <b>{total:.0f} ₽</b>\n"
+        f"📅 Сегодня: <b>{today:.0f} ₽</b>\n"
+        f"📅 Вчера: <b>{yesterday:.0f} ₽</b>\n"
+        f"🔢 Платежей всего: <b>{count}</b>\n\n"
+    )
+
+    if recent:
+        text += "📋 <b>Последние платежи:</b>\n"
+        for r in recent[:15]:
+            uname = f"@{r['username']} " if r.get("username") else ""
+            paid_dt = r.get("paid_at") or ""
+            if paid_dt:
+                try:
+                    paid_dt = datetime.fromisoformat(paid_dt).strftime("%d.%m.%Y")
+                except Exception:
+                    paid_dt = str(paid_dt)[:10]
+            text += f"• {uname}(id: {r['telegram_id']}) — {r['amount']:.0f} ₽ / {r['plan_days']}д — {paid_dt}\n"
+    else:
+        text += "Платежей через Platega пока нет."
+
+    from aiogram.utils.keyboard import InlineKeyboardBuilder as IKB
+    builder = IKB()
+    builder.row(_btn("◀️ Назад", callback_data="admin_back", style="primary"))
+
+    await callback.message.edit_text(text, parse_mode="HTML", reply_markup=builder.as_markup())
     await callback.answer()
 
 

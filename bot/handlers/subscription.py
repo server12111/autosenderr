@@ -12,13 +12,14 @@ from ..keyboards.inline import (
     payment_keyboard,
     payment_method_keyboard,
     ton_payment_keyboard,
+    platega_payment_keyboard,
     main_menu_keyboard,
     back_to_subscription_keyboard,
     cancel_keyboard,
     back_to_menu_keyboard,
 )
 from ..config import config
-from ..services import CryptoBotService, TonPaymentService
+from ..services import CryptoBotService, TonPaymentService, PlategaService
 from ..utils.premium_emoji import pe
 
 router = Router()
@@ -81,24 +82,33 @@ async def callback_buy_subscription(callback: CallbackQuery, state: FSMContext, 
 
 
 @router.callback_query(F.data.startswith("sub_plan:"))
-async def callback_sub_plan(callback: CallbackQuery, state: FSMContext, db: Database, ton_service: TonPaymentService = None):
+async def callback_sub_plan(
+    callback: CallbackQuery, state: FSMContext, db: Database,
+    ton_service: TonPaymentService = None, platega_service: PlategaService = None
+):
     plan_days = int(callback.data.split(":")[1])
     await state.update_data(plan_days=plan_days)
 
     price = await db.get_price(plan_days)
+    show_platega = bool(config.PLATEGA_API_KEY)
+    has_ton = bool(config.TON_WALLET_ADDRESS and ton_service)
 
-    if config.TON_WALLET_ADDRESS and ton_service:
-        ton_amount = await ton_service.calculate_ton_amount(price)
-        if ton_amount:
-            ton_text = f"💠 TON — ~{ton_amount} TON (≈ {price} USDT)"
-        else:
-            ton_text = f"💠 TON — ≈ {price} USDT в TON"
-        text = pe(
-            f"💳 Способ оплаты ({plan_days} дней):\n\n"
-            f"💎 CryptoBot — {price} USDT\n"
-            f"{ton_text}"
+    if has_ton or show_platega:
+        lines = [f"💎 CryptoBot — {price} USDT"]
+        if has_ton:
+            ton_amount = await ton_service.calculate_ton_amount(price)
+            if ton_amount:
+                lines.append(f"💠 TON — ~{ton_amount} TON (≈ {price} USDT)")
+            else:
+                lines.append(f"💠 TON — ≈ {price} USDT в TON")
+        if show_platega and platega_service:
+            rub_price = await platega_service.calculate_rub_price(price)
+            lines.append(f"💳 СБП (рубли) — ~{rub_price:.0f} ₽")
+        text = pe(f"💳 Способ оплаты ({plan_days} дней):\n\n" + "\n".join(lines))
+        await callback.message.edit_text(
+            text, parse_mode="HTML",
+            reply_markup=payment_method_keyboard(show_platega=show_platega),
         )
-        await callback.message.edit_text(text, parse_mode="HTML", reply_markup=payment_method_keyboard())
     else:
         await _create_cryptobot_subscription(callback, db, plan_days=plan_days)
     await callback.answer()
@@ -290,6 +300,110 @@ async def callback_check_payment(
 
         await callback.message.edit_text(
             pe(f"✅ Оплата получена!\n\n"
+            f"Ваша подписка активна до {new_end.strftime('%d.%m.%Y %H:%M')}"),
+            parse_mode="HTML",
+            reply_markup=main_menu_keyboard(),
+        )
+        await callback.answer("Оплата получена!")
+    else:
+        await callback.answer(
+            "⏳ Оплата ещё не поступила. Попробуйте позже.",
+            show_alert=True,
+        )
+
+
+@router.callback_query(F.data == "pay_platega")
+async def callback_pay_platega(
+    callback: CallbackQuery, state: FSMContext, db: Database, platega_service: PlategaService = None
+):
+    if not platega_service or not config.PLATEGA_API_KEY:
+        await callback.answer("Platega не настроена", show_alert=True)
+        return
+
+    data = await state.get_data()
+    plan_days = data.get("plan_days", 30)
+    user = await db.get_user(callback.from_user.id)
+    price_usdt = await db.get_price(plan_days)
+    amount_rub = await platega_service.calculate_rub_price(price_usdt)
+
+    order_id = f"platega_{user.telegram_id}_{int(time.time())}"
+
+    await callback.message.edit_text(pe("⏳ Создаём платёж через СБП..."), parse_mode="HTML")
+
+    invoice = await platega_service.create_invoice(
+        amount_rub=amount_rub,
+        order_id=order_id,
+        description=f"Подписка на бота рассылок ({plan_days} дней)",
+    )
+
+    if not invoice or not invoice.get("payment_url"):
+        await callback.message.edit_text(
+            pe("❌ Ошибка создания платежа через Platega. Попробуйте позже."),
+            parse_mode="HTML",
+            reply_markup=payment_method_keyboard(show_platega=True),
+        )
+        await callback.answer()
+        return
+
+    await db.create_payment(
+        user_id=user.id,
+        invoice_id=order_id,
+        amount=amount_rub,
+        currency="RUB",
+        plan_days=plan_days,
+        payment_method="platega",
+    )
+
+    text = pe(
+        f"💳 Оплата через СБП\n\n"
+        f"Сумма: <b>{amount_rub:.0f} ₽</b>\n"
+        f"Срок: {plan_days} дней\n\n"
+        f"Нажмите «Оплатить через СБП» для перехода к оплате.\n"
+        f"После оплаты нажмите «Проверить оплату»."
+    )
+    await callback.message.edit_text(
+        text, parse_mode="HTML",
+        reply_markup=platega_payment_keyboard(invoice["payment_url"], order_id),
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("check_platega:"))
+async def callback_check_platega_payment(
+    callback: CallbackQuery, db: Database, platega_service: PlategaService = None
+):
+    order_id = callback.data.split(":", 1)[1]
+
+    payment = await db.get_payment_by_invoice(order_id)
+    if not payment:
+        await callback.answer("Платёж не найден", show_alert=True)
+        return
+
+    if payment.status == "paid":
+        await callback.answer("✅ Этот платёж уже обработан", show_alert=True)
+        return
+
+    if not platega_service:
+        await callback.answer("Platega не настроена", show_alert=True)
+        return
+
+    is_paid = await platega_service.check_payment(order_id)
+
+    if is_paid:
+        await db.update_payment_status(order_id, "paid")
+        user = await db.get_user(callback.from_user.id)
+        plan_days = getattr(payment, "plan_days", 30) or 30
+
+        if user.subscription_end and user.subscription_end > datetime.now():
+            new_end = user.subscription_end + timedelta(days=plan_days)
+        else:
+            new_end = datetime.now() + timedelta(days=plan_days)
+
+        await db.update_subscription(user.id, new_end)
+        await _pay_referral(user, db, payment.amount)
+
+        await callback.message.edit_text(
+            pe(f"✅ Оплата через СБП получена!\n\n"
             f"Ваша подписка активна до {new_end.strftime('%d.%m.%Y %H:%M')}"),
             parse_mode="HTML",
             reply_markup=main_menu_keyboard(),

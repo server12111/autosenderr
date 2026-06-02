@@ -19,6 +19,9 @@ class Config:
     EXTRA_ACCOUNT_PRICE: float = 0.2
     SUBSCRIPTION_CURRENCY: str = os.getenv("SUBSCRIPTION_CURRENCY", "USDT")
 
+    # Platega SBP payments (rubles)
+    PLATEGA_API_KEY: str = os.getenv("PLATEGA_API_KEY", "")
+
     # TON payments
     TON_WALLET_ADDRESS: str = os.getenv("TON_WALLET_ADDRESS", "")
     TONCENTER_API_KEY: str = os.getenv("TONCENTER_API_KEY", "")
