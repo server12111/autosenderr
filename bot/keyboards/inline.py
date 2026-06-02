@@ -516,7 +516,7 @@ def ton_payment_keyboard(pay_url: str, comment: str, plan_days: int) -> InlineKe
 
 def back_to_subscription_keyboard() -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
-    builder.row(_btn("◀️ Назад", callback_data="subscription", style="primary"))
+    builder.row(_btn("◀️ Назад", callback_data="buy_subscription", style="primary"))
     return builder.as_markup()
 
 

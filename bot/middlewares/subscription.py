@@ -20,6 +20,7 @@ class SubscriptionMiddleware(BaseMiddleware):
         "pay_cryptobot",
         "pay_ton",
         "pay_card",
+        "pay_platega",
         "pay_account_cryptobot",
         "pay_account_ton",
         "pay_account_card",
@@ -34,6 +35,7 @@ class SubscriptionMiddleware(BaseMiddleware):
         "check_ton_payment:",
         "check_ton_account:",
         "check_account_payment:",
+        "check_platega:",
         "sub_plan:",
     )
 

@@ -502,10 +502,18 @@ async def process_promocode(message: Message, state: FSMContext, db: Database):
 
 
 @router.callback_query(F.data == "pay_card")
-async def callback_pay_card(callback: CallbackQuery, db: Database):
+async def callback_pay_card(callback: CallbackQuery, state: FSMContext, db: Database):
+    data = await state.get_data()
+    plan_days = data.get("plan_days", 30)
+
     manager = await db.get_setting("card_manager_username") or "autosenderkarta"
+    price_usdt = await db.get_price(plan_days)
+    price_with_fee = round(price_usdt * 1.08, 2)
+
     await callback.message.edit_text(
-        pe("💳 Оплата банковской картой\n\n"
+        pe(f"💳 Оплата картой / рублями\n\n"
+        f"📅 Срок: {plan_days} дней\n"
+        f"💰 Сумма: {price_usdt} USDT + 8% комиссия = <b>{price_with_fee} USDT</b>\n\n"
         "Принимаем оплату в гривнах и рублях.\n"
         "Напишите нашему менеджеру:\n\n"
         f"👤 Менеджер: @{manager}\n\n"
