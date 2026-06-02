@@ -126,7 +126,7 @@ def account_payment_keyboard(pay_url: str, invoice_id: str) -> InlineKeyboardMar
     builder.row(_btn("💳 Оплатить", url=pay_url, style="success"))
     builder.row(
         _btn("🔄 Проверить оплату", callback_data=f"check_account_payment:{invoice_id}", style="primary"),
-        _btn("◀️ Назад", callback_data="accounts", style="primary"),
+        _btn("◀️ Назад", callback_data="account_payment_methods", style="primary"),
     )
     return builder.as_markup()
 
@@ -148,7 +148,7 @@ def add_account_api_keyboard() -> InlineKeyboardMarkup:
         _btn("✅ Да, ввести API", callback_data="add_account_set_api", style="success"),
         _btn("➡️ Продолжить", callback_data="add_account_skip_api", style="primary"),
     )
-    builder.row(_btn("◀️ Назад", callback_data="accounts", style="primary"))
+    builder.row(_btn("◀️ Назад", callback_data="add_account", style="primary"))
     return builder.as_markup()
 
 
@@ -168,7 +168,7 @@ def ton_account_payment_keyboard(pay_url: str, comment: str) -> InlineKeyboardMa
     builder.row(_btn("💠 Оплатить через Tonkeeper", url=pay_url, style="success"))
     builder.row(
         _btn("🔄 Проверить оплату", callback_data=f"check_ton_account:{comment}", style="primary"),
-        _btn("◀️ Назад", callback_data="accounts", style="primary"),
+        _btn("◀️ Назад", callback_data="account_payment_methods", style="primary"),
     )
     return builder.as_markup()
 
@@ -407,7 +407,7 @@ def mailing_creation_messages_keyboard(mailing_id: int, messages: list[MailingMe
     )
     if messages:
         builder.row(_btn("✅ Готово", callback_data=f"create_messages_done:{mailing_id}", style="success"))
-    builder.row(_btn("◀️ Назад", callback_data=f"cancel_creation:{mailing_id}", style="primary"))
+    builder.row(_btn("◀️ Назад", callback_data=f"mailing:{mailing_id}", style="primary"))
     return builder.as_markup()
 
 
@@ -423,10 +423,10 @@ def mailing_creation_targets_keyboard(mailing_id: int, targets: list[MailingTarg
     if targets:
         builder.row(
             _btn("✅ Готово", callback_data=f"create_targets_done:{mailing_id}", style="success"),
-            _btn("◀️ Назад", callback_data=f"cancel_creation:{mailing_id}", style="primary"),
+            _btn("◀️ Назад", callback_data=f"mailing:{mailing_id}", style="primary"),
         )
     else:
-        builder.row(_btn("◀️ Назад", callback_data=f"cancel_creation:{mailing_id}", style="primary"))
+        builder.row(_btn("◀️ Назад", callback_data=f"mailing:{mailing_id}", style="primary"))
     return builder.as_markup()
 
 
@@ -436,7 +436,7 @@ def active_hours_keyboard(mailing_id: int) -> InlineKeyboardMarkup:
         _btn("⏭️ Пропустить (24/7)", callback_data=f"skip_hours:{mailing_id}", style="primary"),
         _btn("⏰ Настроить", callback_data=f"setup_hours:{mailing_id}", style="primary"),
     )
-    builder.row(_btn("◀️ Назад", callback_data=f"cancel_creation:{mailing_id}", style="primary"))
+    builder.row(_btn("◀️ Назад", callback_data=f"mailing:{mailing_id}", style="primary"))
     return builder.as_markup()
 
 
@@ -444,7 +444,7 @@ def launch_mailing_keyboard(mailing_id: int) -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
     builder.row(
         _btn("🚀 Запустить рассылку", callback_data=f"launch_mailing:{mailing_id}", style="success"),
-        _btn("◀️ Назад", callback_data=f"cancel_creation:{mailing_id}", style="primary"),
+        _btn("◀️ Назад", callback_data=f"mailing:{mailing_id}", style="primary"),
     )
     return builder.as_markup()
 
@@ -471,12 +471,12 @@ def subscription_plan_keyboard() -> InlineKeyboardMarkup:
     return builder.as_markup()
 
 
-def payment_keyboard(pay_url: str, invoice_id: str) -> InlineKeyboardMarkup:
+def payment_keyboard(pay_url: str, invoice_id: str, plan_days: int) -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
     builder.row(_btn("💳 Оплатить", url=pay_url, style="success"))
     builder.row(
         _btn("🔄 Проверить оплату", callback_data=f"check_payment:{invoice_id}", style="primary"),
-        _btn("◀️ Назад", callback_data="subscription", style="primary"),
+        _btn("◀️ Назад", callback_data=f"sub_plan:{plan_days}", style="primary"),
     )
     return builder.as_markup()
 
@@ -488,28 +488,28 @@ def payment_method_keyboard(show_platega: bool = False) -> InlineKeyboardMarkup:
         _btn("💠 TON", callback_data="pay_ton", style="primary"),
     )
     if show_platega:
-        builder.row(_btn("💳 Оплата рублями (СБП)", callback_data="pay_platega", style="success"))
-    builder.row(_btn("💳 На карту", callback_data="pay_card", style="primary"))
-    builder.row(_btn("◀️ Назад", callback_data="subscription", style="primary"))
+        builder.row(_btn("🇷🇺 Оплата рублями (СБП)", callback_data="pay_platega", style="primary"))
+    builder.row(_btn("🇺🇦 На карту(грн)", callback_data="pay_card", style="primary"))
+    builder.row(_btn("◀️ Назад", callback_data="buy_subscription", style="primary"))
     return builder.as_markup()
 
 
-def platega_payment_keyboard(pay_url: str, order_id: str) -> InlineKeyboardMarkup:
+def platega_payment_keyboard(pay_url: str, order_id: str, plan_days: int) -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
     builder.row(_btn("💳 Оплатить через СБП", url=pay_url, style="success"))
     builder.row(
         _btn("🔄 Проверить оплату", callback_data=f"check_platega:{order_id}", style="primary"),
-        _btn("◀️ Назад", callback_data="subscription", style="primary"),
+        _btn("◀️ Назад", callback_data=f"sub_plan:{plan_days}", style="primary"),
     )
     return builder.as_markup()
 
 
-def ton_payment_keyboard(pay_url: str, comment: str) -> InlineKeyboardMarkup:
+def ton_payment_keyboard(pay_url: str, comment: str, plan_days: int) -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
     builder.row(_btn("💠 Оплатить через Tonkeeper", url=pay_url, style="success"))
     builder.row(
         _btn("🔄 Проверить оплату", callback_data=f"check_ton_payment:{comment}", style="primary"),
-        _btn("◀️ Назад", callback_data="subscription", style="primary"),
+        _btn("◀️ Назад", callback_data=f"sub_plan:{plan_days}", style="primary"),
     )
     return builder.as_markup()
 
@@ -573,6 +573,9 @@ def admin_keyboard() -> InlineKeyboardMarkup:
         _btn("🎟 Промокоды", callback_data="admin_promocodes", style="primary"),
     )
     builder.row(
+        _btn("💳 Статистика подписок", callback_data="admin_sub_stats", style="primary"),
+    )
+    builder.row(
         _btn("📢 Рассылка всем", callback_data="admin_broadcast", style="primary"),
         InlineKeyboardButton(text="📡 Обяз. каналы", callback_data="admin_channels", style="primary"),
     )
@@ -582,7 +585,6 @@ def admin_keyboard() -> InlineKeyboardMarkup:
     )
     builder.row(
         _btn("💳 Подписки", callback_data="admin_subscriptions", style="primary"),
-        _btn("🇷🇺 Platega", callback_data="admin_platega", style="primary"),
     )
     builder.row(
         _btn("📤 Экспорт БД", callback_data="admin_export_db", style="primary"),
@@ -592,6 +594,23 @@ def admin_keyboard() -> InlineKeyboardMarkup:
         _btn("🗑 Очистить мёртвые аккаунты", callback_data="admin_cleanup_accounts", style="danger"),
     )
     builder.row(_btn("◀️ Главное меню", callback_data="main_menu", style="primary"))
+    return builder.as_markup()
+
+
+def admin_sub_stats_keyboard() -> InlineKeyboardMarkup:
+    builder = InlineKeyboardBuilder()
+    builder.row(
+        _btn("💎 CryptoBot", callback_data="admin_sub_method:cryptobot", style="primary"),
+        _btn("💠 TON", callback_data="admin_sub_method:ton", style="primary"),
+    )
+    builder.row(_btn("🇷🇺 Platega (СБП)", callback_data="admin_sub_method:platega", style="primary"))
+    builder.row(_btn("◀️ Назад", callback_data="admin_back", style="primary"))
+    return builder.as_markup()
+
+
+def admin_sub_method_keyboard() -> InlineKeyboardMarkup:
+    builder = InlineKeyboardBuilder()
+    builder.row(_btn("◀️ Назад", callback_data="admin_sub_stats", style="primary"))
     return builder.as_markup()
 
 

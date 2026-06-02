@@ -36,8 +36,8 @@ class Config:
     SESSIONS_PATH: str = os.getenv("SESSIONS_PATH", "sessions")
 
     # Default Telegram API credentials (from official apps)
-    DEFAULT_API_ID: int = int(os.getenv("DEFAULT_API_ID", "2040"))
-    DEFAULT_API_HASH: str = os.getenv("DEFAULT_API_HASH", "b18441a1ff607e10a989891a5462e627")
+    DEFAULT_API_ID: int = int(os.getenv("DEFAULT_API_ID") or os.getenv("API_ID", "2040"))
+    DEFAULT_API_HASH: str = os.getenv("DEFAULT_API_HASH") or os.getenv("API_HASH", "b18441a1ff607e10a989891a5462e627")
 
 
 config = Config()

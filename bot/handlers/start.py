@@ -7,6 +7,10 @@ from ..database.db import Database
 from ..keyboards.inline import (
     main_menu_keyboard, back_to_menu_keyboard, channel_check_keyboard,
     accounts_keyboard, admin_keyboard, mailings_keyboard, help_keyboard,
+    account_menu_keyboard, mailing_menu_keyboard,
+    mailing_messages_keyboard, mailing_targets_keyboard,
+    mailing_creation_messages_keyboard, mailing_creation_targets_keyboard,
+    active_hours_keyboard, reply_mode_select_keyboard,
 )
 from ..config import config
 from ..utils.premium_emoji import pe
@@ -144,37 +148,93 @@ async def callback_help(callback: CallbackQuery, db: Database):
 @router.callback_query(F.data == "cancel")
 async def callback_cancel(callback: CallbackQuery, state: FSMContext, db: Database):
     current_state = await state.get_state()
+    data = await state.get_data()  # read BEFORE clear so mailing_id/account_id are available
     await state.clear()
     await callback.answer()
 
-    if current_state and any(x in current_state for x in ("AddAccount", "RenameAccount", "SetProxy", "Autoresponder")):
+    async def _edit(text, markup):
+        try:
+            await callback.message.edit_text(text, parse_mode="HTML", reply_markup=markup)
+        except Exception:
+            await callback.message.delete()
+            await callback.message.answer(text, parse_mode="HTML", reply_markup=markup)
+
+    if not current_state:
+        await _edit(pe("📋 <b>Главное меню</b>\n\nВыберите раздел:"), main_menu_keyboard())
+
+    # ── Accounts ──────────────────────────────────────────────────────────────
+    elif "AddAccount" in current_state:
+        client = data.get("client")
+        if client:
+            try:
+                await client.disconnect()
+            except Exception:
+                pass
         user = await db.get_user(callback.from_user.id)
         accounts = await db.get_user_accounts(user.id)
-        text = pe("👤 <b>Аккаунты</b>\n\nВыберите аккаунт или добавьте новый:")
-        try:
-            await callback.message.edit_text(text, parse_mode="HTML", reply_markup=accounts_keyboard(accounts))
-        except Exception:
-            await callback.message.delete()
-            await callback.message.answer(text, parse_mode="HTML", reply_markup=accounts_keyboard(accounts))
-    elif current_state and "Admin" in current_state:
-        text = pe("🔧 Админ-панель\n\nВыберите действие:")
-        try:
-            await callback.message.edit_text(text, parse_mode="HTML", reply_markup=admin_keyboard())
-        except Exception:
-            await callback.message.delete()
-            await callback.message.answer(text, parse_mode="HTML", reply_markup=admin_keyboard())
-    elif current_state and any(x in current_state for x in ("CreateMailing", "EditMailing")):
-        mailings = await db.get_user_mailings((await db.get_user(callback.from_user.id)).id)
-        text = pe("📋 <b>Рассылки</b>\n\nВыберите рассылку или создайте новую:")
-        try:
-            await callback.message.edit_text(text, parse_mode="HTML", reply_markup=mailings_keyboard(mailings))
-        except Exception:
-            await callback.message.delete()
-            await callback.message.answer(text, parse_mode="HTML", reply_markup=mailings_keyboard(mailings))
+        await _edit(pe("👤 <b>Аккаунты</b>\n\nВыберите аккаунт или добавьте новый:"), accounts_keyboard(accounts))
+
+    elif any(x in current_state for x in ("RenameAccount", "SetProxy", "Autoresponder")):
+        account_id = data.get("account_id")
+        account = await db.get_account(account_id) if account_id else None
+        if account:
+            await _edit(
+                pe(f"📱 Аккаунт: {account.display_name}\n\nВыберите действие:"),
+                account_menu_keyboard(account_id),
+            )
+        else:
+            user = await db.get_user(callback.from_user.id)
+            accounts = await db.get_user_accounts(user.id)
+            await _edit(pe("👤 <b>Аккаунты</b>\n\nВыберите аккаунт или добавьте новый:"), accounts_keyboard(accounts))
+
+    # ── Admin ──────────────────────────────────────────────────────────────────
+    elif "Admin" in current_state:
+        await _edit(pe("🔧 Админ-панель\n\nВыберите действие:"), admin_keyboard())
+
+    # ── EditMailing — повертаємо на 1 крок назад залежно від стану ─────────────
+    elif "EditMailing" in current_state:
+        mailing_id = data.get("mailing_id")
+        mailing = await db.get_mailing(mailing_id) if mailing_id else None
+        if mailing:
+            if any(x in current_state for x in ("waiting_message_text", "waiting_forward_message")):
+                messages = await db.get_mailing_messages(mailing_id)
+                await _edit(pe(f"📝 Сообщения рассылки «{mailing.name}»:"), mailing_messages_keyboard(mailing_id, messages))
+            elif any(x in current_state for x in ("waiting_target", "waiting_folder", "waiting_txt_file",
+                                                   "waiting_thread_id_for_target", "waiting_target_interval",
+                                                   "waiting_thread_id")):
+                targets = await db.get_mailing_targets(mailing_id)
+                await _edit(pe(f"🎯 Целевые чаты рассылки «{mailing.name}»:"), mailing_targets_keyboard(mailing_id, targets))
+            elif "waiting_reply_range" in current_state:
+                await _edit(pe("↩️ Режим ответной рассылки:"), reply_mode_select_keyboard(mailing_id))
+            else:  # waiting_hours або інший
+                await _edit(pe(f"📊 Рассылка: {mailing.name}\n\nВыберите действие:"), mailing_menu_keyboard(mailing))
+        else:
+            mailings = await db.get_user_mailings((await db.get_user(callback.from_user.id)).id)
+            await _edit(pe("📋 <b>Рассылки</b>\n\nВыберите рассылку или создайте новую:"), mailings_keyboard(mailings))
+
+    # ── CreateMailing — повертаємо на поточний крок wizard'у ───────────────────
+    elif "CreateMailing" in current_state:
+        mailing_id = data.get("mailing_id")
+        if mailing_id:
+            mailing = await db.get_mailing(mailing_id)
+            if mailing:
+                if any(x in current_state for x in ("waiting_message_text", "waiting_forward_message", "adding_messages")):
+                    messages = await db.get_mailing_messages(mailing_id)
+                    await _edit(pe(f"📝 Добавьте сообщения для «{mailing.name}»:"), mailing_creation_messages_keyboard(mailing_id, messages))
+                elif any(x in current_state for x in ("waiting_target", "waiting_folder", "waiting_txt_file", "adding_targets")):
+                    targets = await db.get_mailing_targets(mailing_id)
+                    await _edit(pe(f"🎯 Добавьте чаты для «{mailing.name}»:"), mailing_creation_targets_keyboard(mailing_id, targets))
+                elif "waiting_hours" in current_state:
+                    await _edit(pe(f"⏰ Настройка времени для «{mailing.name}»:"), active_hours_keyboard(mailing_id))
+                else:
+                    mailings = await db.get_user_mailings((await db.get_user(callback.from_user.id)).id)
+                    await _edit(pe("📋 <b>Рассылки</b>\n\nВыберите рассылку или создайте новую:"), mailings_keyboard(mailings))
+            else:
+                mailings = await db.get_user_mailings((await db.get_user(callback.from_user.id)).id)
+                await _edit(pe("📋 <b>Рассылки</b>\n\nВыберите рассылку или создайте новую:"), mailings_keyboard(mailings))
+        else:
+            mailings = await db.get_user_mailings((await db.get_user(callback.from_user.id)).id)
+            await _edit(pe("📋 <b>Рассылки</b>\n\nВыберите рассылку или создайте новую:"), mailings_keyboard(mailings))
+
     else:
-        text = pe("📋 <b>Главное меню</b>\n\nВыберите раздел:")
-        try:
-            await callback.message.edit_text(text, parse_mode="HTML", reply_markup=main_menu_keyboard())
-        except Exception:
-            await callback.message.delete()
-            await callback.message.answer(text, parse_mode="HTML", reply_markup=main_menu_keyboard())
+        await _edit(pe("📋 <b>Главное меню</b>\n\nВыберите раздел:"), main_menu_keyboard())

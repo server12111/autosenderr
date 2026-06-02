@@ -94,7 +94,7 @@ async def callback_sub_plan(
     has_ton = bool(config.TON_WALLET_ADDRESS and ton_service)
 
     if has_ton or show_platega:
-        lines = [f"💎 CryptoBot — {price} USDT"]
+        lines = [f"💎 CryptoBot — {round(price * 1.03, 2)} USDT (+3%)"]
         if has_ton:
             ton_amount = await ton_service.calculate_ton_amount(price)
             if ton_amount:
@@ -132,11 +132,12 @@ async def _create_cryptobot_subscription(
 
     user = await db.get_user(callback.from_user.id)
     price = await db.get_price(plan_days)
+    crypto_price = round(price * 1.03, 2)  # +3% processing fee
 
     await callback.message.edit_text(pe("⏳ Создаём платёж..."), parse_mode="HTML")
 
     invoice = await cryptobot.create_invoice(
-        amount=price,
+        amount=crypto_price,
         currency=config.SUBSCRIPTION_CURRENCY,
         description=f"Подписка на бота рассылок ({plan_days} дней)",
         expires_in=3600,
@@ -156,7 +157,7 @@ async def _create_cryptobot_subscription(
     await db.create_payment(
         user_id=user.id,
         invoice_id=invoice.invoice_id,
-        amount=invoice.amount,
+        amount=price,
         currency=invoice.currency,
         plan_days=plan_days,
     )
@@ -170,7 +171,7 @@ async def _create_cryptobot_subscription(
     )
 
     await callback.message.edit_text(
-        text, parse_mode="HTML", reply_markup=payment_keyboard(invoice.pay_url, invoice.invoice_id)
+        text, parse_mode="HTML", reply_markup=payment_keyboard(invoice.pay_url, invoice.invoice_id, plan_days)
     )
 
 
@@ -219,7 +220,7 @@ async def callback_pay_ton(
     )
 
     await callback.message.edit_text(
-        text, reply_markup=ton_payment_keyboard(pay_url, comment)
+        text, reply_markup=ton_payment_keyboard(pay_url, comment, plan_days)
     )
     await callback.answer()
 
@@ -258,7 +259,7 @@ async def callback_check_ton_payment(
             pe(f"✅ Оплата получена!\n\n"
             f"Ваша подписка активна до {new_end.strftime('%d.%m.%Y %H:%M')}"),
             parse_mode="HTML",
-            reply_markup=main_menu_keyboard(),
+            reply_markup=subscription_keyboard(True),
         )
         await callback.answer("Оплата получена!")
     else:
@@ -302,7 +303,7 @@ async def callback_check_payment(
             pe(f"✅ Оплата получена!\n\n"
             f"Ваша подписка активна до {new_end.strftime('%d.%m.%Y %H:%M')}"),
             parse_mode="HTML",
-            reply_markup=main_menu_keyboard(),
+            reply_markup=subscription_keyboard(True),
         )
         await callback.answer("Оплата получена!")
     else:
@@ -365,7 +366,7 @@ async def callback_pay_platega(
     )
     await callback.message.edit_text(
         text, parse_mode="HTML",
-        reply_markup=platega_payment_keyboard(invoice["payment_url"], transaction_id),
+        reply_markup=platega_payment_keyboard(invoice["payment_url"], transaction_id, plan_days),
     )
     await callback.answer()
 
@@ -408,7 +409,7 @@ async def callback_check_platega_payment(
             pe(f"✅ Оплата через СБП получена!\n\n"
             f"Ваша подписка активна до {new_end.strftime('%d.%m.%Y %H:%M')}"),
             parse_mode="HTML",
-            reply_markup=main_menu_keyboard(),
+            reply_markup=subscription_keyboard(True),
         )
         await callback.answer("Оплата получена!")
     else:
@@ -496,7 +497,7 @@ async def process_promocode(message: Message, state: FSMContext, db: Database):
         f"Добавлено дней: {promo.duration_days}\n"
         f"Подписка активна до: {new_end.strftime('%d.%m.%Y %H:%M')}"),
         parse_mode="HTML",
-        reply_markup=main_menu_keyboard(),
+        reply_markup=subscription_keyboard(True),
     )
 
 

@@ -261,6 +261,20 @@ class Database:
         """)
         await self._conn.commit()
 
+        # Seed default subscription prices if not set
+        for plan_days, default_price in [(7, 1.0), (30, 3.0)]:
+            key = f"price_{plan_days}d"
+            async with self._conn.execute(
+                "SELECT value FROM settings WHERE key = ?", (key,)
+            ) as cur:
+                row = await cur.fetchone()
+            if not row:
+                await self._conn.execute(
+                    "INSERT OR IGNORE INTO settings (key, value) VALUES (?, ?)",
+                    (key, str(default_price)),
+                )
+        await self._conn.commit()
+
     async def close(self):
         if self._conn:
             await self._conn.close()
@@ -880,6 +894,37 @@ class Database:
             rows = await cur.fetchall()
         totals["recent"] = [dict(r) for r in rows]
         return totals
+
+    async def get_payment_method_stats(self, method: str) -> dict:
+        """Stats for a specific payment method: today/yesterday/week/month/total."""
+        async with self._conn.execute("""
+            SELECT
+                COUNT(CASE WHEN date(paid_at) = date('now') THEN 1 END)                          AS today_count,
+                COALESCE(SUM(CASE WHEN date(paid_at) = date('now') THEN amount END), 0)           AS today_amount,
+                COUNT(CASE WHEN date(paid_at) = date('now', '-1 day') THEN 1 END)                AS yesterday_count,
+                COALESCE(SUM(CASE WHEN date(paid_at) = date('now', '-1 day') THEN amount END), 0) AS yesterday_amount,
+                COUNT(CASE WHEN paid_at >= date('now', '-7 days') THEN 1 END)                    AS week_count,
+                COALESCE(SUM(CASE WHEN paid_at >= date('now', '-7 days') THEN amount END), 0)     AS week_amount,
+                COUNT(CASE WHEN paid_at >= date('now', 'start of month') THEN 1 END)             AS month_count,
+                COALESCE(SUM(CASE WHEN paid_at >= date('now', 'start of month') THEN amount END), 0) AS month_amount,
+                COUNT(*)                                                                           AS total_count,
+                COALESCE(SUM(amount), 0)                                                           AS total_amount
+            FROM payments
+            WHERE payment_method = ? AND status = 'paid'
+        """, (method,)) as cur:
+            row = await cur.fetchone()
+        return {
+            "today_count":     int(row["today_count"] or 0),
+            "today_amount":    float(row["today_amount"] or 0),
+            "yesterday_count": int(row["yesterday_count"] or 0),
+            "yesterday_amount":float(row["yesterday_amount"] or 0),
+            "week_count":      int(row["week_count"] or 0),
+            "week_amount":     float(row["week_amount"] or 0),
+            "month_count":     int(row["month_count"] or 0),
+            "month_amount":    float(row["month_amount"] or 0),
+            "total_count":     int(row["total_count"] or 0),
+            "total_amount":    float(row["total_amount"] or 0),
+        }
 
     async def get_revenue_by_currency(self) -> dict:
         async with self._conn.execute(

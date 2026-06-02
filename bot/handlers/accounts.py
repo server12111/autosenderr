@@ -95,6 +95,31 @@ async def callback_account_menu(callback: CallbackQuery, db: Database):
     await callback.answer()
 
 
+@router.callback_query(F.data == "account_payment_methods")
+async def callback_account_payment_methods(callback: CallbackQuery, db: Database):
+    if config.TON_WALLET_ADDRESS:
+        ton_service_instance = TonPaymentService(config.TON_WALLET_ADDRESS, config.TONCENTER_API_KEY)
+        ton_amount = await ton_service_instance.calculate_ton_amount(config.EXTRA_ACCOUNT_PRICE)
+        ton_text = (
+            f"💠 TON — ~{ton_amount} TON (≈ {config.EXTRA_ACCOUNT_PRICE} USDT)"
+            if ton_amount
+            else f"💠 TON — ≈ {config.EXTRA_ACCOUNT_PRICE} USDT в TON"
+        )
+        text = pe(
+            f"➕ Добавление аккаунта\n\n"
+            f"⚠️ Вы достигли лимита бесплатных аккаунтов.\n\n"
+            f"Выберите способ оплаты:\n\n"
+            f"💎 CryptoBot — {config.EXTRA_ACCOUNT_PRICE} {config.SUBSCRIPTION_CURRENCY}\n"
+            f"{ton_text}"
+        )
+        await callback.message.edit_text(
+            text, parse_mode="HTML", reply_markup=account_payment_method_keyboard()
+        )
+        await callback.answer()
+    else:
+        await callback_accounts(callback, db)
+
+
 @router.callback_query(F.data == "add_account")
 async def callback_add_account(callback: CallbackQuery, state: FSMContext, db: Database):
     user = await db.get_user(callback.from_user.id)
@@ -435,32 +460,42 @@ async def process_phone(
     await state.update_data(phone=phone)
     data = await state.get_data()
 
-    await message.answer(pe("⏳ Отправляем код на телефон..."), parse_mode="HTML")
+    if data.get("proxy"):
+        status_msg = await message.answer(
+            pe("⏳ Подключаемся через прокси...\n<i>Это может занять до 60 секунд</i>"),
+            parse_mode="HTML",
+        )
+    else:
+        status_msg = await message.answer(pe("⏳ Отправляем код на телефон..."), parse_mode="HTML")
 
     from telethon import TelegramClient
     from telethon.sessions import StringSession
 
-    device = _DEVICE_POOL[abs(hash(phone)) % len(_DEVICE_POOL)]
-    client = TelegramClient(
-        StringSession(), data["api_id"], data["api_hash"],
-        proxy=_parse_proxy(data.get("proxy")),
-        device_model=device["device_model"],
-        system_version=device["system_version"],
-        app_version=device["app_version"],
-        lang_code="uk",
-        system_lang_code="uk-UA",
-        connection_retries=1,
-        retry_delay=1,
-        timeout=15,
-    )
-
+    has_proxy = bool(data.get("proxy"))
+    client = None
     try:
-        await asyncio.wait_for(client.connect(), timeout=20)
+        device = _DEVICE_POOL[abs(hash(phone)) % len(_DEVICE_POOL)]
+        client = TelegramClient(
+            StringSession(), data["api_id"], data["api_hash"],
+            proxy=_parse_proxy(data.get("proxy")),
+            device_model=device["device_model"],
+            system_version=device["system_version"],
+            app_version=device["app_version"],
+            lang_code="uk",
+            system_lang_code="uk-UA",
+            connection_retries=3 if has_proxy else 1,
+            retry_delay=2,
+            timeout=30 if has_proxy else 15,
+        )
+
+        connect_timeout = 60 if has_proxy else 20
+        await asyncio.wait_for(client.connect(), timeout=connect_timeout)
 
         sent = await asyncio.wait_for(client.send_code_request(phone), timeout=30)
 
         await state.update_data(client=client, entered_code="", phone_code_hash=sent.phone_code_hash)
 
+        await status_msg.delete()
         await message.answer(
             pe("📱 Код отправлен!\n\n"
             "📲 Проверьте приложение Telegram на других ваших устройствах или Telegram Web — "
@@ -473,16 +508,20 @@ async def process_phone(
         await state.set_state(AddAccountStates.waiting_code)
 
     except asyncio.TimeoutError:
-        await client.disconnect()
+        if client:
+            await client.disconnect()
+        await status_msg.delete()
         await message.answer(
-            pe("❌ Превышено время ожидания (30 сек).\n\n"
+            pe("❌ Превышено время ожидания.\n\n"
             "Telegram не отвечает. Проверьте интернет-соединение или прокси и попробуйте снова."),
             parse_mode="HTML",
             reply_markup=main_menu_keyboard(),
         )
         await state.clear()
     except Exception as e:
-        await client.disconnect()
+        if client:
+            await client.disconnect()
+        await status_msg.delete()
         err = str(e)
         if "Connection to Telegram failed" in err or "ConnectionError" in type(e).__name__:
             msg = pe(
@@ -548,19 +587,23 @@ async def process_password(message: Message, state: FSMContext, db: Database):
         if proxy_str and account_id:
             await db.update_account_proxy(account_id, proxy_str)
 
+        user = await db.get_user(message.from_user.id)
+        accounts = await db.get_user_accounts(user.id)
         await message.answer(
             pe(f"✅ Аккаунт {data['phone']} успешно добавлен!"),
             parse_mode="HTML",
-            reply_markup=main_menu_keyboard(),
+            reply_markup=accounts_keyboard(accounts),
         )
         await state.clear()
 
     except Exception as e:
         await client.disconnect()
+        user = await db.get_user(message.from_user.id)
+        accounts = await db.get_user_accounts(user.id)
         await message.answer(
             pe(f"❌ Ошибка авторизации: {e}"),
             parse_mode="HTML",
-            reply_markup=main_menu_keyboard(),
+            reply_markup=accounts_keyboard(accounts),
         )
         await state.clear()
 
@@ -705,10 +748,12 @@ async def callback_code_confirm(callback: CallbackQuery, state: FSMContext, db: 
         if proxy_str and account_id:
             await db.update_account_proxy(account_id, proxy_str)
 
+        user = await db.get_user(callback.from_user.id)
+        accounts = await db.get_user_accounts(user.id)
         await callback.message.edit_text(
             pe(f"✅ Аккаунт {data['phone']} успешно добавлен!"),
             parse_mode="HTML",
-            reply_markup=main_menu_keyboard(),
+            reply_markup=accounts_keyboard(accounts),
         )
         await state.clear()
 
@@ -723,10 +768,12 @@ async def callback_code_confirm(callback: CallbackQuery, state: FSMContext, db: 
             )
         else:
             await client.disconnect()
+            user = await db.get_user(callback.from_user.id)
+            accounts = await db.get_user_accounts(user.id)
             await callback.message.edit_text(
                 pe(f"❌ Ошибка авторизации: {e}"),
                 parse_mode="HTML",
-                reply_markup=main_menu_keyboard(),
+                reply_markup=accounts_keyboard(accounts),
             )
             await state.clear()
 
@@ -762,10 +809,12 @@ async def callback_confirm_delete_account(
 
     await db.delete_account(account_id)
 
+    user = await db.get_user(callback.from_user.id)
+    accounts = await db.get_user_accounts(user.id)
     await callback.message.edit_text(
         pe("✅ Аккаунт удалён"),
         parse_mode="HTML",
-        reply_markup=main_menu_keyboard(),
+        reply_markup=accounts_keyboard(accounts),
     )
     await callback.answer()
 

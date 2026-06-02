@@ -224,7 +224,8 @@ async def callback_mailings(callback: CallbackQuery, db: Database):
 
 
 @router.callback_query(F.data.startswith("mailing:"))
-async def callback_mailing_menu(callback: CallbackQuery, db: Database):
+async def callback_mailing_menu(callback: CallbackQuery, db: Database, state: FSMContext):
+    await state.clear()
     mailing_id = int(callback.data.split(":")[1])
     mailing = await db.get_mailing(mailing_id)
 
@@ -937,10 +938,11 @@ async def process_edit_hours(message: Message, state: FSMContext, db: Database):
     if text in ("сброс", "reset", "24/7"):
         await db.update_mailing_active_hours(mailing_id, None)
         await state.clear()
+        mailing = await db.get_mailing(mailing_id)
         await message.answer(
             pe("✅ Время активности сброшено (24/7)"),
             parse_mode="HTML",
-            reply_markup=main_menu_keyboard(),
+            reply_markup=mailing_menu_keyboard(mailing) if mailing else main_menu_keyboard(),
         )
         return
 
@@ -962,10 +964,11 @@ async def process_edit_hours(message: Message, state: FSMContext, db: Database):
     await db.update_mailing_active_hours(mailing_id, active_hours_json)
     await state.clear()
 
+    mailing = await db.get_mailing(mailing_id)
     await message.answer(
         pe(f"✅ Время активности обновлено: {format_active_hours(active_hours_json)}"),
         parse_mode="HTML",
-        reply_markup=main_menu_keyboard(),
+        reply_markup=mailing_menu_keyboard(mailing) if mailing else main_menu_keyboard(),
     )
 
 
@@ -995,10 +998,12 @@ async def callback_confirm_delete_mailing(
 
     await mailing_service.delete_mailing(mailing_id)
 
+    user = await db.get_user(callback.from_user.id)
+    mailings = await db.get_user_mailings(user.id)
     await callback.message.edit_text(
         pe("✅ Рассылка удалена"),
         parse_mode="HTML",
-        reply_markup=main_menu_keyboard(),
+        reply_markup=mailings_keyboard(mailings),
     )
     await callback.answer()
 
@@ -1681,10 +1686,11 @@ async def callback_launch_mailing(
     success = await mailing_service.start_mailing(mailing_id)
 
     if success:
+        mailing = await db.get_mailing(mailing_id)
         await callback.message.edit_text(
             pe("🚀 Рассылка запущена!"),
             parse_mode="HTML",
-            reply_markup=main_menu_keyboard(),
+            reply_markup=mailing_menu_keyboard(mailing) if mailing else main_menu_keyboard(),
         )
         await callback.answer("Рассылка запущена!")
     else:
@@ -1848,10 +1854,12 @@ async def callback_cancel_creation(
     await db.delete_mailing(mailing_id)
     await state.clear()
 
+    user = await db.get_user(callback.from_user.id)
+    mailings = await db.get_user_mailings(user.id)
     await callback.message.edit_text(
         pe("❌ Создание рассылки отменено"),
         parse_mode="HTML",
-        reply_markup=main_menu_keyboard(),
+        reply_markup=mailings_keyboard(mailings),
     )
     await callback.answer()
 

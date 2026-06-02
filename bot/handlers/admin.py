@@ -24,6 +24,8 @@ from ..keyboards.inline import (
     admin_settings_keyboard,
     admin_channels_keyboard,
     admin_withdrawals_keyboard,
+    admin_sub_stats_keyboard,
+    admin_sub_method_keyboard,
     cancel_keyboard,
     main_menu_keyboard,
     promo_subscription_keyboard,
@@ -165,6 +167,73 @@ async def callback_admin_stats_period(callback: CallbackQuery, db: Database, bot
         return
     await callback.answer()
     await _send_stats(callback, db, period, bot)
+
+
+@router.callback_query(F.data == "admin_sub_stats")
+async def callback_admin_sub_stats(callback: CallbackQuery, db: Database):
+    if not is_admin(callback.from_user.id):
+        await callback.answer("Нет доступа", show_alert=True)
+        return
+
+    cb, ton, plat = await db.get_payment_method_stats("cryptobot"), \
+                    await db.get_payment_method_stats("ton"), \
+                    await db.get_payment_method_stats("platega")
+
+    text = pe(
+        "💳 <b>Статистика подписок</b>\n\n"
+        "<b>За неделю:</b>\n"
+        f"  💎 CryptoBot: {cb['week_count']} шт. — {cb['week_amount']:.2f} USDT\n"
+        f"  💠 TON:        {ton['week_count']} шт. — {ton['week_amount']:.2f} TON\n"
+        f"  🇷🇺 Platega:  {plat['week_count']} шт. — {plat['week_amount']:.0f} ₽\n\n"
+        "<b>За месяц:</b>\n"
+        f"  💎 CryptoBot: {cb['month_count']} шт. — {cb['month_amount']:.2f} USDT\n"
+        f"  💠 TON:        {ton['month_count']} шт. — {ton['month_amount']:.2f} TON\n"
+        f"  🇷🇺 Platega:  {plat['month_count']} шт. — {plat['month_amount']:.0f} ₽\n\n"
+        "<b>Всего:</b>\n"
+        f"  💎 CryptoBot: {cb['total_count']} шт. — {cb['total_amount']:.2f} USDT\n"
+        f"  💠 TON:        {ton['total_count']} шт. — {ton['total_amount']:.2f} TON\n"
+        f"  🇷🇺 Platega:  {plat['total_count']} шт. — {plat['total_amount']:.0f} ₽"
+    )
+
+    await callback.message.edit_text(text, parse_mode="HTML", reply_markup=admin_sub_stats_keyboard())
+    await callback.answer()
+
+
+_METHOD_LABELS = {
+    "cryptobot": ("💎 CryptoBot", "USDT", ".2f"),
+    "ton":       ("💠 TON",       "TON",  ".2f"),
+    "platega":   ("🇷🇺 Platega (СБП)", "₽", ".0f"),
+}
+
+
+@router.callback_query(F.data.startswith("admin_sub_method:"))
+async def callback_admin_sub_method(callback: CallbackQuery, db: Database):
+    if not is_admin(callback.from_user.id):
+        await callback.answer("Нет доступа", show_alert=True)
+        return
+
+    method = callback.data.split(":")[1]
+    if method not in _METHOD_LABELS:
+        await callback.answer()
+        return
+
+    label, currency, fmt = _METHOD_LABELS[method]
+    s = await db.get_payment_method_stats(method)
+
+    def _line(count, amount):
+        return f"{count} шт. — {amount:{fmt}} {currency}"
+
+    text = pe(
+        f"{label} — <b>статистика подписок</b>\n\n"
+        f"Сегодня:    {_line(s['today_count'],     s['today_amount'])}\n"
+        f"Вчера:      {_line(s['yesterday_count'], s['yesterday_amount'])}\n"
+        f"За неделю:  {_line(s['week_count'],      s['week_amount'])}\n"
+        f"За месяц:   {_line(s['month_count'],     s['month_amount'])}\n"
+        f"Всего:      {_line(s['total_count'],     s['total_amount'])}"
+    )
+
+    await callback.message.edit_text(text, parse_mode="HTML", reply_markup=admin_sub_method_keyboard())
+    await callback.answer()
 
 
 @router.callback_query(F.data == "admin_broadcast")
