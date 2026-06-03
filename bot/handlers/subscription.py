@@ -19,7 +19,7 @@ from ..keyboards.inline import (
     back_to_menu_keyboard,
 )
 from ..config import config
-from ..services import CryptoBotService, TonPaymentService, PlategaService
+from ..services import CryptoBotService, TonPaymentService, PlategaService, get_usd_uah_rate
 from ..utils.premium_emoji import pe
 
 router = Router()
@@ -508,18 +508,19 @@ async def callback_pay_card(callback: CallbackQuery, state: FSMContext, db: Data
 
     manager = await db.get_setting("card_manager_username") or "autosenderkarta"
     price_usdt = await db.get_price(plan_days)
-    price_with_fee = round(price_usdt * 1.08, 2)
+    uah_rate = await get_usd_uah_rate()
+    price_uah = round(price_usdt * uah_rate)
 
     await callback.message.edit_text(
-        pe(f"💳 Оплата картой / рублями\n\n"
+        pe(f"🇺🇦 Оплата картой (грн)\n\n"
         f"📅 Срок: {plan_days} дней\n"
-        f"💰 Сумма: {price_usdt} USDT + 8% комиссия = <b>{price_with_fee} USDT</b>\n\n"
-        "Принимаем оплату в гривнах и рублях.\n"
+        f"💰 Сумма: <b>~{price_uah} ₴</b>\n\n"
+        "Принимаем оплату только в гривнах (UAH).\n"
         "Напишите нашему менеджеру:\n\n"
         f"👤 Менеджер: @{manager}\n\n"
         "📌 Как это работает:\n"
         "1. Напишите менеджеру, что хотите оплатить подписку\n"
-        "2. Менеджер отправит вам реквизиты для перевода\n"
+        "2. Менеджер отправит реквизиты для перевода\n"
         "3. После оплаты отправьте скриншот чека менеджеру\n"
         "4. Подписка будет активирована в течение нескольких минут\n\n"
         "⏰ Время работы менеджера: ежедневно с 9:00 до 23:00"),

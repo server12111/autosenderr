@@ -67,6 +67,36 @@ class Invoice:
     status: str
 
 
+_uah_rate_cache: Optional[float] = None
+_uah_rate_cache_at: float = 0
+_UAH_CACHE_TTL: float = 3600
+
+
+async def get_usd_uah_rate() -> float:
+    """Fetch USD/UAH rate from NBU API. Cached 1h. Fallback: 41.0"""
+    import time as _time
+    global _uah_rate_cache, _uah_rate_cache_at
+    now = _time.time()
+    if _uah_rate_cache and (now - _uah_rate_cache_at) < _UAH_CACHE_TTL:
+        return _uah_rate_cache
+    try:
+        ssl_ctx = ssl.create_default_context(cafile=certifi.where())
+        connector = aiohttp.TCPConnector(ssl=ssl_ctx)
+        async with aiohttp.ClientSession(connector=connector) as session:
+            async with session.get(
+                "https://bank.gov.ua/NBUStatService/v1/statdirectory/exchange?valcode=USD&json",
+                timeout=aiohttp.ClientTimeout(total=10),
+            ) as resp:
+                data = await resp.json(content_type=None)
+                rate = float(data[0]["rate"])
+                _uah_rate_cache = rate
+                _uah_rate_cache_at = now
+                return rate
+    except Exception as e:
+        logging.warning(f"NBU UAH rate fetch failed: {e}")
+        return _uah_rate_cache or 41.0
+
+
 @dataclass
 class CryptoBotError:
     code: str
