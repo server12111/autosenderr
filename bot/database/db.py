@@ -115,6 +115,7 @@ class MailingTarget:
     last_sent_at: Optional[datetime] = None
     thread_id: Optional[int] = None
     is_forum: bool = False
+    last_account_id: Optional[int] = None
 
 
 @dataclass
@@ -235,8 +236,9 @@ class Database:
         await _add_col("promocodes", "uses_count",      "INTEGER NOT NULL DEFAULT 0")
         await _add_col("promocodes", "is_subscription", "INTEGER DEFAULT 0")
         # mailing_targets — topics support
-        await _add_col("mailing_targets", "thread_id", "INTEGER DEFAULT NULL")
-        await _add_col("mailing_targets", "is_forum",  "INTEGER DEFAULT 0")
+        await _add_col("mailing_targets", "thread_id",       "INTEGER DEFAULT NULL")
+        await _add_col("mailing_targets", "is_forum",        "INTEGER DEFAULT 0")
+        await _add_col("mailing_targets", "last_account_id", "INTEGER DEFAULT NULL")
         # mailings — keep targets on ban
         await _add_col("mailings", "keep_targets_on_ban", "INTEGER DEFAULT 0")
         # mailings — account rotation mode for multi-account mailings
@@ -763,6 +765,7 @@ class Database:
                     last_sent_at=self._parse_datetime(r["last_sent_at"]) if "last_sent_at" in keys else None,
                     thread_id=r["thread_id"] if "thread_id" in keys else None,
                     is_forum=bool(r["is_forum"]) if "is_forum" in keys else False,
+                    last_account_id=r["last_account_id"] if "last_account_id" in keys else None,
                 ))
             return result
 
@@ -791,10 +794,10 @@ class Database:
         )
         await self._conn.commit()
 
-    async def update_target_last_sent(self, target_id: int):
+    async def update_target_last_sent(self, target_id: int, account_id: Optional[int] = None):
         await self._conn.execute(
-            "UPDATE mailing_targets SET last_sent_at = ? WHERE id = ?",
-            (datetime.utcnow().isoformat(), target_id),
+            "UPDATE mailing_targets SET last_sent_at = ?, last_account_id = ? WHERE id = ?",
+            (datetime.utcnow().isoformat(), account_id, target_id),
         )
         await self._conn.commit()
 

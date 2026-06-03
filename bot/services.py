@@ -6,7 +6,7 @@ import random
 import re
 import ssl
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Optional, Callable
 
 from telethon.errors import (
@@ -708,7 +708,7 @@ class MailingService:
         self.userbot_manager = userbot_manager
         self._tasks: dict[int, asyncio.Task] = {}
         self._running = False
-        self._account_indices: dict[int, int] = {}
+        self._stagger_until: dict[int, dict[int, datetime]] = {}  # mailing_id -> {target_id -> first_send_allowed_at}
         self._me_cache: dict[int, object] = {}  # account_id -> me object, avoids get_me() every loop
 
     async def start(self):
@@ -743,7 +743,7 @@ class MailingService:
         if mailing_id in self._tasks:
             self._tasks[mailing_id].cancel()
             del self._tasks[mailing_id]
-        self._account_indices.pop(mailing_id, None)
+        self._stagger_until.pop(mailing_id, None)
 
     async def stop_user_mailings(self, user_id: int):
         """Stop all active mailings for a user (called when subscription expires)."""
@@ -796,6 +796,18 @@ class MailingService:
     async def _start_mailing_task(self, mailing_id: int):
         if mailing_id in self._tasks:
             self._tasks[mailing_id].cancel()
+        # Init stagger: targets that have never sent start with offset so they don't all fire at once
+        mailing = await self.db.get_mailing(mailing_id)
+        if mailing:
+            targets = await self.db.get_mailing_targets(mailing_id)
+            virgin = [t for t in targets if t.last_sent_at is None]
+            if virgin:
+                stagger_delay = min(30, mailing.interval_seconds // max(len(targets), 1))
+                now = datetime.utcnow()
+                self._stagger_until[mailing_id] = {
+                    t.id: now + timedelta(seconds=i * stagger_delay)
+                    for i, t in enumerate(virgin)
+                }
         task = asyncio.create_task(self._mailing_loop(mailing_id))
         self._tasks[mailing_id] = task
 
@@ -819,9 +831,7 @@ class MailingService:
                         await asyncio.sleep(60)
                         continue
 
-                    rotation_mode = mailing.account_rotation_mode  # 'per_target' or 'per_cycle'
-
-                    # Always resolve main client first
+                    # Resolve main client
                     client = await self.userbot_manager.get_client(mailing.account_id)
                     if not client:
                         await asyncio.sleep(60)
@@ -842,64 +852,66 @@ class MailingService:
                     sent_any = False
                     me = await client.get_me()
 
-                    # Build pool: main account first, then extra accounts
-                    # Cache me objects — only re-fetch if not yet cached for this account
+                    # Build ordered pool: main account first, then extra accounts (insertion order)
                     extra_accounts = await self.db.get_mailing_extra_accounts(mailing_id)
-                    pool_clients: list[tuple] = []  # list of (account_id, client, me)
-                    if extra_accounts:
-                        pool_clients.append((mailing.account_id, client, me))
-                        for pool_acc in extra_accounts:
-                            pc = await self.userbot_manager.get_client(pool_acc.id)
-                            if pc:
-                                if not pc.is_connected():
-                                    try:
-                                        await pc.connect()
-                                    except Exception:
-                                        continue
-                                # Use cached me if available, only call get_me() once per account
-                                if pool_acc.id not in self._me_cache:
-                                    try:
-                                        self._me_cache[pool_acc.id] = await pc.get_me()
-                                    except Exception:
-                                        continue
-                                pool_clients.append((pool_acc.id, pc, self._me_cache[pool_acc.id]))
-                    # pool_clients has 2+ entries only when extra accounts exist and at least one connected
-                    account_pool = pool_clients if len(pool_clients) > 1 else None
+                    pool_ids: list[int] = [mailing.account_id] + [a.id for a in extra_accounts]
 
-                    # per_cycle: pick one account for the entire iteration over all targets
-                    if account_pool and rotation_mode == "per_cycle":
-                        cycle_idx = self._account_indices.get(mailing_id, 0)
-                        cycle_account_id, cycle_client, cycle_me = pool_clients[cycle_idx % len(pool_clients)]
-                        self._account_indices[mailing_id] = cycle_idx + 1
-                    else:
-                        cycle_account_id, cycle_client, cycle_me = None, None, None
+                    # Connect all pool members, build client map and fallback list
+                    pool_clients: list[tuple] = [(mailing.account_id, client, me)]
+                    client_map: dict[int, tuple] = {mailing.account_id: (client, me)}
+                    for pool_acc in extra_accounts:
+                        pc = await self.userbot_manager.get_client(pool_acc.id)
+                        if not pc:
+                            continue
+                        if not pc.is_connected():
+                            try:
+                                await pc.connect()
+                            except Exception:
+                                continue
+                        if pool_acc.id not in self._me_cache:
+                            try:
+                                self._me_cache[pool_acc.id] = await pc.get_me()
+                            except Exception:
+                                continue
+                        pc_me = self._me_cache[pool_acc.id]
+                        pool_clients.append((pool_acc.id, pc, pc_me))
+                        client_map[pool_acc.id] = (pc, pc_me)
 
-                    # per_target: base offset shifts +1 each full iteration so every account advances one chat
-                    pt_base = self._account_indices.get(mailing_id, 0) if (account_pool and rotation_mode == "per_target") else 0
-                    pt_send_idx = 0
-
-                    for target_obj in targets:
-                        # Each target uses its own interval or falls back to mailing default
+                    for target_idx, target_obj in enumerate(targets):
+                        # Interval check per target
                         target_interval = target_obj.interval_seconds or mailing.interval_seconds
                         if target_obj.last_sent_at is not None:
                             elapsed = (now - target_obj.last_sent_at).total_seconds()
                             if elapsed < target_interval:
                                 logger.debug(f"Mailing {mailing_id}: {target_obj.chat_identifier} — interval not elapsed ({elapsed:.0f}/{target_interval}s), skip")
-                                continue  # Not due yet for this target
+                                continue
 
-                        # Resolve client for this target (after interval check to not waste rotation slots)
-                        if cycle_client:
-                            # per_cycle: same account for all targets
-                            current_account_id = cycle_account_id
-                            target_client = cycle_client
-                            target_me = cycle_me
-                        elif account_pool and pool_clients and rotation_mode == "per_target":
-                            # per_target: account = pool[(send_idx - base) % N]
-                            # → each account advances one chat per iteration
-                            acc_idx = (pt_send_idx - pt_base) % len(pool_clients)
-                            target_account_id, target_client, target_me = pool_clients[acc_idx]
-                            current_account_id = target_account_id
-                            # pt_send_idx increments AFTER activity check (below) to not waste slots
+                        # Stagger: new targets wait their offset before first send
+                        if target_obj.last_sent_at is None:
+                            stagger_ready = self._stagger_until.get(mailing_id, {}).get(target_obj.id, datetime.min)
+                            if now < stagger_ready:
+                                continue
+
+                        # Per-target rotation: pick next account in pool after the one that sent last
+                        if len(pool_ids) > 1:
+                            last_acc = target_obj.last_account_id
+                            if last_acc is None or last_acc not in pool_ids:
+                                # First send: start offset by chat position
+                                next_idx = target_idx % len(pool_ids)
+                            else:
+                                next_idx = (pool_ids.index(last_acc) + 1) % len(pool_ids)
+                            # Find first connected account starting from next_idx
+                            current_account_id = None
+                            target_client = None
+                            target_me = None
+                            for i in range(len(pool_ids)):
+                                cid = pool_ids[(next_idx + i) % len(pool_ids)]
+                                if cid in client_map:
+                                    current_account_id = cid
+                                    target_client, target_me = client_map[cid]
+                                    break
+                            if not target_client:
+                                continue
                         else:
                             current_account_id = mailing.account_id
                             target_client = client
@@ -915,10 +927,6 @@ class MailingService:
                             if not has_activity:
                                 logger.info(f"Mailing {mailing_id}: no activity in {target} since last send, skipping")
                                 continue
-
-                        # Consume the per_target rotation slot only for targets that will actually send
-                        if account_pool and pool_clients and rotation_mode == "per_target":
-                            pt_send_idx += 1
 
                         msg = random.choice(messages)
                         pm = msg.parse_mode or 'html'
@@ -946,7 +954,7 @@ class MailingService:
                         try:
                             await self._send_msg(target_client, target, msg, pm, reply_to=reply_to_id)
                             logger.info(f"Mailing {mailing_id} sent to {target} via account {current_account_id}")
-                            await self.db.update_target_last_sent(target_obj.id)
+                            await self.db.update_target_last_sent(target_obj.id, current_account_id)
                             sent_any = True
                         except _BAN_ERRORS as e:
                             await self._handle_mailing_ban(mailing_id, current_account_id, e)
@@ -970,7 +978,7 @@ class MailingService:
                                     try:
                                         await self._send_msg(fb_client, target, msg, pm, reply_to=reply_to_id)
                                         logger.info(f"Mailing {mailing_id}: FloodWait fallback → account {fb_id} → {target}")
-                                        await self.db.update_target_last_sent(target_obj.id)
+                                        await self.db.update_target_last_sent(target_obj.id, fb_id)
                                         sent_any = True
                                         fallback_sent = True
                                         break
@@ -994,7 +1002,7 @@ class MailingService:
                                         try:
                                             await self._send_msg(fb_client, target, msg, pm, reply_to=reply_to_id)
                                             logger.info(f"Mailing {mailing_id}: PEER_FLOOD fallback → account {fb_id} → {target}")
-                                            await self.db.update_target_last_sent(target_obj.id)
+                                            await self.db.update_target_last_sent(target_obj.id, fb_id)
                                             sent_any = True
                                             fallback_sent = True
                                             break
@@ -1007,10 +1015,6 @@ class MailingService:
                                 logger.error(f"Error sending mailing {mailing_id} to {target}: {e}")
 
                         await asyncio.sleep(3)
-
-                    # per_target: shift base by +1 only if at least one send happened
-                    if account_pool and rotation_mode == "per_target" and pool_clients and pt_send_idx > 0:
-                        self._account_indices[mailing_id] = pt_base + 1
 
                     if sent_any:
                         await self.db.update_mailing_last_sent(mailing_id)
@@ -1095,7 +1099,7 @@ class MailingService:
 
         try:
             await self._send_msg(client, target, msg, pm, reply_to=reply_to)
-            await self.db.update_target_last_sent(target_obj.id)
+            await self.db.update_target_last_sent(target_obj.id, account_id)
             logger.info(f"Mailing {mailing_id}: sent to '{target}' after auto-join")
             return True
         except ChatWriteForbiddenError:
