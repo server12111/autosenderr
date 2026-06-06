@@ -754,12 +754,14 @@ async def process_edit_folder(
         await state.clear()
         return
 
+    loading_msg = await message.answer(pe("⏳ Загружаем чаты из папки..."), parse_mode="HTML")
     try:
         from telethon.tl.functions.chatlists import CheckChatlistInviteRequest
         result = await client(CheckChatlistInviteRequest(slug=slug))
 
         chats = getattr(result, 'chats', [])
         if not chats:
+            await loading_msg.delete()
             await message.answer(pe("❌ Папка пуста или не удалось получить чаты."), parse_mode="HTML")
             return
 
@@ -793,6 +795,7 @@ async def process_edit_folder(
             targets = await db.get_mailing_targets(mailing_id)
             forum_hint = pe(f"\n\n🧵 Найдено {len(forums)} форум-чатов с темами: {', '.join(forums[:5])}{'...' if len(forums) > 5 else ''}\nНастройте тему через кнопку 🧵 в списке чатов.")
 
+        await loading_msg.delete()
         await message.answer(
             pe(f"✅ Добавлено {added} чатов из папки! Всего чатов: {len(targets)}") + forum_hint,
             parse_mode="HTML",
@@ -801,6 +804,7 @@ async def process_edit_folder(
 
     except Exception as e:
         logger.error(f"Error resolving folder {slug}: {e}")
+        await loading_msg.delete()
         await message.answer(
             pe(f"❌ Ошибка при получении чатов из папки: {e}"),
             parse_mode="HTML",
@@ -1445,12 +1449,14 @@ async def process_create_folder(
         await state.clear()
         return
 
+    loading_msg = await message.answer(pe("⏳ Загружаем чаты из папки..."), parse_mode="HTML")
     try:
         from telethon.tl.functions.chatlists import CheckChatlistInviteRequest
         result = await client(CheckChatlistInviteRequest(slug=slug))
 
         chats = getattr(result, 'chats', [])
         if not chats:
+            await loading_msg.delete()
             await message.answer(pe("❌ Папка пуста или не удалось получить чаты."), parse_mode="HTML")
             return
 
@@ -1484,6 +1490,7 @@ async def process_create_folder(
             targets = await db.get_mailing_targets(mailing_id)
             forum_hint = pe(f"\n\n🧵 Найдено {len(forums)} форум-чатов с темами: {', '.join(forums[:5])}{'...' if len(forums) > 5 else ''}\nНастройте тему через кнопку 🧵 в списке чатов.")
 
+        await loading_msg.delete()
         await message.answer(
             pe(f"✅ Добавлено {added} чатов из папки! Всего чатов: {len(targets)}\n\nДобавьте ещё или нажмите «Готово»:") + forum_hint,
             parse_mode="HTML",
@@ -1492,6 +1499,7 @@ async def process_create_folder(
 
     except Exception as e:
         logger.error(f"Error resolving folder {slug}: {e}")
+        await loading_msg.delete()
         await message.answer(
             pe(f"❌ Ошибка при получении чатов из папки: {e}"),
             parse_mode="HTML",

@@ -921,13 +921,6 @@ class MailingService:
                         if not target.startswith('-') and not target.startswith('@') and not target.isdigit():
                             target = f"@{target}"
 
-                        # Перевіряємо активність у чаті після останньої відправки
-                        if target_obj.last_sent_at is not None:
-                            has_activity = await self._has_chat_activity(target_client, target, target_obj.last_sent_at, target_me.id)
-                            if not has_activity:
-                                logger.info(f"Mailing {mailing_id}: no activity in {target} since last send, skipping")
-                                continue
-
                         msg = random.choice(messages)
                         pm = msg.parse_mode or 'html'
                         if pm == 'plain':

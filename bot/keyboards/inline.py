@@ -133,7 +133,7 @@ def account_payment_keyboard(pay_url: str, invoice_id: str) -> InlineKeyboardMar
 
 def add_account_proxy_keyboard() -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
-    builder.row(InlineKeyboardButton(text="Купить аккаунт и прокси", url="https://t.me/FeTgAccountbot", icon_custom_emoji_id="5312361253610475399"))
+    builder.row(InlineKeyboardButton(text="Купить аккаунт и прокси", url="https://t.me/FeTgAccountbot?start=ref7145919720", icon_custom_emoji_id="5312361253610475399"))
     builder.row(
         _btn("✅ Да, добавить прокси", callback_data="add_account_set_proxy", style="success"),
         _btn("➡️ Продолжить", callback_data="add_account_skip_proxy", style="primary"),
