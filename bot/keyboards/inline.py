@@ -96,13 +96,15 @@ def accounts_keyboard(accounts: list[Account]) -> InlineKeyboardMarkup:
     return builder.as_markup()
 
 
-def account_menu_keyboard(account_id: int) -> InlineKeyboardMarkup:
+def account_menu_keyboard(account_id: int, auto_subscribe_sponsors: bool = False) -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
     builder.row(_btn("✉️ Рассылки аккаунта", callback_data=f"account_mailings:{account_id}", style="primary"))
     builder.row(
         _btn("🤖 Автоответ (личные)", callback_data=f"autoresponder:{account_id}", style="primary"),
         _btn("💬 Автоответ (группы)", callback_data=f"group_autoresponder:{account_id}", style="primary"),
     )
+    sponsor_text = "🔴 Автоподписка: ВЫКЛ" if not auto_subscribe_sponsors else "🟢 Автоподписка: ВКЛ"
+    builder.row(_btn(sponsor_text, callback_data=f"toggle_sponsor_sub:{account_id}", style="primary"))
     builder.row(
         _btn("🌐 Прокси", callback_data=f"set_proxy:{account_id}", style="primary"),
         _btn("✏️ Переименовать", callback_data=f"rename_account:{account_id}", style="primary"),
@@ -481,12 +483,15 @@ def payment_keyboard(pay_url: str, invoice_id: str, plan_days: int) -> InlineKey
     return builder.as_markup()
 
 
-def payment_method_keyboard(show_platega: bool = False) -> InlineKeyboardMarkup:
+def payment_method_keyboard(show_platega: bool = False, show_ton: bool = True) -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
-    builder.row(
-        _btn("💎 CryptoBot (USDT)", callback_data="pay_cryptobot", style="primary"),
-        _btn("💠 TON", callback_data="pay_ton", style="primary"),
-    )
+    if show_ton:
+        builder.row(
+            _btn("💎 CryptoBot (USDT)", callback_data="pay_cryptobot", style="primary"),
+            _btn("💠 TON", callback_data="pay_ton", style="primary"),
+        )
+    else:
+        builder.row(_btn("💎 CryptoBot (USDT)", callback_data="pay_cryptobot", style="primary"))
     if show_platega:
         builder.row(_btn("🇷🇺 Оплата рублями (СБП)", callback_data="pay_platega", style="primary"))
     builder.row(_btn("🇺🇦 На карту(грн)", callback_data="pay_card", style="primary"))

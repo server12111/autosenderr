@@ -107,7 +107,7 @@ async def callback_sub_plan(
         text = pe(f"💳 Способ оплаты ({plan_days} дней):\n\n" + "\n".join(lines))
         await callback.message.edit_text(
             text, parse_mode="HTML",
-            reply_markup=payment_method_keyboard(show_platega=show_platega),
+            reply_markup=payment_method_keyboard(show_platega=show_platega, show_ton=has_ton),
         )
     else:
         await _create_cryptobot_subscription(callback, db, plan_days=plan_days)

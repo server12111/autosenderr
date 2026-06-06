@@ -78,19 +78,21 @@ async def callback_account_menu(callback: CallbackQuery, db: Database):
     ar_status = "✅ Включён" if account.autoresponder_enabled else "❌ Выключен"
     gr_status = "✅ Включён" if account.group_autoresponder_enabled else "❌ Выключен"
     proxy_status = f"🌐 {account.proxy}" if account.proxy else "🌐 Прокси: не настроен"
+    sponsor_status = "✅ Включена" if account.auto_subscribe_sponsors else "❌ Выключена"
 
     text = pe(
         f"📱 Аккаунт: {account.display_name}\n"
         f"📞 Номер: {account.phone}\n\n"
         f"🤖 Личный автоответчик: {ar_status}\n"
         f"💬 Групповой автоответчик: {gr_status}\n"
+        f"🤖 Автоподписка на спонсоров: {sponsor_status}\n"
         f"{proxy_status}\n"
         f"📅 Добавлен: {account.created_at.strftime('%d.%m.%Y')}\n\n"
         "Выберите действие:"
     )
 
     await callback.message.edit_text(
-        text, parse_mode="HTML", reply_markup=account_menu_keyboard(account_id)
+        text, parse_mode="HTML", reply_markup=account_menu_keyboard(account_id, account.auto_subscribe_sponsors)
     )
     await callback.answer()
 
@@ -848,7 +850,7 @@ async def process_rename_account(message: Message, state: FSMContext, db: Databa
     await message.answer(
         pe(f"✅ Аккаунт переименован: <b>{name}</b>"),
         parse_mode="HTML",
-        reply_markup=account_menu_keyboard(account_id),
+        reply_markup=account_menu_keyboard(account_id, account.auto_subscribe_sponsors if account else False),
     )
 
 
@@ -916,7 +918,7 @@ async def process_set_proxy(message: Message, state: FSMContext, db: Database, u
         await message.answer(
             pe("✅ Прокси удалён. Аккаунт переподключён без прокси."),
             parse_mode="HTML",
-            reply_markup=account_menu_keyboard(account_id),
+            reply_markup=account_menu_keyboard(account_id, account.auto_subscribe_sponsors if account else False),
         )
         return
 
@@ -954,6 +956,41 @@ async def process_set_proxy(message: Message, state: FSMContext, db: Database, u
     await message.answer(
         pe(f"✅ Прокси сохранён: <code>{text}</code>\nАккаунт переподключён."),
         parse_mode="HTML",
-        reply_markup=account_menu_keyboard(account_id),
+        reply_markup=account_menu_keyboard(account_id, account.auto_subscribe_sponsors if account else False),
+    )
+
+
+@router.callback_query(F.data.startswith("toggle_sponsor_sub:"))
+async def callback_toggle_sponsor_sub(callback: CallbackQuery, db: Database):
+    account_id = int(callback.data.split(":")[1])
+    account = await db.get_account(account_id)
+    if not account:
+        await callback.answer("Аккаунт не найден", show_alert=True)
+        return
+
+    new_val = not account.auto_subscribe_sponsors
+    await db.update_auto_subscribe_sponsors(account_id, new_val)
+    status = "включена" if new_val else "выключена"
+    await callback.answer(f"Автоподписка на спонсоров {status}")
+
+    account = await db.get_account(account_id)
+    ar_status = "✅ Включён" if account.autoresponder_enabled else "❌ Выключен"
+    gr_status = "✅ Включён" if account.group_autoresponder_enabled else "❌ Выключен"
+    proxy_status = f"🌐 {account.proxy}" if account.proxy else "🌐 Прокси: не настроен"
+    sponsor_status = "✅ Включена" if account.auto_subscribe_sponsors else "❌ Выключена"
+
+    text = pe(
+        f"📱 Аккаунт: {account.display_name}\n"
+        f"📞 Номер: {account.phone}\n\n"
+        f"🤖 Личный автоответчик: {ar_status}\n"
+        f"💬 Групповой автоответчик: {gr_status}\n"
+        f"🤖 Автоподписка на спонсоров: {sponsor_status}\n"
+        f"{proxy_status}\n"
+        f"📅 Добавлен: {account.created_at.strftime('%d.%m.%Y')}\n\n"
+        "Выберите действие:"
+    )
+    await callback.message.edit_text(
+        text, parse_mode="HTML",
+        reply_markup=account_menu_keyboard(account_id, account.auto_subscribe_sponsors),
     )
 

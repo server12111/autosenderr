@@ -180,7 +180,7 @@ async def callback_cancel(callback: CallbackQuery, state: FSMContext, db: Databa
         if account:
             await _edit(
                 pe(f"📱 Аккаунт: {account.display_name}\n\nВыберите действие:"),
-                account_menu_keyboard(account_id),
+                account_menu_keyboard(account_id, account.auto_subscribe_sponsors),
             )
         else:
             user = await db.get_user(callback.from_user.id)
