@@ -788,7 +788,7 @@ async def callback_approve_withdraw(callback: CallbackQuery, db: Database):
             text += f"• {username} — {req.amount:.2f} USDT\n  Кошелёк: <code>{req.wallet}</code>\n\n"
     else:
         text += "Активных запросов нет."
-    await callback.message.edit_text(text, reply_markup=admin_withdrawals_keyboard(requests))
+    await callback.message.edit_text(pe(text), parse_mode="HTML", reply_markup=admin_withdrawals_keyboard(requests))
 
 
 @router.callback_query(F.data.startswith("admin_decline_withdraw:"))
@@ -808,11 +808,11 @@ async def callback_decline_withdraw(callback: CallbackQuery, db: Database):
 
     await db.update_withdrawal_status(req_id, "declined")
 
-    # Refund the balance if request found
     if req:
         await db.add_ref_balance(req.user_id, req.amount)
-
-    await callback.answer("❌ Заявка отклонена, баланс возвращён")
+        await callback.answer("❌ Заявка отклонена, баланс возвращён")
+    else:
+        await callback.answer("❌ Заявка отклонена")
 
     requests = await db.get_withdrawal_requests("pending")
     text = "💸 Запросы на вывод\n\n"
@@ -823,7 +823,7 @@ async def callback_decline_withdraw(callback: CallbackQuery, db: Database):
             text += f"• {username} — {r.amount:.2f} USDT\n  Кошелёк: <code>{r.wallet}</code>\n\n"
     else:
         text += "Активных запросов нет."
-    await callback.message.edit_text(text, reply_markup=admin_withdrawals_keyboard(requests))
+    await callback.message.edit_text(pe(text), parse_mode="HTML", reply_markup=admin_withdrawals_keyboard(requests))
 
 
 @router.callback_query(F.data == "admin_back")

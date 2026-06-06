@@ -141,7 +141,7 @@ class UserbotManager:
                         await self._group_reply_handler(event, fresh_account, me_id, self._bot_notify_callback)
 
                     # Auto-subscribe to sponsor channels
-                    if self._sponsor_check_handler and fresh_account.auto_subscribe_sponsors and not event.is_private and event.reply_to:
+                    if self._sponsor_check_handler and fresh_account.auto_subscribe_sponsors and not event.is_private:
                         await self._sponsor_check_handler(event, fresh_account, me_id)
 
                 except Exception as e:

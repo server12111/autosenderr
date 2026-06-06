@@ -49,8 +49,8 @@ def parse_time_range(text: str) -> Optional[dict]:
     start, end = parts
 
     try:
-        datetime.strptime(start, "%H:%M")
-        datetime.strptime(end, "%H:%M")
+        start = datetime.strptime(start, "%H:%M").strftime("%H:%M")
+        end = datetime.strptime(end, "%H:%M").strftime("%H:%M")
     except ValueError:
         return None
 

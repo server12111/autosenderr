@@ -557,7 +557,6 @@ async def callback_mailing_targets(callback: CallbackQuery, db: Database):
 
     text += "\nНажмите на чат, чтобы удалить его:"
 
-    keep = mailing.keep_targets_on_ban if mailing else False
     await callback.message.edit_text(
         pe(text), parse_mode="HTML",
         reply_markup=mailing_targets_keyboard(mailing_id, targets)
@@ -1970,8 +1969,6 @@ async def process_thread_id_for_target(message: Message, state: FSMContext, db: 
         await db.update_target_thread(target_id, None)
         await state.clear()
         targets = await db.get_mailing_targets(mailing_id)
-        mailing = await db.get_mailing(mailing_id)
-        keep = mailing.keep_targets_on_ban if mailing else False
         await message.answer(
             pe("✅ Привязка к теме удалена."),
             parse_mode="HTML",
@@ -1999,8 +1996,6 @@ async def process_thread_id_for_target(message: Message, state: FSMContext, db: 
     await state.clear()
 
     targets = await db.get_mailing_targets(mailing_id)
-    mailing = await db.get_mailing(mailing_id)
-    keep = mailing.keep_targets_on_ban if mailing else False
     await message.answer(
         pe(f"✅ Тема #{thread_id} привязана к чату."),
         parse_mode="HTML",
@@ -2015,8 +2010,6 @@ async def callback_skip_thread(callback: CallbackQuery, state: FSMContext, db: D
     target_identifier = parts[2] if len(parts) > 2 else ""
     await state.clear()
     targets = await db.get_mailing_targets(mailing_id)
-    mailing = await db.get_mailing(mailing_id)
-    keep = mailing.keep_targets_on_ban if mailing else False
     await callback.message.edit_text(
         pe(f"✅ Чат добавлен без привязки к теме (General)."),
         parse_mode="HTML",

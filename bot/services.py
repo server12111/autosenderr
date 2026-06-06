@@ -563,46 +563,71 @@ class AutoresponderService:
 
     async def handle_sponsor_check(self, event, account, me_id: int):
         """
-        Auto-join sponsor channels when a bot replies to this account's message
-        in a group chat and the reply contains buttons with t.me/ links.
+        Auto-join sponsor channels when a bot/service tags this account in a group chat
+        (either as a reply to our message, or as a direct @mention) and the message
+        contains buttons or text with t.me/ channel links.
         """
         if event.is_private:
             return
-        if not event.reply_to:
+
+        original = None  # наше оригінальне повідомлення (якщо це reply)
+
+        # Сценарій 1: повідомлення є reply на наше повідомлення
+        if event.reply_to:
+            try:
+                orig = await event.get_reply_message()
+                if orig:
+                    orig_sender = await orig.get_sender()
+                    if orig_sender and orig_sender.id == me_id:
+                        original = orig
+            except Exception:
+                pass
+
+        # Сценарій 2: повідомлення тегає наш акаунт через @mention entity
+        is_mention = False
+        if original is None:
+            try:
+                for ent in (getattr(event.message, 'entities', None) or []):
+                    if getattr(ent, 'user_id', None) == me_id:
+                        is_mention = True
+                        break
+            except Exception:
+                pass
+
+        # Якщо жоден сценарій не спрацював — повідомлення не стосується нашого акаунту
+        if original is None and not is_mention:
             return
 
+        # Фільтр: пропускаємо якщо відправник — звичайний юзер (не бот, не анонімний адмін)
         try:
-            # Check: the reply is directed at our message
-            original = await event.get_reply_message()
-            if not original:
-                return
-            orig_sender = await original.get_sender()
-            if not orig_sender or orig_sender.id != me_id:
-                return
-        except Exception:
-            return
-
-        try:
-            # Check: the sender of the reply is a bot
             sender = await event.get_sender()
-            if not sender or not getattr(sender, 'bot', False):
+            from telethon.tl.types import User as _TLUser
+            if sender and isinstance(sender, _TLUser) and not sender.bot:
                 return
         except Exception:
-            return
+            pass  # не вдалось визначити — продовжуємо
 
+        # Витягуємо посилання з кнопок
         urls = _extract_button_urls(event.message)
-        # Also extract links directly from message text (some bots send links in text, not buttons)
+
+        # Витягуємо t.me/ і tg:// посилання з тексту
         msg_text = getattr(event.message, 'text', None) or getattr(event.message, 'message', None) or ""
         if msg_text:
-            import re as _re
-            urls += _re.findall(r'https?://t\.me/\S+|tg://[^\s]+', msg_text)
+            urls += re.findall(r'https?://t\.me/\S+|tg://[^\s]+', msg_text)
+
         urls = await _resolve_redirect_urls(urls)
         channel_usernames, invite_hashes = _parse_telegram_links(urls)
+
+        # Також витягуємо @username згадки з тексту (деякі боти пишуть @channel без t.me/ лінку)
+        if msg_text:
+            for mention in re.findall(r'@([A-Za-z0-9_]{5,32})', msg_text):
+                if mention not in channel_usernames:
+                    channel_usernames.append(mention)
 
         if not channel_usernames and not invite_hashes:
             return
 
-        logger.info(f"Account {account.phone}: sponsor gate reply detected, public={channel_usernames} invites={invite_hashes}")
+        logger.info(f"Account {account.phone}: sponsor gate detected (reply={original is not None}, mention={is_mention}), public={channel_usernames} invites={invite_hashes}")
 
         joined_any = False
 
@@ -630,8 +655,9 @@ class AutoresponderService:
             except Exception as e:
                 logger.warning(f"Account {account.phone} failed to join invite {h}: {e}")
 
-        # After joining all sponsor channels — re-send the original mailing message
-        if joined_any:
+        # Після підписки — повторно надсилаємо наше оригінальне повідомлення
+        # (тільки якщо це був reply — ми знаємо яке повідомлення відправити)
+        if joined_any and original is not None:
             try:
                 await asyncio.sleep(2)
                 text = getattr(original, 'text', None) or getattr(original, 'message', None)
@@ -790,7 +816,9 @@ class MailingService:
             await client.send_file(target, photos[0], caption=text, parse_mode=eff_pm,
                                    formatting_entities=entities, reply_to=reply_to)
         else:
-            await client.send_message(target, text, parse_mode=eff_pm,
+            if not text and not entities:
+                raise ValueError(f"Mailing message has no text and no photos")
+            await client.send_message(target, text or "", parse_mode=eff_pm,
                                       formatting_entities=entities, reply_to=reply_to)
 
     async def _start_mailing_task(self, mailing_id: int):
@@ -850,7 +878,9 @@ class MailingService:
 
                     now = datetime.utcnow()
                     sent_any = False
-                    me = await client.get_me()
+                    if mailing.account_id not in self._me_cache:
+                        self._me_cache[mailing.account_id] = await client.get_me()
+                    me = self._me_cache[mailing.account_id]
 
                     # Build ordered pool: main account first, then extra accounts (insertion order)
                     extra_accounts = await self.db.get_mailing_extra_accounts(mailing_id)
@@ -950,8 +980,29 @@ class MailingService:
                             await self.db.update_target_last_sent(target_obj.id, current_account_id)
                             sent_any = True
                         except _BAN_ERRORS as e:
-                            await self._handle_mailing_ban(mailing_id, current_account_id, e)
-                            return
+                            if current_account_id == mailing.account_id:
+                                # Головний акаунт — зупиняємо розсилку повністю
+                                await self._handle_mailing_ban(mailing_id, current_account_id, e)
+                                return
+                            # Допоміжний акаунт — деактивуємо його, розсилка продовжується
+                            logger.warning(f"Mailing {mailing_id}: extra account {current_account_id} banned ({type(e).__name__}), removing from pool")
+                            await self.db.deactivate_account(current_account_id)
+                            self._me_cache.pop(current_account_id, None)
+                            client_map.pop(current_account_id, None)
+                            pool_clients = [(aid, c, m_) for aid, c, m_ in pool_clients if aid != current_account_id]
+                            try:
+                                notify = getattr(self.userbot_manager, '_bot_notify_callback', None)
+                                if notify:
+                                    acc_obj = await self.db.get_account(current_account_id)
+                                    if acc_obj:
+                                        u = await self.db.get_user_by_id(acc_obj.user_id)
+                                        if u:
+                                            await notify(u.telegram_id, pe(
+                                                f"⚠️ Дополнительный аккаунт <b>{acc_obj.display_name}</b> заблокирован и удалён из пула рассылки."
+                                            ))
+                            except Exception:
+                                pass
+                            continue
                         except _CHAT_BAN_ERRORS as e:
                             await self._handle_chat_ban(mailing_id, current_account_id, target_obj, e)
                         except _NOT_MEMBER_ERRORS:
@@ -1028,7 +1079,16 @@ class MailingService:
         except asyncio.CancelledError:
             logger.info(f"Mailing {mailing_id} task cancelled")
         except Exception as e:
-            logger.error(f"Mailing {mailing_id} loop fatal error: {e}")
+            logger.error(f"Mailing {mailing_id} loop fatal error: {e}", exc_info=True)
+            if self._running:
+                await asyncio.sleep(30)
+                try:
+                    mailing = await self.db.get_mailing(mailing_id)
+                    if mailing and mailing.is_active:
+                        logger.info(f"Mailing {mailing_id} auto-restarting after fatal error")
+                        await self._start_mailing_task(mailing_id)
+                except Exception as restart_err:
+                    logger.error(f"Mailing {mailing_id} auto-restart failed: {restart_err}")
 
     async def _handle_mailing_ban(self, mailing_id: int, account_id: int, error: Exception):
         """Stop mailing, deactivate account, notify owner."""

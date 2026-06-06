@@ -446,7 +446,7 @@ class Database:
         async with self._conn.execute(
             "SELECT a.* FROM accounts a "
             "JOIN mailing_accounts ma ON a.id = ma.account_id "
-            "WHERE ma.mailing_id = ? ORDER BY ma.rowid", (mailing_id,)
+            "WHERE ma.mailing_id = ? AND a.is_active = 1 ORDER BY ma.rowid", (mailing_id,)
         ) as cur:
             return [self._row_to_account(r) for r in await cur.fetchall()]
 
@@ -603,7 +603,7 @@ class Database:
             reply_random_min=r["reply_random_min"] if "reply_random_min" in keys else 1,
             reply_random_max=r["reply_random_max"] if "reply_random_max" in keys else 5,
             keep_targets_on_ban=bool(r["keep_targets_on_ban"]) if "keep_targets_on_ban" in keys else False,
-        account_rotation_mode=r["account_rotation_mode"] if "account_rotation_mode" in keys else "per_target",
+            account_rotation_mode=r["account_rotation_mode"] if "account_rotation_mode" in keys else "per_target",
         )
 
     async def get_mailing(self, mailing_id: int) -> Optional[Mailing]:
@@ -849,13 +849,16 @@ class Database:
                 )
         return None
 
-    async def update_payment_status(self, invoice_id: str, status: str):
+    async def update_payment_status(self, invoice_id: str, status: str) -> bool:
+        """Returns True if row was actually updated (not already in that status)."""
         paid_at = datetime.now().isoformat() if status == "paid" else None
-        await self._conn.execute(
-            "UPDATE payments SET status = ?, paid_at = ? WHERE invoice_id = ?",
-            (status, paid_at, invoice_id),
-        )
+        async with self._conn.execute(
+            "UPDATE payments SET status = ?, paid_at = ? WHERE invoice_id = ? AND status != ?",
+            (status, paid_at, invoice_id, status),
+        ) as cur:
+            updated = cur.rowcount > 0
         await self._conn.commit()
+        return updated
 
     async def get_pending_payments(self) -> list[Payment]:
         async with self._conn.execute("SELECT * FROM payments WHERE status = 'pending'") as cur:

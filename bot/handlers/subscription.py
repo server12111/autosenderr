@@ -193,7 +193,7 @@ async def callback_pay_ton(
         await callback.message.edit_text(
             pe("❌ Не удалось получить курс TON. Попробуйте позже."),
             parse_mode="HTML",
-            reply_markup=payment_method_keyboard(),
+            reply_markup=payment_method_keyboard(show_platega=bool(config.PLATEGA_MERCHANT_ID and config.PLATEGA_SECRET)),
         )
         await callback.answer()
         return
@@ -243,7 +243,10 @@ async def callback_check_ton_payment(
     is_paid = await ton_service.check_payment(payment.amount, comment)
 
     if is_paid:
-        await db.update_payment_status(comment, "paid")
+        updated = await db.update_payment_status(comment, "paid")
+        if not updated:
+            await callback.answer("✅ Этот платёж уже обработан", show_alert=True)
+            return
         user = await db.get_user(callback.from_user.id)
         plan_days = getattr(payment, "plan_days", 30) or 30
 
@@ -253,7 +256,8 @@ async def callback_check_ton_payment(
             new_end = datetime.now() + timedelta(days=plan_days)
 
         await db.update_subscription(user.id, new_end)
-        await _pay_referral(user, db, payment.amount)
+        price_usdt = await db.get_price(plan_days)
+        await _pay_referral(user, db, price_usdt)
 
         await callback.message.edit_text(
             pe(f"✅ Оплата получена!\n\n"
@@ -287,7 +291,10 @@ async def callback_check_payment(
     is_paid = await cryptobot.check_invoice_paid(invoice_id)
 
     if is_paid:
-        await db.update_payment_status(invoice_id, "paid")
+        updated = await db.update_payment_status(invoice_id, "paid")
+        if not updated:
+            await callback.answer("✅ Этот платёж уже обработан", show_alert=True)
+            return
         user = await db.get_user(callback.from_user.id)
         plan_days = getattr(payment, "plan_days", 30) or 30
 
@@ -393,7 +400,10 @@ async def callback_check_platega_payment(
     is_paid = await platega_service.check_payment(order_id)
 
     if is_paid:
-        await db.update_payment_status(order_id, "paid")
+        updated = await db.update_payment_status(order_id, "paid")
+        if not updated:
+            await callback.answer("✅ Этот платёж уже обработан", show_alert=True)
+            return
         user = await db.get_user(callback.from_user.id)
         plan_days = getattr(payment, "plan_days", 30) or 30
 
@@ -403,7 +413,8 @@ async def callback_check_platega_payment(
             new_end = datetime.now() + timedelta(days=plan_days)
 
         await db.update_subscription(user.id, new_end)
-        await _pay_referral(user, db, payment.amount)
+        price_usdt = await db.get_price(plan_days)
+        await _pay_referral(user, db, price_usdt)
 
         await callback.message.edit_text(
             pe(f"✅ Оплата через СБП получена!\n\n"
