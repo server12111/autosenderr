@@ -592,6 +592,9 @@ def admin_keyboard() -> InlineKeyboardMarkup:
         _btn("💳 Подписки", callback_data="admin_subscriptions", style="primary"),
     )
     builder.row(
+        _btn("🔍 Диагностика", callback_data="admin_diagnostics", style="primary"),
+    )
+    builder.row(
         _btn("📤 Экспорт БД", callback_data="admin_export_db", style="primary"),
     )
     builder.row(
@@ -706,6 +709,19 @@ def admin_promo_list_keyboard(promocodes: list[Promocode]) -> InlineKeyboardMark
 def cancel_keyboard() -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
     builder.row(_btn("◀️ Назад", callback_data="cancel", style="primary"))
+    return builder.as_markup()
+
+
+def admin_diagnostics_keyboard(telegram_id: int) -> InlineKeyboardMarkup:
+    builder = InlineKeyboardBuilder()
+    builder.row(_btn("📋 Последние ошибки", callback_data=f"admin_user_errors:{telegram_id}", style="primary"))
+    builder.row(_btn("◀️ Назад", callback_data="admin_back", style="primary"))
+    return builder.as_markup()
+
+
+def admin_errors_keyboard(telegram_id: int) -> InlineKeyboardMarkup:
+    builder = InlineKeyboardBuilder()
+    builder.row(_btn("◀️ К профилю", callback_data=f"admin_diag_show:{telegram_id}", style="primary"))
     return builder.as_markup()
 
 

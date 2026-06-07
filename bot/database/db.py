@@ -164,6 +164,20 @@ class RequiredChannel:
     added_at: datetime
 
 
+@dataclass
+class ErrorLog:
+    id: int
+    user_id: int
+    account_id: Optional[int]
+    mailing_id: Optional[int]
+    error_type: str
+    error_text: Optional[str]
+    chat_identifier: Optional[str]
+    created_at: datetime
+    account_display: Optional[str] = None
+    mailing_name: Optional[str] = None
+
+
 class Database:
     def __init__(self, db_path: str):
         self.db_path = db_path
@@ -261,6 +275,24 @@ class Database:
                 FOREIGN KEY (account_id) REFERENCES accounts(id) ON DELETE CASCADE
             )
         """)
+        await self._conn.commit()
+
+        # Error log table for mailing/account errors
+        await self._conn.execute("""
+            CREATE TABLE IF NOT EXISTS mailing_error_log (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER NOT NULL,
+                account_id INTEGER,
+                mailing_id INTEGER,
+                error_type TEXT NOT NULL,
+                error_text TEXT,
+                chat_identifier TEXT,
+                created_at DATETIME DEFAULT (datetime('now'))
+            )
+        """)
+        await self._conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_error_log_user ON mailing_error_log (user_id, created_at DESC)"
+        )
         await self._conn.commit()
 
         # Seed default subscription prices if not set
@@ -1191,3 +1223,91 @@ class Database:
         await self._conn.execute("DELETE FROM required_channels WHERE channel_id = ?", (channel_id,))
         await self._conn.commit()
         self._cache_invalidate("required_channels")
+
+    # === Error Log ===
+    async def add_error_log(
+        self,
+        user_id: int,
+        error_type: str,
+        error_text: Optional[str] = None,
+        account_id: Optional[int] = None,
+        mailing_id: Optional[int] = None,
+        chat_identifier: Optional[str] = None,
+    ):
+        await self._conn.execute(
+            "INSERT INTO mailing_error_log (user_id, account_id, mailing_id, error_type, error_text, chat_identifier) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
+            (user_id, account_id, mailing_id, error_type,
+             error_text[:500] if error_text else None, chat_identifier),
+        )
+        await self._conn.execute(
+            """DELETE FROM mailing_error_log WHERE user_id = ? AND id NOT IN (
+                   SELECT id FROM mailing_error_log WHERE user_id = ? ORDER BY created_at DESC LIMIT 100
+               )""",
+            (user_id, user_id),
+        )
+        await self._conn.commit()
+
+    async def get_user_error_logs(self, user_id: int, limit: int = 20) -> list:
+        async with self._conn.execute(
+            """SELECT el.*,
+                   COALESCE(a.name, a.phone) as account_display,
+                   m.name as mailing_name
+               FROM mailing_error_log el
+               LEFT JOIN accounts a ON a.id = el.account_id
+               LEFT JOIN mailings m ON m.id = el.mailing_id
+               WHERE el.user_id = ?
+               ORDER BY el.created_at DESC
+               LIMIT ?""",
+            (user_id, limit),
+        ) as cur:
+            rows = await cur.fetchall()
+            return [ErrorLog(
+                id=r["id"],
+                user_id=r["user_id"],
+                account_id=r["account_id"],
+                mailing_id=r["mailing_id"],
+                error_type=r["error_type"],
+                error_text=r["error_text"],
+                chat_identifier=r["chat_identifier"],
+                created_at=self._parse_datetime(r["created_at"]),
+                account_display=r["account_display"],
+                mailing_name=r["mailing_name"],
+            ) for r in rows]
+
+    async def get_user_diagnostics(self, telegram_id: int) -> Optional[dict]:
+        user = await self.get_user(telegram_id)
+        if not user:
+            return None
+
+        async with self._conn.execute(
+            "SELECT COUNT(*) as cnt FROM accounts WHERE user_id = ? AND is_active = 1", (user.id,)
+        ) as cur:
+            row = await cur.fetchone()
+            account_count = int(row["cnt"] or 0)
+
+        async with self._conn.execute(
+            "SELECT COUNT(*) as total, SUM(CASE WHEN is_active=1 THEN 1 ELSE 0 END) as active_cnt "
+            "FROM mailings WHERE user_id = ?",
+            (user.id,),
+        ) as cur:
+            row = await cur.fetchone()
+            total_mailings = int(row["total"] or 0)
+            active_mailings = int(row["active_cnt"] or 0)
+
+        async with self._conn.execute(
+            """SELECT COUNT(*) as cnt FROM mailing_targets mt
+               JOIN mailings m ON m.id = mt.mailing_id
+               WHERE m.user_id = ?""",
+            (user.id,),
+        ) as cur:
+            row = await cur.fetchone()
+            total_chats = int(row["cnt"] or 0)
+
+        return {
+            "user": user,
+            "account_count": account_count,
+            "total_mailings": total_mailings,
+            "active_mailings": active_mailings,
+            "total_chats": total_chats,
+        }

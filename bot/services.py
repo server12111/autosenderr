@@ -51,6 +51,7 @@ _NOT_MEMBER_ERRORS = (
 import aiohttp
 import certifi
 
+from .config import config
 from .database.db import Database
 from .utils.time_utils import is_within_active_hours
 from .utils.premium_emoji import pe
@@ -892,6 +893,8 @@ class MailingService:
 
                     now = datetime.utcnow()
                     sent_any = False
+                    cycle_sent = 0
+                    cycle_errors = 0
                     if mailing.account_id not in self._me_cache:
                         self._me_cache[mailing.account_id] = await client.get_me()
                     me = self._me_cache[mailing.account_id]
@@ -988,21 +991,51 @@ class MailingService:
                             except Exception as e:
                                 logger.warning(f"Mailing {mailing_id}: failed to get reply target: {e}")
 
-                        logger.info(
-                            f"Mailing {mailing_id}: [{target_idx + 1}/{len(targets)}] "
-                            f"→ {target} (account {current_account_id})"
-                        )
+                        if config.MAILING_DEBUG:
+                            logger.info(
+                                f"Mailing {mailing_id}: [{target_idx + 1}/{len(targets)}] "
+                                f"→ {target} (account {current_account_id})"
+                            )
+                        else:
+                            logger.debug(
+                                f"Mailing {mailing_id}: [{target_idx + 1}/{len(targets)}] "
+                                f"→ {target} (account {current_account_id})"
+                            )
                         try:
                             await self._send_msg(target_client, target, msg, pm, reply_to=reply_to_id)
-                            logger.info(f"Mailing {mailing_id}: ✓ sent to {target} via account {current_account_id}")
+                            if config.MAILING_DEBUG:
+                                logger.info(f"Mailing {mailing_id}: ✓ sent to {target} via account {current_account_id}")
+                            else:
+                                logger.debug(f"Mailing {mailing_id}: ✓ sent to {target} via account {current_account_id}")
                             await self.db.update_target_last_sent(target_obj.id, current_account_id)
                             sent_any = True
+                            cycle_sent += 1
                         except _BAN_ERRORS as e:
                             if current_account_id == mailing.account_id:
                                 # Головний акаунт — зупиняємо розсилку повністю
+                                try:
+                                    await self.db.add_error_log(
+                                        user_id=mailing.user_id,
+                                        error_type=type(e).__name__,
+                                        error_text=str(e)[:300],
+                                        account_id=current_account_id,
+                                        mailing_id=mailing_id,
+                                    )
+                                except Exception:
+                                    pass
                                 await self._handle_mailing_ban(mailing_id, current_account_id, e)
                                 return
                             # Допоміжний акаунт — деактивуємо його, розсилка продовжується
+                            try:
+                                await self.db.add_error_log(
+                                    user_id=mailing.user_id,
+                                    error_type=f"{type(e).__name__}:Extra",
+                                    error_text=str(e)[:300],
+                                    account_id=current_account_id,
+                                    mailing_id=mailing_id,
+                                )
+                            except Exception:
+                                pass
                             logger.warning(f"Mailing {mailing_id}: extra account {current_account_id} banned ({type(e).__name__}), removing from pool")
                             await self.db.deactivate_account(current_account_id)
                             self._me_cache.pop(current_account_id, None)
@@ -1022,6 +1055,18 @@ class MailingService:
                                 pass
                             continue
                         except _CHAT_BAN_ERRORS as e:
+                            cycle_errors += 1
+                            try:
+                                await self.db.add_error_log(
+                                    user_id=mailing.user_id,
+                                    error_type="ChatBanned",
+                                    error_text=type(e).__name__,
+                                    account_id=current_account_id,
+                                    mailing_id=mailing_id,
+                                    chat_identifier=target,
+                                )
+                            except Exception:
+                                pass
                             await self._handle_chat_ban(mailing_id, current_account_id, target_obj, e)
                         except _NOT_MEMBER_ERRORS:
                             logger.info(f"Mailing {mailing_id}: not participant/forbidden in '{target}', attempting auto-join")
@@ -1047,11 +1092,23 @@ class MailingService:
                                     except Exception:
                                         continue
                             if not fallback_sent:
+                                cycle_errors += 1
                                 wait = min(e.seconds, 3600)
                                 logger.warning(
                                     f"Mailing {mailing_id}: FloodWait {e.seconds}s on account "
                                     f"{current_account_id} for {target}, no fallback — sleeping {wait}s"
                                 )
+                                try:
+                                    await self.db.add_error_log(
+                                        user_id=mailing.user_id,
+                                        error_type="FloodWait",
+                                        error_text=f"{e.seconds}s",
+                                        account_id=current_account_id,
+                                        mailing_id=mailing_id,
+                                        chat_identifier=target,
+                                    )
+                                except Exception:
+                                    pass
                                 await asyncio.sleep(wait)
                         except (ChatSendMediaForbiddenError, ChatGuestSendForbiddenError, RightForbiddenError) as e:
                             logger.warning(f"Mailing {mailing_id}: send forbidden in '{target}' ({type(e).__name__}) — chat restricts this message type, skipping")
@@ -1075,12 +1132,28 @@ class MailingService:
                                         except Exception:
                                             continue
                                 if not fallback_sent:
+                                    cycle_errors += 1
+                                    try:
+                                        await self.db.add_error_log(
+                                            user_id=mailing.user_id,
+                                            error_type="PeerFlood",
+                                            error_text="PEER_FLOOD",
+                                            account_id=current_account_id,
+                                            mailing_id=mailing_id,
+                                            chat_identifier=target,
+                                        )
+                                    except Exception:
+                                        pass
                                     logger.warning(f"Mailing {mailing_id}: PEER_FLOOD на аккаунте, пауза 60с")
                                     await asyncio.sleep(60)
                             else:
                                 logger.error(f"Error sending mailing {mailing_id} to {target}: {e}")
 
                         await asyncio.sleep(3)
+
+                    logger.info(
+                        f"Mailing {mailing_id}: cycle done — sent {cycle_sent}, errors {cycle_errors}"
+                    )
 
                     if sent_any:
                         await self.db.update_mailing_last_sent(mailing_id)

@@ -3,6 +3,7 @@ import os
 import shutil
 import tempfile
 from datetime import datetime, timedelta
+from typing import Optional
 
 import matplotlib
 matplotlib.use("Agg")
@@ -26,6 +27,8 @@ from ..keyboards.inline import (
     admin_withdrawals_keyboard,
     admin_sub_stats_keyboard,
     admin_sub_method_keyboard,
+    admin_diagnostics_keyboard,
+    admin_errors_keyboard,
     cancel_keyboard,
     main_menu_keyboard,
     promo_subscription_keyboard,
@@ -50,6 +53,7 @@ class AdminStates(StatesGroup):
     waiting_channel_id = State()
     waiting_card_manager = State()
     waiting_db_file = State()
+    waiting_diag_user_id = State()
 
 
 def is_admin(user_id: int) -> bool:
@@ -1025,6 +1029,150 @@ async def callback_admin_platega(callback: CallbackQuery, db: Database):
     builder.row(_btn("◀️ Назад", callback_data="admin_back", style="primary"))
 
     await callback.message.edit_text(text, parse_mode="HTML", reply_markup=builder.as_markup())
+    await callback.answer()
+
+
+# === User Diagnostics ===
+
+async def _build_diag_text(telegram_id: int, db) -> Optional[tuple]:
+    """Returns (text, keyboard) for user diagnostics view, or None if not found."""
+    diag = await db.get_user_diagnostics(telegram_id)
+    if not diag:
+        return None
+
+    user = diag["user"]
+    now = datetime.now()
+
+    if user.subscription_end:
+        is_active_sub = user.subscription_end > now
+        days_left = max(0, (user.subscription_end - now).days)
+        sub_status = f"✅ Активна ({days_left} дн.)" if is_active_sub else "❌ Истекла"
+        sub_end = user.subscription_end.strftime("%d.%m.%Y %H:%M")
+    else:
+        sub_status = "❌ Нет подписки"
+        sub_end = "—"
+
+    last_activity = user.last_activity.strftime("%d.%m.%Y %H:%M") if user.last_activity else "—"
+    reg_date = user.created_at.strftime("%d.%m.%Y %H:%M")
+    username = f"@{user.username}" if user.username else "—"
+
+    text = pe(
+        f"🔍 <b>Диагностика пользователя</b>\n\n"
+        f"👤 Username: {username}\n"
+        f"🆔 Telegram ID: <code>{telegram_id}</code>\n"
+        f"📅 Регистрация: {reg_date}\n"
+        f"🕐 Последняя активность: {last_activity}\n\n"
+        f"💳 Подписка: {sub_status}\n"
+        f"📅 Дата окончания: {sub_end}\n\n"
+        f"📱 Аккаунтов: {diag['account_count']}\n"
+        f"📋 Рассылок всего: {diag['total_mailings']}\n"
+        f"🟢 Активных рассылок: {diag['active_mailings']}\n"
+        f"🎯 Чатов в рассылках: {diag['total_chats']}\n"
+    )
+    return text, admin_diagnostics_keyboard(telegram_id)
+
+
+@router.callback_query(F.data == "admin_diagnostics")
+async def callback_admin_diagnostics(callback: CallbackQuery, state: FSMContext):
+    if not is_admin(callback.from_user.id):
+        await callback.answer("Нет доступа", show_alert=True)
+        return
+    await state.set_state(AdminStates.waiting_diag_user_id)
+    await callback.message.edit_text(
+        "🔍 Диагностика пользователя\n\nВведите Telegram ID пользователя:",
+        reply_markup=cancel_keyboard(),
+    )
+    await callback.answer()
+
+
+@router.message(AdminStates.waiting_diag_user_id)
+async def process_diag_user_id(message: Message, state: FSMContext, db: Database):
+    if not is_admin(message.from_user.id):
+        await state.clear()
+        return
+
+    text_in = message.text.strip() if message.text else ""
+    try:
+        telegram_id = int(text_in)
+    except ValueError:
+        await message.answer("❌ Введите числовой Telegram ID:", reply_markup=cancel_keyboard())
+        return
+
+    await state.clear()
+
+    result = await _build_diag_text(telegram_id, db)
+    if not result:
+        await message.answer(
+            pe("❌ Пользователь с таким ID не найден."),
+            parse_mode="HTML",
+            reply_markup=admin_keyboard(),
+        )
+        return
+
+    diag_text, keyboard = result
+    await message.answer(diag_text, parse_mode="HTML", reply_markup=keyboard)
+
+
+@router.callback_query(F.data.startswith("admin_diag_show:"))
+async def callback_admin_diag_show(callback: CallbackQuery, db: Database):
+    if not is_admin(callback.from_user.id):
+        await callback.answer("Нет доступа", show_alert=True)
+        return
+
+    telegram_id = int(callback.data.split(":")[1])
+    result = await _build_diag_text(telegram_id, db)
+    if not result:
+        await callback.answer("Пользователь не найден", show_alert=True)
+        return
+
+    diag_text, keyboard = result
+    try:
+        await callback.message.edit_text(diag_text, parse_mode="HTML", reply_markup=keyboard)
+    except Exception:
+        await callback.message.answer(diag_text, parse_mode="HTML", reply_markup=keyboard)
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("admin_user_errors:"))
+async def callback_admin_user_errors(callback: CallbackQuery, db: Database):
+    if not is_admin(callback.from_user.id):
+        await callback.answer("Нет доступа", show_alert=True)
+        return
+
+    telegram_id = int(callback.data.split(":")[1])
+    user = await db.get_user(telegram_id)
+    if not user:
+        await callback.answer("Пользователь не найден", show_alert=True)
+        return
+
+    errors = await db.get_user_error_logs(user.id, limit=20)
+
+    if not errors:
+        text = pe(f"📋 <b>История ошибок</b>\n\nID: <code>{telegram_id}</code>\n\nОшибок не найдено.")
+    else:
+        text = pe(f"📋 <b>История ошибок</b> (последние {len(errors)})\n\nID: <code>{telegram_id}</code>\n\n")
+        for err in errors:
+            time_str = err.created_at.strftime("%d.%m %H:%M") if err.created_at else "?"
+            parts = [f"❌ <b>{err.error_type}</b>"]
+            if err.error_text:
+                parts.append(f"  {err.error_text[:80]}")
+            if err.account_display:
+                parts.append(f"  Акк: {err.account_display}")
+            if err.chat_identifier:
+                parts.append(f"  Чат: {err.chat_identifier}")
+            if err.mailing_name:
+                parts.append(f"  Рассылка: {err.mailing_name}")
+            parts.append(f"  🕐 {time_str}")
+            text += "\n".join(parts) + "\n\n"
+
+    try:
+        await callback.message.edit_text(
+            text, parse_mode="HTML", reply_markup=admin_errors_keyboard(telegram_id)
+        )
+    except Exception:
+        await callback.message.answer(
+            text, parse_mode="HTML", reply_markup=admin_errors_keyboard(telegram_id)
+        )
     await callback.answer()
 
 

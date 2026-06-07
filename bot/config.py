@@ -35,6 +35,8 @@ class Config:
     DATABASE_PATH: str = os.getenv("DATABASE_PATH", "data/bot.db")
     SESSIONS_PATH: str = os.getenv("SESSIONS_PATH", "sessions")
 
+    MAILING_DEBUG: bool = os.getenv("MAILING_DEBUG", "false").lower() == "true"
+
     # Default Telegram API credentials (from official apps)
     DEFAULT_API_ID: int = int(os.getenv("DEFAULT_API_ID") or os.getenv("API_ID", "2040"))
     DEFAULT_API_HASH: str = os.getenv("DEFAULT_API_HASH") or os.getenv("API_HASH", "b18441a1ff607e10a989891a5462e627")
