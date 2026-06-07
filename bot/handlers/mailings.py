@@ -268,6 +268,11 @@ async def callback_toggle_mailing(
         await callback.answer("Рассылка не найдена", show_alert=True)
         return
 
+    user = await db.get_user(callback.from_user.id)
+    if mailing.user_id != user.id:
+        await callback.answer("⛔ Нет доступа", show_alert=True)
+        return
+
     if mailing.is_active:
         await mailing_service.stop_mailing(mailing_id)
         await callback.answer("🔴 Рассылка остановлена")
@@ -523,6 +528,12 @@ async def callback_delete_message(callback: CallbackQuery, db: Database):
             return
         mailing_id = row["mailing_id"]
 
+    mailing = await db.get_mailing(mailing_id)
+    user = await db.get_user(callback.from_user.id)
+    if not mailing or mailing.user_id != user.id:
+        await callback.answer("⛔ Нет доступа", show_alert=True)
+        return
+
     await db.delete_mailing_message(message_id)
     messages = await db.get_mailing_messages(mailing_id)
 
@@ -635,6 +646,12 @@ async def callback_delete_target(callback: CallbackQuery, db: Database):
             await callback.answer("Чат не найден", show_alert=True)
             return
         mailing_id = row["mailing_id"]
+
+    mailing = await db.get_mailing(mailing_id)
+    user = await db.get_user(callback.from_user.id)
+    if not mailing or mailing.user_id != user.id:
+        await callback.answer("⛔ Нет доступа", show_alert=True)
+        return
 
     await db.delete_mailing_target(target_id)
     targets = await db.get_mailing_targets(mailing_id)
@@ -998,10 +1015,14 @@ async def callback_confirm_delete_mailing(
     callback: CallbackQuery, db: Database, mailing_service: MailingService
 ):
     mailing_id = int(callback.data.split(":")[1])
+    mailing = await db.get_mailing(mailing_id)
+    user = await db.get_user(callback.from_user.id)
+    if not mailing or mailing.user_id != user.id:
+        await callback.answer("⛔ Нет доступа", show_alert=True)
+        return
 
     await mailing_service.delete_mailing(mailing_id)
 
-    user = await db.get_user(callback.from_user.id)
     mailings = await db.get_user_mailings(user.id)
     await callback.message.edit_text(
         pe("✅ Рассылка удалена"),
@@ -1689,6 +1710,11 @@ async def callback_launch_mailing(
     callback: CallbackQuery, db: Database, mailing_service: MailingService
 ):
     mailing_id = int(callback.data.split(":")[1])
+    mailing = await db.get_mailing(mailing_id)
+    user = await db.get_user(callback.from_user.id)
+    if not mailing or mailing.user_id != user.id:
+        await callback.answer("⛔ Нет доступа", show_alert=True)
+        return
 
     success = await mailing_service.start_mailing(mailing_id)
 

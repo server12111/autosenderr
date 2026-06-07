@@ -18,6 +18,8 @@ from ..database.db import Database, Account
 from ..utils.premium_emoji import pe
 
 
+logger = logging.getLogger(__name__)
+
 _DEVICE_POOL = [
     {"device_model": "Samsung Galaxy A54",   "system_version": "Android 13", "app_version": "10.14.5"},
     {"device_model": "Xiaomi Redmi Note 12", "system_version": "Android 12", "app_version": "10.13.2"},
@@ -46,8 +48,6 @@ def _parse_proxy(proxy_str: Optional[str]) -> Optional[tuple]:
     except Exception as e:
         logger.warning(f"Failed to parse proxy '{proxy_str}': {e}")
         return None
-
-logger = logging.getLogger(__name__)
 
 # Exceptions that mean the account is banned/deactivated/session killed
 _BAN_ERRORS = (
@@ -91,6 +91,7 @@ class UserbotManager:
             if client.is_connected():
                 return client
 
+        client = None
         try:
             proxy = _parse_proxy(account.proxy)
             device = _DEVICE_POOL[account.id % len(_DEVICE_POOL)]
@@ -153,7 +154,8 @@ class UserbotManager:
         except _BAN_ERRORS as e:
             await self._handle_account_problem(account.id, e)
             try:
-                await client.disconnect()
+                if client is not None:
+                    await client.disconnect()
                 await asyncio.sleep(0)
             except Exception:
                 pass
@@ -161,7 +163,8 @@ class UserbotManager:
         except Exception as e:
             logger.error(f"Error starting client for {account.phone}: {e}")
             try:
-                await client.disconnect()
+                if client is not None:
+                    await client.disconnect()
                 await asyncio.sleep(0)
             except Exception:
                 pass

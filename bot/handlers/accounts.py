@@ -805,10 +805,12 @@ async def callback_confirm_delete_account(
 ):
     account_id = int(callback.data.split(":")[1])
     account = await db.get_account(account_id)
+    user = await db.get_user(callback.from_user.id)
+    if not account or account.user_id != user.id:
+        await callback.answer("⛔ Нет доступа", show_alert=True)
+        return
 
-    if account:
-        await userbot_manager.logout_and_stop(account)
-
+    await userbot_manager.logout_and_stop(account)
     await db.delete_account(account_id)
 
     user = await db.get_user(callback.from_user.id)
