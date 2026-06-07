@@ -840,12 +840,16 @@ class MailingService:
         self._tasks[mailing_id] = task
 
     async def _mailing_loop(self, mailing_id: int):
-        logger.info(f"Starting mailing loop for mailing {mailing_id}")
+        logger.info(f"Mailing {mailing_id}: loop started")
         try:
             while self._running:
                 try:
                     mailing = await self.db.get_mailing(mailing_id)
                     if not mailing or not mailing.is_active:
+                        logger.info(
+                            f"Mailing {mailing_id}: loop exiting — "
+                            f"{'not found in DB' if not mailing else 'is_active set to False'}"
+                        )
                         break
 
                     if not self._is_active_hours(mailing.active_hours_json):
@@ -856,8 +860,18 @@ class MailingService:
                     targets = await self.db.get_mailing_targets(mailing_id)
 
                     if not messages or not targets:
+                        logger.debug(
+                            f"Mailing {mailing_id}: no messages ({len(messages)}) or "
+                            f"targets ({len(targets)}), waiting 60s"
+                        )
                         await asyncio.sleep(60)
                         continue
+
+                    logger.info(
+                        f"Mailing {mailing_id} [{mailing.name}]: cycle — "
+                        f"{len(messages)} message(s), {len(targets)} target(s), "
+                        f"account_id={mailing.account_id}"
+                    )
 
                     # Resolve main client
                     client = await self.userbot_manager.get_client(mailing.account_id)
@@ -974,9 +988,13 @@ class MailingService:
                             except Exception as e:
                                 logger.warning(f"Mailing {mailing_id}: failed to get reply target: {e}")
 
+                        logger.info(
+                            f"Mailing {mailing_id}: [{target_idx + 1}/{len(targets)}] "
+                            f"→ {target} (account {current_account_id})"
+                        )
                         try:
                             await self._send_msg(target_client, target, msg, pm, reply_to=reply_to_id)
-                            logger.info(f"Mailing {mailing_id} sent to {target} via account {current_account_id}")
+                            logger.info(f"Mailing {mailing_id}: ✓ sent to {target} via account {current_account_id}")
                             await self.db.update_target_last_sent(target_obj.id, current_account_id)
                             sent_any = True
                         except _BAN_ERRORS as e:
@@ -1029,8 +1047,12 @@ class MailingService:
                                     except Exception:
                                         continue
                             if not fallback_sent:
-                                logger.warning(f"FloodWait {e.seconds}s for mailing {mailing_id}, no fallback available")
-                                await asyncio.sleep(e.seconds)
+                                wait = min(e.seconds, 3600)
+                                logger.warning(
+                                    f"Mailing {mailing_id}: FloodWait {e.seconds}s on account "
+                                    f"{current_account_id} for {target}, no fallback — sleeping {wait}s"
+                                )
+                                await asyncio.sleep(wait)
                         except (ChatSendMediaForbiddenError, ChatGuestSendForbiddenError, RightForbiddenError) as e:
                             logger.warning(f"Mailing {mailing_id}: send forbidden in '{target}' ({type(e).__name__}) — chat restricts this message type, skipping")
                         except Exception as e:
@@ -1086,7 +1108,11 @@ class MailingService:
                     mailing = await self.db.get_mailing(mailing_id)
                     if mailing and mailing.is_active:
                         logger.info(f"Mailing {mailing_id} auto-restarting after fatal error")
-                        await self._start_mailing_task(mailing_id)
+                        # Do NOT call _start_mailing_task here — it would cancel the current task
+                        # (us), causing CancelledError before the new task is created.
+                        # Instead, directly create a new task.
+                        new_task = asyncio.create_task(self._mailing_loop(mailing_id))
+                        self._tasks[mailing_id] = new_task
                 except Exception as restart_err:
                     logger.error(f"Mailing {mailing_id} auto-restart failed: {restart_err}")
 
