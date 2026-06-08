@@ -232,6 +232,7 @@ async def callback_pay_account_ton(
         invoice_id=comment,
         amount=amount,
         currency="TON",
+        payment_method="ton",
     )
 
     pay_url = ton_service.generate_payment_link(amount, comment)

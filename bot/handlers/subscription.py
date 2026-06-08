@@ -205,6 +205,7 @@ async def callback_pay_ton(
         amount=amount,
         currency="TON",
         plan_days=plan_days,
+        payment_method="ton",
     )
 
     pay_url = ton_service.generate_payment_link(amount, comment)
