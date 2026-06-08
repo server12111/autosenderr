@@ -170,8 +170,9 @@ async def _create_cryptobot_subscription(
         f"После оплаты нажмите «Проверить оплату»."
     )
 
+    support = await db.get_setting("card_manager_username") or "autosenderkarta"
     await callback.message.edit_text(
-        text, parse_mode="HTML", reply_markup=payment_keyboard(invoice.pay_url, invoice.invoice_id, plan_days)
+        text, parse_mode="HTML", reply_markup=payment_keyboard(invoice.pay_url, invoice.invoice_id, plan_days, support_username=support)
     )
 
 
@@ -219,8 +220,9 @@ async def callback_pay_ton(
         f"После оплаты нажмите «Проверить оплату»."
     )
 
+    support = await db.get_setting("card_manager_username") or "autosenderkarta"
     await callback.message.edit_text(
-        text, reply_markup=ton_payment_keyboard(pay_url, comment, plan_days)
+        text, reply_markup=ton_payment_keyboard(pay_url, comment, plan_days, support_username=support)
     )
     await callback.answer()
 
@@ -371,9 +373,10 @@ async def callback_pay_platega(
         f"Нажмите «Оплатить через СБП» для перехода к оплате.\n"
         f"После оплаты нажмите «Проверить оплату»."
     )
+    support = await db.get_setting("card_manager_username") or "autosenderkarta"
     await callback.message.edit_text(
         text, parse_mode="HTML",
-        reply_markup=platega_payment_keyboard(invoice["payment_url"], transaction_id, plan_days),
+        reply_markup=platega_payment_keyboard(invoice["payment_url"], transaction_id, plan_days, support_username=support),
     )
     await callback.answer()
 

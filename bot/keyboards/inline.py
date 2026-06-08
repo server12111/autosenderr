@@ -123,13 +123,20 @@ def delete_account_confirm_keyboard(account_id: int) -> InlineKeyboardMarkup:
     return builder.as_markup()
 
 
-def account_payment_keyboard(pay_url: str, invoice_id: str) -> InlineKeyboardMarkup:
+def account_payment_keyboard(pay_url: str, invoice_id: str, support_username: str = "") -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
     builder.row(_btn("💳 Оплатить", url=pay_url, style="success"))
-    builder.row(
-        _btn("🔄 Проверить оплату", callback_data=f"check_account_payment:{invoice_id}", style="primary"),
-        _btn("◀️ Назад", callback_data="account_payment_methods", style="primary"),
-    )
+    if support_username:
+        builder.row(
+            _btn("🔄 Проверить оплату", callback_data=f"check_account_payment:{invoice_id}", style="primary"),
+            _btn("🆘 Поддержка", url=f"https://t.me/{support_username.lstrip('@')}", style="danger"),
+        )
+        builder.row(_btn("◀️ Назад", callback_data="account_payment_methods", style="primary"))
+    else:
+        builder.row(
+            _btn("🔄 Проверить оплату", callback_data=f"check_account_payment:{invoice_id}", style="primary"),
+            _btn("◀️ Назад", callback_data="account_payment_methods", style="primary"),
+        )
     return builder.as_markup()
 
 
@@ -165,13 +172,20 @@ def account_payment_method_keyboard() -> InlineKeyboardMarkup:
     return builder.as_markup()
 
 
-def ton_account_payment_keyboard(pay_url: str, comment: str) -> InlineKeyboardMarkup:
+def ton_account_payment_keyboard(pay_url: str, comment: str, support_username: str = "") -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
     builder.row(_btn("💠 Оплатить через Tonkeeper", url=pay_url, style="success"))
-    builder.row(
-        _btn("🔄 Проверить оплату", callback_data=f"check_ton_account:{comment}", style="primary"),
-        _btn("◀️ Назад", callback_data="account_payment_methods", style="primary"),
-    )
+    if support_username:
+        builder.row(
+            _btn("🔄 Проверить оплату", callback_data=f"check_ton_account:{comment}", style="primary"),
+            _btn("🆘 Поддержка", url=f"https://t.me/{support_username.lstrip('@')}", style="danger"),
+        )
+        builder.row(_btn("◀️ Назад", callback_data="account_payment_methods", style="primary"))
+    else:
+        builder.row(
+            _btn("🔄 Проверить оплату", callback_data=f"check_ton_account:{comment}", style="primary"),
+            _btn("◀️ Назад", callback_data="account_payment_methods", style="primary"),
+        )
     return builder.as_markup()
 
 
@@ -473,13 +487,20 @@ def subscription_plan_keyboard() -> InlineKeyboardMarkup:
     return builder.as_markup()
 
 
-def payment_keyboard(pay_url: str, invoice_id: str, plan_days: int) -> InlineKeyboardMarkup:
+def payment_keyboard(pay_url: str, invoice_id: str, plan_days: int, support_username: str = "") -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
     builder.row(_btn("💳 Оплатить", url=pay_url, style="success"))
-    builder.row(
-        _btn("🔄 Проверить оплату", callback_data=f"check_payment:{invoice_id}", style="primary"),
-        _btn("◀️ Назад", callback_data=f"sub_plan:{plan_days}", style="primary"),
-    )
+    if support_username:
+        builder.row(
+            _btn("🔄 Проверить оплату", callback_data=f"check_payment:{invoice_id}", style="primary"),
+            _btn("🆘 Поддержка", url=f"https://t.me/{support_username.lstrip('@')}", style="danger"),
+        )
+        builder.row(_btn("◀️ Назад", callback_data=f"sub_plan:{plan_days}", style="primary"))
+    else:
+        builder.row(
+            _btn("🔄 Проверить оплату", callback_data=f"check_payment:{invoice_id}", style="primary"),
+            _btn("◀️ Назад", callback_data=f"sub_plan:{plan_days}", style="primary"),
+        )
     return builder.as_markup()
 
 
@@ -499,23 +520,37 @@ def payment_method_keyboard(show_platega: bool = False, show_ton: bool = True) -
     return builder.as_markup()
 
 
-def platega_payment_keyboard(pay_url: str, order_id: str, plan_days: int) -> InlineKeyboardMarkup:
+def platega_payment_keyboard(pay_url: str, order_id: str, plan_days: int, support_username: str = "") -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
     builder.row(_btn("💳 Оплатить через СБП", url=pay_url, style="success"))
-    builder.row(
-        _btn("🔄 Проверить оплату", callback_data=f"check_platega:{order_id}", style="primary"),
-        _btn("◀️ Назад", callback_data=f"sub_plan:{plan_days}", style="primary"),
-    )
+    if support_username:
+        builder.row(
+            _btn("🔄 Проверить оплату", callback_data=f"check_platega:{order_id}", style="primary"),
+            _btn("🆘 Поддержка", url=f"https://t.me/{support_username.lstrip('@')}", style="danger"),
+        )
+        builder.row(_btn("◀️ Назад", callback_data=f"sub_plan:{plan_days}", style="primary"))
+    else:
+        builder.row(
+            _btn("🔄 Проверить оплату", callback_data=f"check_platega:{order_id}", style="primary"),
+            _btn("◀️ Назад", callback_data=f"sub_plan:{plan_days}", style="primary"),
+        )
     return builder.as_markup()
 
 
-def ton_payment_keyboard(pay_url: str, comment: str, plan_days: int) -> InlineKeyboardMarkup:
+def ton_payment_keyboard(pay_url: str, comment: str, plan_days: int, support_username: str = "") -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
     builder.row(_btn("💠 Оплатить через Tonkeeper", url=pay_url, style="success"))
-    builder.row(
-        _btn("🔄 Проверить оплату", callback_data=f"check_ton_payment:{comment}", style="primary"),
-        _btn("◀️ Назад", callback_data=f"sub_plan:{plan_days}", style="primary"),
-    )
+    if support_username:
+        builder.row(
+            _btn("🔄 Проверить оплату", callback_data=f"check_ton_payment:{comment}", style="primary"),
+            _btn("🆘 Поддержка", url=f"https://t.me/{support_username.lstrip('@')}", style="danger"),
+        )
+        builder.row(_btn("◀️ Назад", callback_data=f"sub_plan:{plan_days}", style="primary"))
+    else:
+        builder.row(
+            _btn("🔄 Проверить оплату", callback_data=f"check_ton_payment:{comment}", style="primary"),
+            _btn("◀️ Назад", callback_data=f"sub_plan:{plan_days}", style="primary"),
+        )
     return builder.as_markup()
 
 

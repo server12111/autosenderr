@@ -192,10 +192,11 @@ async def _create_cryptobot_account_payment(callback: CallbackQuery, db: Databas
         f"💰 Стоимость дополнительного аккаунта: <b>{extra_cost} USDT</b>\n\n"
         "Оплатите счёт и нажмите «Проверить оплату»."
     )
+    support = await db.get_setting("card_manager_username") or "autosenderkarta"
     await callback.message.edit_text(
         text,
         parse_mode="HTML",
-        reply_markup=account_payment_keyboard(invoice.pay_url, invoice.invoice_id),
+        reply_markup=account_payment_keyboard(invoice.pay_url, invoice.invoice_id, support_username=support),
     )
 
 
@@ -245,8 +246,9 @@ async def callback_pay_account_ton(
         f"После оплаты нажмите «Проверить оплату»."
     )
 
+    support = await db.get_setting("card_manager_username") or "autosenderkarta"
     await callback.message.edit_text(
-        text, parse_mode="HTML", reply_markup=ton_account_payment_keyboard(pay_url, comment)
+        text, parse_mode="HTML", reply_markup=ton_account_payment_keyboard(pay_url, comment, support_username=support)
     )
     await callback.answer()
 
