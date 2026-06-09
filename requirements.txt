@@ -7,4 +7,5 @@ aiohttp>=3.9.0
 pytz>=2024.1
 peewee>=3.17.0
 PySocks>=1.7.1
+python-socks[asyncio]>=2.4.0
 matplotlib>=3.7.0
