@@ -10,7 +10,7 @@ from ..keyboards.inline import (
     account_menu_keyboard, mailing_menu_keyboard,
     mailing_messages_keyboard, mailing_targets_keyboard,
     mailing_creation_messages_keyboard, mailing_creation_targets_keyboard,
-    active_hours_keyboard, reply_mode_select_keyboard,
+    active_hours_keyboard, reply_mode_select_keyboard, dm_mailing_keyboard,
 )
 from ..config import config
 from ..utils.premium_emoji import pe
@@ -32,7 +32,18 @@ async def check_channels_subscription(bot, user_id: int, channels) -> list:
 
 
 @router.message(Command("start"))
-async def cmd_start(message: Message, db: Database):
+async def cmd_start(message: Message, db: Database, state: FSMContext):
+    current_state = await state.get_state()
+    if current_state and "AddAccount" in current_state:
+        data = await state.get_data()
+        client = data.get("client")
+        if client:
+            try:
+                await client.disconnect()
+            except Exception:
+                pass
+        await state.clear()
+
     args = message.text.split(maxsplit=1)
     ref_code = None
     if len(args) > 1:
@@ -40,7 +51,7 @@ async def cmd_start(message: Message, db: Database):
         if param.startswith("ref_"):
             ref_code = param[4:]
 
-    user = await db.get_or_create_user(
+    user, is_new = await db.get_or_create_user(
         message.from_user.id, message.from_user.username
     )
 
@@ -74,6 +85,28 @@ async def cmd_start(message: Message, db: Database):
         "Выберите раздел ниже 👇"
     )
     await message.answer(text, parse_mode="HTML", reply_markup=main_menu_keyboard())
+
+    if is_new:
+        promo = await db.get_promocode("free")
+        if promo and promo.uses_count < promo.max_uses:
+            pin_msg = await message.answer(
+                pe(
+                    "🎟 <b>Промокод в подарок!</b>\n\n"
+                    "🔥 <b>1 день</b> бесплатного доступа — специально для тебя:\n\n"
+                    "<code>free</code>\n\n"
+                    "⭐ Активируй в разделе <b>«Подписка»</b>"
+                ),
+                parse_mode="HTML",
+            )
+            try:
+                await message.bot.pin_chat_message(
+                    chat_id=message.chat.id,
+                    message_id=pin_msg.message_id,
+                    disable_notification=True,
+                )
+                await db.update_user_pin_msg_id(user.id, pin_msg.message_id)
+            except Exception:
+                pass
 
 
 @router.callback_query(F.data == "check_channels")
@@ -114,26 +147,23 @@ async def callback_help(callback: CallbackQuery, db: Database):
     support = await db.get_setting("card_manager_username") or "autosenderkarta"
     text = pe(
         "ℹ️ <b>Помощь</b>\n\n"
-        "<b>📋 Рассылки</b> — создание и управление рассылками по чатам\n"
-        "<b>👤 Аккаунты</b> — добавление Telegram-аккаунтов для рассылок\n"
-        "<b>💳 Подписка</b> — тарифы и способы оплаты\n"
-        "<b>🤝 Рефералы</b> — приглашайте друзей и зарабатывайте\n\n"
+        "<b>📋 Рассылки</b> — рассылай сообщения по чатам и группам\n"
+        "• Текст, фото, пересылка сообщений\n"
+        "• Расписание по времени и интервалам\n"
+        "• Несколько аккаунтов на одну рассылку\n\n"
+        "<b>👤 Аккаунты</b> — добавляй Telegram-аккаунты\n"
+        "• Поддержка прокси SOCKS5\n"
+        "• Автоответчик в ЛС и группах\n\n"
+        "<b>💳 Подписка</b> — CryptoBot, TON, карта, промокоды\n"
+        "<b>🤝 Рефералы</b> — приглашай друзей и получай % с оплат\n\n"
         "➕ <b>Как добавить аккаунт:</b>\n"
-        "1. Перейдите в «Аккаунты» → «Добавить аккаунт»\n"
-        "2. При желании укажите прокси SOCKS5\n"
-        "3. При желании укажите свой API ID + Hash\n"
-        "4. Введите номер телефона\n"
-        "5. Введите код из Telegram\n\n"
-        "📤 <b>Как создать рассылку:</b>\n"
-        "1. Перейдите в «Рассылки» → «Создать»\n"
-        "2. Выберите аккаунт и задайте название\n"
-        "3. Добавьте сообщения (текст или фото)\n"
-        "4. Укажите целевые чаты/группы\n"
-        "5. Настройте интервал и расписание\n"
-        "6. Запустите рассылку\n\n"
-        "🤖 <b>Автоответчик:</b>\n"
-        "• <i>Личный</i> — отвечает на входящие ЛС (каждому один раз)\n"
-        "• <i>Групповой</i> — отвечает на реплаи в группах (каждый раз)\n\n"
+        "1. «Аккаунты» → «Добавить аккаунт»\n"
+        "2. При желании укажи прокси SOCKS5\n"
+        "3. Введи номер телефона и код из Telegram\n\n"
+        "📤 <b>Как запустить рассылку:</b>\n"
+        "1. «Рассылки» → «Создать»\n"
+        "2. Выбери аккаунт, добавь сообщения и чаты\n"
+        "3. Настрой интервал, расписание → Запуск\n\n"
         f"🆘 <b>Поддержка:</b> @{support}"
     )
     privacy_url = getattr(config, 'PRIVACY_URL', None) or None
@@ -141,6 +171,22 @@ async def callback_help(callback: CallbackQuery, db: Database):
     await callback.message.edit_text(
         text, parse_mode="HTML",
         reply_markup=help_keyboard(support_username=support, privacy_url=privacy_url, terms_url=terms_url)
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data == "dm_mailing_info")
+async def callback_dm_mailing_info(callback: CallbackQuery):
+    await callback.message.edit_text(
+        pe(
+            "📲 <b>Рассылка в личные сообщения</b>\n\n"
+            "Хотите отправлять сообщения напрямую в ЛС пользователей?\n\n"
+            "У нас есть отдельный бот специально для этого — он умеет делать рассылки "
+            "прямо в личные сообщения.\n\n"
+            "👇 Перейдите и попробуйте: @feAutoSenderDMbot"
+        ),
+        parse_mode="HTML",
+        reply_markup=dm_mailing_keyboard(),
     )
     await callback.answer()
 

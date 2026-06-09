@@ -747,8 +747,11 @@ class MailingService:
 
     async def stop(self):
         self._running = False
-        for task in self._tasks.values():
+        tasks = list(self._tasks.values())
+        for task in tasks:
             task.cancel()
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
         self._tasks.clear()
 
     async def start_mailing(self, mailing_id: int) -> bool:
@@ -1160,7 +1163,8 @@ class MailingService:
 
                     # Sleep until next possible send (min 30s, max 60s)
                     min_interval = min(
-                        t.interval_seconds or mailing.interval_seconds for t in targets
+                        (t.interval_seconds or mailing.interval_seconds for t in targets),
+                        default=mailing.interval_seconds,
                     )
                     sleep_time = max(30, min(60, min_interval // 10))
                     await asyncio.sleep(sleep_time)
@@ -1240,11 +1244,9 @@ class MailingService:
             logger.info(f"Mailing {mailing_id}: auto-joined '{target}'")
             await asyncio.sleep(2)
         except UserAlreadyParticipantError:
-            logger.warning(f"Mailing {mailing_id}: already participant in '{target}' — slow mode or temporary restriction, skipping")
-            return False
+            logger.info(f"Mailing {mailing_id}: already participant in '{target}' — trying to send")
         except InviteRequestSentError:
-            logger.info(f"Mailing {mailing_id}: join request sent for '{target}' — pending approval, skipping")
-            return False
+            logger.info(f"Mailing {mailing_id}: join request sent/pending for '{target}' — trying to send anyway")
         except Exception as e:
             logger.warning(f"Mailing {mailing_id}: failed to join '{target}': {e}")
             return False
@@ -1276,11 +1278,14 @@ class SubscriptionCheckerService:
 
     async def _loop(self, bot):
         while True:
-            await asyncio.sleep(3600)  # check every hour
             try:
+                await asyncio.sleep(3600)  # check every hour
                 await self._check(bot)
+            except asyncio.CancelledError:
+                raise
             except Exception as e:
-                logger.error(f"Subscription checker error: {e}")
+                logger.error(f"Subscription checker error: {e}", exc_info=True)
+                await asyncio.sleep(60)
 
     async def _send_reminder(self, bot, user, days: int):
         from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
@@ -1299,7 +1304,7 @@ class SubscriptionCheckerService:
 
     async def _check(self, bot):
         from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
-        users = await self.db.get_all_users()
+        users = await self.db.get_users_needing_subscription_check()
         now = datetime.now()
         for user in users:
             if not user.subscription_end:

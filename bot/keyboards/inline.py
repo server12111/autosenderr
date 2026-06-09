@@ -55,22 +55,26 @@ def help_keyboard(support_username: Optional[str] = None,
                   privacy_url: Optional[str] = None,
                   terms_url: Optional[str] = None) -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
-    if privacy_url:
-        builder.row(InlineKeyboardButton(
-            text="Политика конфиденциальности", url=privacy_url,
-            icon_custom_emoji_id="5429405838345265327"
-        ))
-    if terms_url:
-        builder.row(InlineKeyboardButton(
-            text="Пользовательское соглашение", url=terms_url,
-            icon_custom_emoji_id="5188639433544447819"
-        ))
+    if privacy_url and terms_url:
+        builder.row(
+            InlineKeyboardButton(text="Политика конф.", url=privacy_url, icon_custom_emoji_id="5429405838345265327"),
+            InlineKeyboardButton(text="Польз. соглашение", url=terms_url, icon_custom_emoji_id="5188639433544447819"),
+        )
+    elif privacy_url:
+        builder.row(InlineKeyboardButton(text="Политика конфиденциальности", url=privacy_url, icon_custom_emoji_id="5429405838345265327"))
+    elif terms_url:
+        builder.row(InlineKeyboardButton(text="Пользовательское соглашение", url=terms_url, icon_custom_emoji_id="5188639433544447819"))
     if support_username:
-        builder.row(InlineKeyboardButton(
-            text="Поддержка", url=f"https://t.me/{support_username.lstrip('@')}",
-            icon_custom_emoji_id="5388805667114988189"
-        ))
+        builder.row(_btn("🆘 Поддержка", url=f"https://t.me/{support_username.lstrip('@')}", style="danger"))
+    builder.row(_btn("📲 Рассылка в ЛС", callback_data="dm_mailing_info", style="success"))
     builder.row(_btn("◀️ Главное меню", callback_data="main_menu", style="primary"))
+    return builder.as_markup()
+
+
+def dm_mailing_keyboard() -> InlineKeyboardMarkup:
+    builder = InlineKeyboardBuilder()
+    builder.row(_btn("🚀 Перейти к боту", url="https://t.me/feAutoSenderDMbot", style="success"))
+    builder.row(_btn("◀️ Назад", callback_data="help", style="primary"))
     return builder.as_markup()
 
 
@@ -735,6 +739,7 @@ def admin_promo_list_keyboard(promocodes: list[Promocode]) -> InlineKeyboardMark
                 callback_data=f"admin_promo_info:{promo.id}",
                 style="primary",
             ),
+            _btn("✏️", callback_data=f"admin_edit_promo_uses:{promo.id}", style="primary"),
             _btn("🗑️", callback_data=f"admin_delete_promo:{promo.id}", style="danger"),
         )
     builder.row(_btn("◀️ Назад", callback_data="admin_promocodes", style="primary"))

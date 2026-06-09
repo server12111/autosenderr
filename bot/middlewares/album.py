@@ -25,6 +25,8 @@ class AlbumMiddleware(BaseMiddleware):
         album_id = event.media_group_id
         self.albums.setdefault(album_id, []).append(event)
 
+        asyncio.get_running_loop().call_later(5.0, self.albums.pop, album_id, None)
+
         await asyncio.sleep(self.LATENCY)
 
         album = self.albums.pop(album_id, None)

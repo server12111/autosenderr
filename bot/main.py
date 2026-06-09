@@ -1,4 +1,5 @@
 import asyncio
+import contextlib
 import logging
 import os
 import sys
@@ -113,22 +114,44 @@ async def main():
     dp["mailing_service"] = mailing_service
     dp["autoresponder_service"] = autoresponder_service
 
+    def _task_done_callback(task: asyncio.Task):
+        if not task.cancelled():
+            exc = task.exception()
+            if exc:
+                logger.critical(f"Background task '{task.get_name()}' died unexpectedly: {exc}", exc_info=exc)
+
     try:
         await userbot_manager.start_all_clients()
         logger.info("Userbot clients started")
 
         userbot_manager.start_monitor()
+        if userbot_manager._monitor_task:
+            userbot_manager._monitor_task.add_done_callback(_task_done_callback)
         logger.info("Account monitor started")
 
         await mailing_service.start()
         logger.info("Mailing service started")
 
         subscription_checker.start(bot)
+        if subscription_checker._task:
+            subscription_checker._task.add_done_callback(_task_done_callback)
         logger.info("Subscription checker started")
 
         logger.info("Starting bot polling...")
-        await dp.start_polling(bot)
+        try:
+            await dp.start_polling(bot)
+        except Exception as e:
+            logger.critical(f"Polling stopped unexpectedly: {e}", exc_info=True)
+            raise
     finally:
+        if subscription_checker._task and not subscription_checker._task.done():
+            subscription_checker._task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await subscription_checker._task
+        if userbot_manager._monitor_task and not userbot_manager._monitor_task.done():
+            userbot_manager._monitor_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await userbot_manager._monitor_task
         await mailing_service.stop()
         await userbot_manager.stop_all_clients()
         await db.close()
@@ -137,7 +160,19 @@ async def main():
 
 
 if __name__ == "__main__":
-    try:
-        asyncio.run(main())
-    except KeyboardInterrupt:
-        logger.info("Bot stopped by user")
+    import time
+    attempt = 0
+    while True:
+        attempt += 1
+        logger.info(f"=== Bot starting (attempt #{attempt}) ===")
+        try:
+            asyncio.run(main())
+            logger.info("Bot exited cleanly — not restarting")
+            break
+        except (KeyboardInterrupt, SystemExit):
+            logger.info("Bot stopped by user")
+            break
+        except Exception as e:
+            logger.critical(f"Bot crashed: {e}", exc_info=True)
+            logger.info("Restarting in 5 seconds...")
+            time.sleep(5)

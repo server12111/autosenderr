@@ -14,6 +14,7 @@ from aiogram.types import Message, CallbackQuery, FSInputFile, BufferedInputFile
 from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
+from aiogram.exceptions import TelegramBadRequest
 import aiosqlite
 
 from ..database.db import Database
@@ -54,6 +55,7 @@ class AdminStates(StatesGroup):
     waiting_card_manager = State()
     waiting_db_file = State()
     waiting_diag_user_id = State()
+    waiting_promo_edit_uses = State()
 
 
 def is_admin(user_id: int) -> bool:
@@ -79,34 +81,37 @@ _PERIOD_LABELS = {
 }
 
 
-def _build_chart_image(data: list, title: str) -> io.BytesIO:
-    labels = [d[0] for d in data] or ["—"]
-    values = [d[1] for d in data] or [0]
-    fig, ax = plt.subplots(figsize=(10, 4))
-    fig.patch.set_facecolor("#1e1e2e")
-    ax.set_facecolor("#1e1e2e")
-    bars = ax.bar(range(len(labels)), values, color="#7c9eff", width=0.6)
-    ax.set_xticks(range(len(labels)))
-    ax.set_xticklabels(labels, rotation=45, ha="right", color="white", fontsize=8)
-    ax.tick_params(colors="white")
-    for spine in ax.spines.values():
-        spine.set_color("#444")
-    ax.set_title(title, color="white", fontsize=12, pad=10)
-    ax.set_ylabel("Пользователи", color="white")
-    for bar, val in zip(bars, values):
-        if val > 0:
-            ax.text(
-                bar.get_x() + bar.get_width() / 2,
-                bar.get_height() + 0.1,
-                str(val),
-                ha="center", va="bottom", color="white", fontsize=8,
-            )
-    plt.tight_layout()
-    buf = io.BytesIO()
-    plt.savefig(buf, format="png", dpi=120, facecolor=fig.get_facecolor())
-    plt.close(fig)
-    buf.seek(0)
-    return buf
+def _build_chart_image(data: list, title: str) -> io.BytesIO | None:
+    try:
+        labels = [d[0] for d in data] or ["—"]
+        values = [d[1] for d in data] or [0]
+        fig, ax = plt.subplots(figsize=(10, 4))
+        fig.patch.set_facecolor("#1e1e2e")
+        ax.set_facecolor("#1e1e2e")
+        bars = ax.bar(range(len(labels)), values, color="#7c9eff", width=0.6)
+        ax.set_xticks(range(len(labels)))
+        ax.set_xticklabels(labels, rotation=45, ha="right", color="white", fontsize=8)
+        ax.tick_params(colors="white")
+        for spine in ax.spines.values():
+            spine.set_color("#444")
+        ax.set_title(title, color="white", fontsize=12, pad=10)
+        ax.set_ylabel("Пользователи", color="white")
+        for bar, val in zip(bars, values):
+            if val > 0:
+                ax.text(
+                    bar.get_x() + bar.get_width() / 2,
+                    bar.get_height() + 0.1,
+                    str(val),
+                    ha="center", va="bottom", color="white", fontsize=8,
+                )
+        plt.tight_layout()
+        buf = io.BytesIO()
+        plt.savefig(buf, format="png", dpi=120, facecolor=fig.get_facecolor())
+        plt.close(fig)
+        buf.seek(0)
+        return buf
+    except Exception:
+        return None
 
 
 async def _send_stats(callback: CallbackQuery, db: Database, period: str, bot):
@@ -138,17 +143,25 @@ async def _send_stats(callback: CallbackQuery, db: Database, period: str, bot):
         f"📋 Всего рассылок: <b>{total_mailings}</b>"
     )
 
-    photo = BufferedInputFile(chart_buf.read(), filename="stats.png")
     keyboard = admin_stats_period_keyboard(active=period)
-
     await callback.message.delete()
-    await bot.send_photo(
-        chat_id=callback.from_user.id,
-        photo=photo,
-        caption=caption,
-        parse_mode="HTML",
-        reply_markup=keyboard,
-    )
+
+    if chart_buf:
+        photo = BufferedInputFile(chart_buf.read(), filename="stats.png")
+        await bot.send_photo(
+            chat_id=callback.from_user.id,
+            photo=photo,
+            caption=caption,
+            parse_mode="HTML",
+            reply_markup=keyboard,
+        )
+    else:
+        await bot.send_message(
+            chat_id=callback.from_user.id,
+            text=caption,
+            parse_mode="HTML",
+            reply_markup=keyboard,
+        )
 
 
 @router.callback_query(F.data == "admin_stats")
@@ -285,11 +298,14 @@ async def process_broadcast(message: Message, state: FSMContext, db: Database):
             failed += 1
 
     await state.clear()
-    await status_msg.edit_text(
-        pe(f"✅ Рассылка завершена\n\nОтправлено: {sent}\nОшибок: {failed}"),
-        parse_mode="HTML",
-        reply_markup=admin_keyboard(),
-    )
+    try:
+        await status_msg.edit_text(
+            pe(f"✅ Рассылка завершена\n\nОтправлено: {sent}\nОшибок: {failed}"),
+            parse_mode="HTML",
+            reply_markup=admin_keyboard(),
+        )
+    except TelegramBadRequest:
+        pass
 
 
 # === Promocodes ===
@@ -455,6 +471,88 @@ async def callback_admin_delete_promo(callback: CallbackQuery, db: Database):
         status = "✅ Исчерпан" if promo.uses_count >= promo.max_uses else f"🟢 {promo.uses_count}/{promo.max_uses}"
         text += f"<b>{promo.code}</b> — {promo.duration_days} дн. — {status}\n"
     await callback.message.edit_text(text, reply_markup=admin_promo_list_keyboard(promocodes))
+
+
+@router.callback_query(F.data.startswith("admin_edit_promo_uses:"))
+async def callback_admin_edit_promo_uses(callback: CallbackQuery, state: FSMContext, db: Database):
+    if not is_admin(callback.from_user.id):
+        await callback.answer("Нет доступа", show_alert=True)
+        return
+    promo_id = int(callback.data.split(":")[1])
+    promo = None
+    for p in await db.get_all_promocodes():
+        if p.id == promo_id:
+            promo = p
+            break
+    if not promo:
+        await callback.answer("Промокод не найден", show_alert=True)
+        return
+    await state.set_state(AdminStates.waiting_promo_edit_uses)
+    await state.update_data(promo_id=promo_id)
+    await callback.message.edit_text(
+        pe(f"✏️ Изменение лимита промокода <b>{promo.code}</b>\n\n"
+           f"Текущий лимит: <b>{promo.max_uses}</b> (использовано: {promo.uses_count})\n\n"
+           "Введите новое максимальное количество использований:"),
+        parse_mode="HTML",
+        reply_markup=cancel_keyboard(),
+    )
+    await callback.answer()
+
+
+@router.message(AdminStates.waiting_promo_edit_uses)
+async def process_promo_edit_uses(message: Message, state: FSMContext, db: Database):
+    if not is_admin(message.from_user.id):
+        await state.clear()
+        return
+    try:
+        new_max = int(message.text.strip())
+    except ValueError:
+        await message.answer(pe("❌ Введите целое число."), parse_mode="HTML", reply_markup=cancel_keyboard())
+        return
+    if new_max < 1:
+        await message.answer(pe("❌ Лимит должен быть не менее 1."), parse_mode="HTML", reply_markup=cancel_keyboard())
+        return
+
+    data = await state.get_data()
+    promo_id = data["promo_id"]
+    await db.update_promocode_max_uses(promo_id, new_max)
+    await state.clear()
+
+    promocodes = await db.get_all_promocodes()
+    text = "🎟 Список промокодов:\n\n"
+    for promo in promocodes:
+        status = "✅ Исчерпан" if promo.uses_count >= promo.max_uses else f"🟢 {promo.uses_count}/{promo.max_uses}"
+        text += f"<b>{promo.code}</b> — {promo.duration_days} дн. — {status}\n"
+    await message.answer(
+        pe(f"✅ Лимит обновлён: <b>{new_max}</b> использований.\n\n") + text,
+        parse_mode="HTML",
+        reply_markup=admin_promo_list_keyboard(promocodes),
+    )
+
+
+@router.callback_query(F.data.startswith("admin_promo_info:"))
+async def callback_admin_promo_info(callback: CallbackQuery, db: Database):
+    if not is_admin(callback.from_user.id):
+        await callback.answer("Нет доступа", show_alert=True)
+        return
+    promo_id = int(callback.data.split(":")[1])
+    promo = next((p for p in await db.get_all_promocodes() if p.id == promo_id), None)
+    if not promo:
+        await callback.answer("Промокод не найден", show_alert=True)
+        return
+    status = "✅ Исчерпан" if promo.uses_count >= promo.max_uses else f"🟢 Активен ({promo.uses_count}/{promo.max_uses})"
+    sub_label = "💳 Платная подписка" if promo.is_subscription else "🎟 Обычный"
+    text = pe(
+        f"🎟 <b>Промокод: {promo.code}</b>\n\n"
+        f"📅 Дней подписки: <b>{promo.duration_days}</b>\n"
+        f"📊 Использований: <b>{promo.uses_count}/{promo.max_uses}</b>\n"
+        f"🔖 Тип: {sub_label}\n"
+        f"🔴 Статус: {status}"
+    )
+    from ..keyboards.inline import admin_promo_list_keyboard
+    promocodes = await db.get_all_promocodes()
+    await callback.message.edit_text(text, parse_mode="HTML", reply_markup=admin_promo_list_keyboard(promocodes))
+    await callback.answer()
 
 
 # === Settings panel ===

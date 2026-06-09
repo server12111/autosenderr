@@ -27,6 +27,7 @@ class User:
     subscription_expired_notified_at: Optional[datetime] = None
     reminder_3d_sent_at: Optional[datetime] = None
     reminder_1d_sent_at: Optional[datetime] = None
+    welcome_pin_msg_id: Optional[int] = None
 
     @property
     def display_name(self) -> str:
@@ -265,6 +266,7 @@ class Database:
         await _add_col("users", "subscription_expired_notified_at", "DATETIME DEFAULT NULL")
         await _add_col("users", "reminder_3d_sent_at", "DATETIME DEFAULT NULL")
         await _add_col("users", "reminder_1d_sent_at", "DATETIME DEFAULT NULL")
+        await _add_col("users", "welcome_pin_msg_id", "INTEGER DEFAULT NULL")
         # mailing_accounts — multiple accounts per mailing (round-robin)
         await self._conn.execute("""
             CREATE TABLE IF NOT EXISTS mailing_accounts (
@@ -336,6 +338,7 @@ class Database:
             subscription_expired_notified_at=self._parse_datetime(row["subscription_expired_notified_at"]) if "subscription_expired_notified_at" in keys else None,
             reminder_3d_sent_at=self._parse_datetime(row["reminder_3d_sent_at"]) if "reminder_3d_sent_at" in keys else None,
             reminder_1d_sent_at=self._parse_datetime(row["reminder_1d_sent_at"]) if "reminder_1d_sent_at" in keys else None,
+            welcome_pin_msg_id=row["welcome_pin_msg_id"] if "welcome_pin_msg_id" in keys and row["welcome_pin_msg_id"] is not None else None,
         )
 
     def _row_to_account(self, row) -> "Account":
@@ -390,18 +393,19 @@ class Database:
         await self._conn.commit()
         return await self.get_user(telegram_id)
 
-    async def get_or_create_user(self, telegram_id: int, username: Optional[str] = None) -> User:
+    async def get_or_create_user(self, telegram_id: int, username: Optional[str] = None) -> tuple:
         user = await self.get_user(telegram_id)
         if not user:
             from ..config import config
             is_admin = telegram_id in config.ADMIN_IDS
             user = await self.create_user(telegram_id, username, is_admin)
-        elif not user.ref_code:
+            return user, True
+        if not user.ref_code:
             ref_code = secrets.token_urlsafe(6)
             await self._conn.execute("UPDATE users SET ref_code=? WHERE id=?", (ref_code, user.id))
             await self._conn.commit()
             user = await self.get_user(telegram_id)
-        return user
+        return user, False
 
     async def set_referred_by(self, user_id: int, referrer_id: int):
         await self._conn.execute(
@@ -424,6 +428,12 @@ class Database:
         )
         await self._conn.commit()
 
+    async def update_user_pin_msg_id(self, user_id: int, msg_id: Optional[int]):
+        await self._conn.execute(
+            "UPDATE users SET welcome_pin_msg_id = ? WHERE id = ?", (msg_id, user_id)
+        )
+        await self._conn.commit()
+
     async def disable_user_autoresponders(self, user_id: int):
         """Disable all autoresponders for all accounts of a user."""
         await self._conn.execute(
@@ -442,6 +452,15 @@ class Database:
 
     async def get_all_users(self) -> list[User]:
         async with self._conn.execute("SELECT * FROM users") as cur:
+            return [self._row_to_user(r) for r in await cur.fetchall()]
+
+    async def get_users_needing_subscription_check(self) -> list[User]:
+        """Return only users with active or recently expired subscriptions — avoids full table scan."""
+        async with self._conn.execute(
+            """SELECT * FROM users
+               WHERE subscription_end IS NOT NULL
+                 AND subscription_end > datetime('now', '-2 days')"""
+        ) as cur:
             return [self._row_to_user(r) for r in await cur.fetchall()]
 
     async def get_referral_count(self, user_id: int) -> int:
@@ -1165,6 +1184,14 @@ class Database:
 
     async def delete_promocode(self, promo_id: int):
         await self._conn.execute("DELETE FROM promocodes WHERE id = ?", (promo_id,))
+        await self._conn.commit()
+
+    async def update_promocode_max_uses(self, promo_id: int, new_max_uses: int):
+        await self._conn.execute(
+            "UPDATE promocodes SET max_uses = ?, "
+            "is_used = CASE WHEN uses_count >= ? THEN 1 ELSE 0 END WHERE id = ?",
+            (new_max_uses, new_max_uses, promo_id),
+        )
         await self._conn.commit()
 
     # === Withdrawal Requests ===

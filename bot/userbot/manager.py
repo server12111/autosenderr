@@ -160,6 +160,33 @@ class UserbotManager:
             except Exception:
                 pass
             return None
+        except (OSError, asyncio.TimeoutError, ConnectionError) as e:
+            logger.error(f"Proxy connection failed for {account.phone}: {e}")
+            try:
+                if client is not None:
+                    await client.disconnect()
+                await asyncio.sleep(0)
+            except Exception:
+                pass
+            if account.proxy and self._bot_notify_callback:
+                try:
+                    user = await self.db.get_user_by_id(account.user_id)
+                    if user:
+                        await self._bot_notify_callback(
+                            user.telegram_id,
+                            pe(
+                                f"⚠️ <b>Проблема с прокси!</b>\n\n"
+                                f"📱 Аккаунт: <b>{account.display_name}</b>\n"
+                                f"❌ Прокси <code>{account.proxy}</code> недоступен или неверные данные.\n\n"
+                                f"Из-за этого бот не может отправлять сообщения — аккаунт был отключён автоматически.\n\n"
+                                f"Чтобы возобновить рассылку:\n"
+                                f"1. Зайдите в раздел «Аккаунты»\n"
+                                f"2. Откройте аккаунт и установите рабочий прокси"
+                            ),
+                        )
+                except Exception as ne:
+                    logger.error(f"Failed to notify about proxy error for account {account.id}: {ne}")
+            return None
         except Exception as e:
             logger.error(f"Error starting client for {account.phone}: {e}")
             try:
@@ -218,28 +245,34 @@ class UserbotManager:
 
     async def _monitor_loop(self):
         while True:
-            await asyncio.sleep(_MONITOR_INTERVAL)
-            for account_id in list(self._clients.keys()):
-                try:
-                    client = self._clients[account_id]
-                    if not client.is_connected():
-                        try:
-                            await client.connect()
-                        except _BAN_ERRORS as e:
-                            await self._handle_account_problem(account_id, e)
-                            continue
-                    await client.get_me()
+            try:
+                await asyncio.sleep(_MONITOR_INTERVAL)
+                for account_id in list(self._clients.keys()):
                     try:
-                        fresh_session = client.session.save()
-                        account = await self.db.get_account(account_id)
-                        if account and fresh_session != account.session_string:
-                            await self.db.update_account_session(account_id, fresh_session)
-                    except Exception:
-                        pass
-                except _BAN_ERRORS as e:
-                    await self._handle_account_problem(account_id, e)
-                except Exception as e:
-                    logger.warning(f"Monitor check failed for account {account_id}: {e}")
+                        client = self._clients[account_id]
+                        if not client.is_connected():
+                            try:
+                                await client.connect()
+                            except _BAN_ERRORS as e:
+                                await self._handle_account_problem(account_id, e)
+                                continue
+                        await client.get_me()
+                        try:
+                            fresh_session = client.session.save()
+                            account = await self.db.get_account(account_id)
+                            if account and fresh_session != account.session_string:
+                                await self.db.update_account_session(account_id, fresh_session)
+                        except Exception:
+                            pass
+                    except _BAN_ERRORS as e:
+                        await self._handle_account_problem(account_id, e)
+                    except Exception as e:
+                        logger.warning(f"Monitor check failed for account {account_id}: {e}")
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:
+                logger.error(f"Monitor loop iteration failed: {e}", exc_info=True)
+                await asyncio.sleep(30)
 
     async def _handle_account_problem(self, account_id: int, error: Exception):
         """Mark account inactive and notify owner."""

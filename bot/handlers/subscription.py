@@ -21,6 +21,7 @@ from ..keyboards.inline import (
 from ..config import config
 from ..services import CryptoBotService, TonPaymentService, PlategaService, get_usd_uah_rate
 from ..utils.premium_emoji import pe
+from ..utils.tg import safe_edit
 
 router = Router()
 
@@ -61,9 +62,7 @@ async def callback_subscription(callback: CallbackQuery, db: Database):
         )
         has_subscription = False
 
-    await callback.message.edit_text(
-        pe(text), parse_mode="HTML", reply_markup=subscription_keyboard(has_subscription)
-    )
+    await safe_edit(callback.message, pe(text), parse_mode="HTML", reply_markup=subscription_keyboard(has_subscription))
     await callback.answer()
 
 
@@ -71,7 +70,8 @@ async def callback_subscription(callback: CallbackQuery, db: Database):
 async def callback_buy_subscription(callback: CallbackQuery, state: FSMContext, db: Database):
     price_7d = await db.get_price(7)
     price_30d = await db.get_price(30)
-    await callback.message.edit_text(
+    await safe_edit(
+        callback.message,
         pe(f"💳 Выберите план подписки:\n\n"
         f"📅 7 дней — {price_7d} USDT\n"
         f"📅 30 дней — {price_30d} USDT"),
@@ -105,8 +105,8 @@ async def callback_sub_plan(
             rub_price = await platega_service.calculate_rub_price(price)
             lines.append(f"💳 СБП (рубли) — ~{rub_price:.0f} ₽")
         text = pe(f"💳 Способ оплаты ({plan_days} дней):\n\n" + "\n".join(lines))
-        await callback.message.edit_text(
-            text, parse_mode="HTML",
+        await safe_edit(
+            callback.message, text, parse_mode="HTML",
             reply_markup=payment_method_keyboard(show_platega=show_platega, show_ton=has_ton),
         )
     else:
@@ -134,7 +134,7 @@ async def _create_cryptobot_subscription(
     price = await db.get_price(plan_days)
     crypto_price = round(price * 1.03, 2)  # +3% processing fee
 
-    await callback.message.edit_text(pe("⏳ Создаём платёж..."), parse_mode="HTML")
+    await safe_edit(callback.message, pe("⏳ Создаём платёж..."), parse_mode="HTML")
 
     invoice = await cryptobot.create_invoice(
         amount=crypto_price,
@@ -147,7 +147,8 @@ async def _create_cryptobot_subscription(
         error_msg = "Неизвестная ошибка"
         if cryptobot.last_error:
             error_msg = cryptobot.last_error.message
-        await callback.message.edit_text(
+        await safe_edit(
+            callback.message,
             pe(f"❌ Ошибка создания платежа:\n{error_msg}"),
             parse_mode="HTML",
             reply_markup=main_menu_keyboard(),
@@ -171,7 +172,8 @@ async def _create_cryptobot_subscription(
     )
 
     support = await db.get_setting("card_manager_username") or "autosenderkarta"
-    await callback.message.edit_text(
+    await safe_edit(
+        callback.message,
         text, parse_mode="HTML", reply_markup=payment_keyboard(invoice.pay_url, invoice.invoice_id, plan_days, support_username=support)
     )
 
@@ -186,12 +188,13 @@ async def callback_pay_ton(
     user = await db.get_user(callback.from_user.id)
     comment = f"sub_{user.telegram_id}_{int(time.time())}"
 
-    await callback.message.edit_text(pe("⏳ Получаем курс TON..."), parse_mode="HTML")
+    await safe_edit(callback.message, pe("⏳ Получаем курс TON..."), parse_mode="HTML")
 
     price = await db.get_price(plan_days)
     amount = await ton_service.calculate_ton_amount(price)
     if not amount:
-        await callback.message.edit_text(
+        await safe_edit(
+            callback.message,
             pe("❌ Не удалось получить курс TON. Попробуйте позже."),
             parse_mode="HTML",
             reply_markup=payment_method_keyboard(show_platega=bool(config.PLATEGA_MERCHANT_ID and config.PLATEGA_SECRET)),
@@ -222,9 +225,7 @@ async def callback_pay_ton(
     )
 
     support = await db.get_setting("card_manager_username") or "autosenderkarta"
-    await callback.message.edit_text(
-        text, reply_markup=ton_payment_keyboard(pay_url, comment, plan_days, support_username=support)
-    )
+    await safe_edit(callback.message, text, reply_markup=ton_payment_keyboard(pay_url, comment, plan_days, support_username=support))
     await callback.answer()
 
 
@@ -262,7 +263,8 @@ async def callback_check_ton_payment(
         price_usdt = await db.get_price(plan_days)
         await _pay_referral(user, db, price_usdt)
 
-        await callback.message.edit_text(
+        await safe_edit(
+            callback.message,
             pe(f"✅ Оплата получена!\n\n"
             f"Ваша подписка активна до {new_end.strftime('%d.%m.%Y %H:%M')}"),
             parse_mode="HTML",
@@ -309,7 +311,8 @@ async def callback_check_payment(
         await db.update_subscription(user.id, new_end)
         await _pay_referral(user, db, payment.amount)
 
-        await callback.message.edit_text(
+        await safe_edit(
+            callback.message,
             pe(f"✅ Оплата получена!\n\n"
             f"Ваша подписка активна до {new_end.strftime('%d.%m.%Y %H:%M')}"),
             parse_mode="HTML",
@@ -339,7 +342,7 @@ async def callback_pay_platega(
 
     order_id = f"platega_{user.telegram_id}_{int(time.time())}"
 
-    await callback.message.edit_text(pe("⏳ Создаём платёж через СБП..."), parse_mode="HTML")
+    await safe_edit(callback.message, pe("⏳ Создаём платёж через СБП..."), parse_mode="HTML")
 
     invoice = await platega_service.create_invoice(
         amount_rub=amount_rub,
@@ -348,7 +351,8 @@ async def callback_pay_platega(
     )
 
     if not invoice or not invoice.get("payment_url"):
-        await callback.message.edit_text(
+        await safe_edit(
+            callback.message,
             pe("❌ Ошибка создания платежа через Platega. Попробуйте позже."),
             parse_mode="HTML",
             reply_markup=payment_method_keyboard(show_platega=True),
@@ -375,8 +379,8 @@ async def callback_pay_platega(
         f"После оплаты нажмите «Проверить оплату»."
     )
     support = await db.get_setting("card_manager_username") or "autosenderkarta"
-    await callback.message.edit_text(
-        text, parse_mode="HTML",
+    await safe_edit(
+        callback.message, text, parse_mode="HTML",
         reply_markup=platega_payment_keyboard(invoice["payment_url"], transaction_id, plan_days, support_username=support),
     )
     await callback.answer()
@@ -420,7 +424,8 @@ async def callback_check_platega_payment(
         price_usdt = await db.get_price(plan_days)
         await _pay_referral(user, db, price_usdt)
 
-        await callback.message.edit_text(
+        await safe_edit(
+            callback.message,
             pe(f"✅ Оплата через СБП получена!\n\n"
             f"Ваша подписка активна до {new_end.strftime('%d.%m.%Y %H:%M')}"),
             parse_mode="HTML",
@@ -450,10 +455,7 @@ async def _pay_referral(user, db: Database, payment_amount: float):
 @router.callback_query(F.data == "enter_promocode")
 async def callback_enter_promocode(callback: CallbackQuery, state: FSMContext):
     await state.set_state(SubscriptionStates.waiting_promocode)
-    await callback.message.edit_text(
-        "🎟 Введите промокод:",
-        reply_markup=cancel_keyboard(),
-    )
+    await safe_edit(callback.message, "🎟 Введите промокод:", reply_markup=cancel_keyboard())
     await callback.answer()
 
 
@@ -505,6 +507,16 @@ async def process_promocode(message: Message, state: FSMContext, db: Database):
             plan_days=promo.duration_days,
         )
 
+    if user.welcome_pin_msg_id:
+        try:
+            await message.bot.unpin_chat_message(
+                chat_id=message.from_user.id,
+                message_id=user.welcome_pin_msg_id,
+            )
+        except Exception:
+            pass
+        await db.update_user_pin_msg_id(user.id, None)
+
     await state.clear()
 
     await message.answer(
@@ -526,7 +538,8 @@ async def callback_pay_card(callback: CallbackQuery, state: FSMContext, db: Data
     uah_rate = await get_usd_uah_rate()
     price_uah = round(price_usdt * uah_rate)
 
-    await callback.message.edit_text(
+    await safe_edit(
+        callback.message,
         pe(f"🇺🇦 Оплата картой (грн)\n\n"
         f"📅 Срок: {plan_days} дней\n"
         f"💰 Сумма: <b>~{price_uah} ₴</b>\n\n"

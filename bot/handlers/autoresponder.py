@@ -8,6 +8,7 @@ from aiogram.fsm.state import State, StatesGroup
 from ..database.db import Database
 from ..keyboards.inline import autoresponder_keyboard, group_autoresponder_keyboard, cancel_keyboard
 from ..utils.premium_emoji import pe
+from ..utils.tg import safe_edit
 
 router = Router()
 
@@ -41,9 +42,7 @@ async def callback_autoresponder(callback: CallbackQuery, db: Database):
         "📬 Уведомления — получайте сообщения о каждом входящем ЛС."
     )
 
-    await callback.message.edit_text(
-        pe(text), parse_mode="HTML", reply_markup=autoresponder_keyboard(account_id, account.autoresponder_enabled, account.notify_messages)
-    )
+    await safe_edit(callback.message, pe(text), parse_mode="HTML", reply_markup=autoresponder_keyboard(account_id, account.autoresponder_enabled, account.notify_messages))
     await callback.answer()
 
 
@@ -95,9 +94,7 @@ async def callback_toggle_autoresponder(callback: CallbackQuery, db: Database):
         "📬 Уведомления — получайте сообщения о каждом входящем ЛС."
     )
 
-    await callback.message.edit_text(
-        pe(text), parse_mode="HTML", reply_markup=autoresponder_keyboard(account_id, account.autoresponder_enabled, account.notify_messages)
-    )
+    await safe_edit(callback.message, pe(text), parse_mode="HTML", reply_markup=autoresponder_keyboard(account_id, account.autoresponder_enabled, account.notify_messages))
 
 
 @router.callback_query(F.data.startswith("toggle_notify:"))
@@ -132,9 +129,7 @@ async def callback_toggle_notify(callback: CallbackQuery, db: Database):
         "📬 Уведомления — получайте сообщения о каждом входящем ЛС."
     )
 
-    await callback.message.edit_text(
-        pe(text), parse_mode="HTML", reply_markup=autoresponder_keyboard(account_id, account.autoresponder_enabled, account.notify_messages)
-    )
+    await safe_edit(callback.message, pe(text), parse_mode="HTML", reply_markup=autoresponder_keyboard(account_id, account.autoresponder_enabled, account.notify_messages))
 
 
 @router.callback_query(F.data.startswith("edit_autoresponder_text:"))
@@ -146,7 +141,8 @@ async def callback_edit_autoresponder_text(
     await state.update_data(account_id=account_id)
     await state.set_state(AutoresponderStates.waiting_text)
 
-    await callback.message.edit_text(
+    await safe_edit(
+        callback.message,
         "✏️ Введите текст автоответа или отправьте фото с подписью:\n\n"
         "Этот текст/фото будет отправляться в ответ на входящие личные сообщения.",
         reply_markup=cancel_keyboard(),
@@ -211,9 +207,7 @@ async def callback_group_autoresponder(callback: CallbackQuery, db: Database):
         "Каждому пользователю отвечает только один раз."
     )
 
-    await callback.message.edit_text(
-        pe(text), parse_mode="HTML", reply_markup=group_autoresponder_keyboard(account_id, account.group_autoresponder_enabled)
-    )
+    await safe_edit(callback.message, pe(text), parse_mode="HTML", reply_markup=group_autoresponder_keyboard(account_id, account.group_autoresponder_enabled))
     await callback.answer()
 
 
@@ -252,7 +246,8 @@ async def callback_toggle_group_autoresponder(callback: CallbackQuery, db: Datab
     if len(text_preview) > 100:
         text_preview = text_preview[:100] + "..."
 
-    await callback.message.edit_text(
+    await safe_edit(
+        callback.message,
         pe(f"💬 Автоответчик (группы) для {account.display_name}\n\n"
         f"Статус: {status}\n\n"
         f"Текст автоответа:\n{text_preview}\n\n"
@@ -269,7 +264,8 @@ async def callback_edit_group_autoresponder_text(callback: CallbackQuery, state:
     await state.update_data(account_id=account_id)
     await state.set_state(AutoresponderStates.waiting_group_text)
 
-    await callback.message.edit_text(
+    await safe_edit(
+        callback.message,
         "✏️ Введите текст автоответа для групп или отправьте фото с подписью:\n\n"
         "Это будет отправляться, когда кто-то ответит на сообщение аккаунта в группе.",
         reply_markup=cancel_keyboard(),

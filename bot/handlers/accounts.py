@@ -23,6 +23,16 @@ from ..keyboards.inline import (
 from ..userbot.manager import UserbotManager, _parse_proxy, _DEVICE_POOL
 from ..config import config
 from ..services import CryptoBotService, TonPaymentService
+
+
+async def _test_proxy_connection(host: str, port: int) -> bool:
+    try:
+        _, writer = await asyncio.wait_for(asyncio.open_connection(host, port), timeout=5)
+        writer.close()
+        await writer.wait_closed()
+        return True
+    except Exception:
+        return False
 from ..utils.premium_emoji import pe
 
 router = Router()
@@ -367,6 +377,20 @@ async def process_proxy(message: Message, state: FSMContext):
         await message.answer(
             "❌ Не удалось распознать хост или порт.\n"
             "Проверьте формат: <code>socks5://host:port</code>",
+            reply_markup=cancel_keyboard(),
+        )
+        return
+
+    if not await _test_proxy_connection(parsed.hostname, parsed.port):
+        await message.answer(
+            pe(f"❌ <b>Прокси не подходит!</b>\n\n"
+            f"Не удалось подключиться к <code>{parsed.hostname}:{parsed.port}</code>.\n\n"
+            f"Проверьте:\n"
+            f"• Правильность адреса и порта\n"
+            f"• Логин и пароль (если есть)\n"
+            f"• Что прокси рабочий и не заблокирован\n\n"
+            f"Введите другой прокси или нажмите «Пропустить»:"),
+            parse_mode="HTML",
             reply_markup=cancel_keyboard(),
         )
         return
@@ -944,6 +968,20 @@ async def process_set_proxy(message: Message, state: FSMContext, db: Database, u
         await message.answer(
             pe("❌ Не удалось распознать хост или порт.\n"
             "Проверьте формат: <code>socks5://host:port</code>"),
+            parse_mode="HTML",
+            reply_markup=cancel_keyboard(),
+        )
+        return
+
+    if not await _test_proxy_connection(parsed.hostname, parsed.port):
+        await message.answer(
+            pe(f"❌ <b>Прокси не подходит!</b>\n\n"
+            f"Не удалось подключиться к <code>{parsed.hostname}:{parsed.port}</code>.\n\n"
+            f"Проверьте:\n"
+            f"• Правильность адреса и порта\n"
+            f"• Логин и пароль (если есть)\n"
+            f"• Что прокси рабочий и не заблокирован\n\n"
+            f"Введите другой прокси или отправьте <code>удалить</code>:"),
             parse_mode="HTML",
             reply_markup=cancel_keyboard(),
         )

@@ -5,7 +5,7 @@ sessions/
 .DS_Store
 .claude/
 .env
-data/bot.db-shm
-data/bot.db-wal
-bot_output.log
+data/
+*.log
+feAutoSender/
 =*

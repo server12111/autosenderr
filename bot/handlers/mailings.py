@@ -288,6 +288,10 @@ async def callback_toggle_mailing(
             return
 
     mailing = await db.get_mailing(mailing_id)
+    if not mailing:
+        await callback.answer("Рассылка не найдена", show_alert=True)
+        return
+
     account = await db.get_account(mailing.account_id)
     messages = await db.get_mailing_messages(mailing_id)
     targets = await db.get_mailing_targets(mailing_id)
@@ -929,6 +933,9 @@ async def process_edit_txt_wrong(message: Message):
 async def callback_mailing_hours(callback: CallbackQuery, db: Database, state: FSMContext):
     mailing_id = int(callback.data.split(":")[1])
     mailing = await db.get_mailing(mailing_id)
+    if not mailing:
+        await callback.answer("Рассылка не найдена", show_alert=True)
+        return
 
     current_hours = format_active_hours(mailing.active_hours_json)
 
@@ -1761,6 +1768,9 @@ async def callback_set_mailing_account(callback: CallbackQuery, db: Database):
     await callback.answer("✅ Аккаунт изменён")
 
     mailing = await db.get_mailing(mailing_id)
+    if not mailing:
+        await callback.answer("Рассылка не найдена", show_alert=True)
+        return
     account = await db.get_account(mailing.account_id)
     messages = await db.get_mailing_messages(mailing_id)
     targets = await db.get_mailing_targets(mailing_id)
@@ -1794,8 +1804,12 @@ async def callback_mailing_multi_accounts(callback: CallbackQuery, db: Database)
         await callback.answer("У вас нет аккаунтов", show_alert=True)
         return
 
-    selected_ids = await db.get_mailing_extra_account_ids(mailing_id)
     mailing = await db.get_mailing(mailing_id)
+    if not mailing:
+        await callback.answer("Рассылка не найдена", show_alert=True)
+        return
+
+    selected_ids = await db.get_mailing_extra_account_ids(mailing_id)
     await callback.message.edit_text(
         pe("👥 Выберите аккаунты для чередования.\n"
            "Нажмите на аккаунт чтобы добавить/убрать.\n"
@@ -1814,10 +1828,14 @@ async def callback_toggle_mailing_account(callback: CallbackQuery, db: Database)
 
     await db.toggle_mailing_extra_account(mailing_id, account_id)
 
+    mailing = await db.get_mailing(mailing_id)
+    if not mailing:
+        await callback.answer("Рассылка не найдена", show_alert=True)
+        return
+
     user = await db.get_user(callback.from_user.id)
     accounts = await db.get_user_accounts(user.id)
     selected_ids = await db.get_mailing_extra_account_ids(mailing_id)
-    mailing = await db.get_mailing(mailing_id)
     await callback.message.edit_reply_markup(
         reply_markup=multi_account_select_keyboard(accounts, selected_ids, mailing_id, mailing.account_rotation_mode)
     )
@@ -1828,6 +1846,9 @@ async def callback_toggle_mailing_account(callback: CallbackQuery, db: Database)
 async def callback_toggle_rotation_mode(callback: CallbackQuery, db: Database):
     mailing_id = int(callback.data.split(":")[1])
     mailing = await db.get_mailing(mailing_id)
+    if not mailing:
+        await callback.answer("Рассылка не найдена", show_alert=True)
+        return
     new_mode = "per_cycle" if mailing.account_rotation_mode == "per_target" else "per_target"
     await db.update_mailing_rotation_mode(mailing_id, new_mode)
 
@@ -2071,6 +2092,9 @@ async def callback_mailing_reply_mode(callback: CallbackQuery, db: Database):
     else:
         await db.update_mailing_reply_mode(mailing_id, None, 1, 1, 5)
         mailing = await db.get_mailing(mailing_id)
+        if not mailing:
+            await callback.answer("Рассылка не найдена", show_alert=True)
+            return
         account = await db.get_account(mailing.account_id)
         messages = await db.get_mailing_messages(mailing_id)
         targets = await db.get_mailing_targets(mailing_id)
@@ -2098,6 +2122,9 @@ async def callback_reply_mode_last(callback: CallbackQuery, db: Database):
     mailing_id = int(callback.data.split(":")[1])
     await db.update_mailing_reply_mode(mailing_id, 'last', 1, 1, 5)
     mailing = await db.get_mailing(mailing_id)
+    if not mailing:
+        await callback.answer("Рассылка не найдена", show_alert=True)
+        return
     account = await db.get_account(mailing.account_id)
     messages = await db.get_mailing_messages(mailing_id)
     targets = await db.get_mailing_targets(mailing_id)
@@ -2137,6 +2164,9 @@ async def callback_reply_mode_fixed_pos(callback: CallbackQuery, db: Database):
     n = int(parts[2])
     await db.update_mailing_reply_mode(mailing_id, 'fixed', n, 1, 5)
     mailing = await db.get_mailing(mailing_id)
+    if not mailing:
+        await callback.answer("Рассылка не найдена", show_alert=True)
+        return
     account = await db.get_account(mailing.account_id)
     messages = await db.get_mailing_messages(mailing_id)
     targets = await db.get_mailing_targets(mailing_id)
@@ -2201,6 +2231,9 @@ async def process_reply_range(message: Message, state: FSMContext, db: Database)
     await state.clear()
 
     mailing = await db.get_mailing(mailing_id)
+    if not mailing:
+        await message.answer(pe("✅ Настройка сохранена."), parse_mode="HTML", reply_markup=main_menu_keyboard())
+        return
     account = await db.get_account(mailing.account_id)
     messages_list = await db.get_mailing_messages(mailing_id)
     targets = await db.get_mailing_targets(mailing_id)
