@@ -28,6 +28,9 @@ class SubscriptionMiddleware(BaseMiddleware):
         "referral",
         "withdraw_ref_balance",
         "check_channels",
+        "activate_free_tier",
+        "activate_free_tier_confirm",
+        "dm_mailing_info",
     }
 
     EXEMPT_CALLBACK_PREFIXES = (
@@ -78,6 +81,9 @@ class SubscriptionMiddleware(BaseMiddleware):
             user = await self.db.get_user(user_id)
 
             if user and user.is_admin:
+                return await handler(event, data)
+
+            if user and user.subscription_type == "free_ad":
                 return await handler(event, data)
 
             if not user or not user.subscription_end:

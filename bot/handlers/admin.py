@@ -340,6 +340,9 @@ async def process_promo_code(message: Message, state: FSMContext):
     if not is_admin(message.from_user.id):
         await state.clear()
         return
+    if not message.text:
+        await message.answer(pe("❌ Введите промокод текстом."), parse_mode="HTML", reply_markup=cancel_keyboard())
+        return
     code = message.text.strip()
     await state.update_data(promo_code=code)
     await state.set_state(AdminStates.waiting_promo_days)
@@ -355,7 +358,7 @@ async def process_promo_days(message: Message, state: FSMContext, db: Database):
         await state.clear()
         return
     try:
-        days = int(message.text.strip())
+        days = int((message.text or "").strip())
     except ValueError:
         await message.answer(pe("❌ Введите число. Попробуйте снова:"), parse_mode="HTML", reply_markup=cancel_keyboard())
         return
@@ -379,7 +382,7 @@ async def process_promo_max_uses(message: Message, state: FSMContext, db: Databa
         await state.clear()
         return
     try:
-        max_uses = int(message.text.strip())
+        max_uses = int((message.text or "").strip())
     except ValueError:
         await message.answer(pe("❌ Введите число. Попробуйте снова:"), parse_mode="HTML", reply_markup=cancel_keyboard())
         return
@@ -409,9 +412,13 @@ async def process_promo_is_subscription(callback: CallbackQuery, state: FSMConte
 
     is_sub = callback.data.split(":")[1] == "1"
     data = await state.get_data()
-    code = data["promo_code"]
-    days = data["promo_days"]
-    max_uses = data["promo_max_uses"]
+    code = data.get("promo_code")
+    days = data.get("promo_days")
+    max_uses = data.get("promo_max_uses")
+    if not code or days is None or max_uses is None:
+        await callback.answer("❌ Сессия устарела. Начните заново.", show_alert=True)
+        await state.clear()
+        return
 
     await db.create_promocode(code, days, max_uses, is_subscription=is_sub)
     await state.clear()
@@ -505,7 +512,7 @@ async def process_promo_edit_uses(message: Message, state: FSMContext, db: Datab
         await state.clear()
         return
     try:
-        new_max = int(message.text.strip())
+        new_max = int((message.text or "").strip())
     except ValueError:
         await message.answer(pe("❌ Введите целое число."), parse_mode="HTML", reply_markup=cancel_keyboard())
         return
@@ -514,7 +521,11 @@ async def process_promo_edit_uses(message: Message, state: FSMContext, db: Datab
         return
 
     data = await state.get_data()
-    promo_id = data["promo_id"]
+    promo_id = data.get("promo_id")
+    if not promo_id:
+        await message.answer(pe("❌ Сессия устарела. Начните заново."), parse_mode="HTML")
+        await state.clear()
+        return
     await db.update_promocode_max_uses(promo_id, new_max)
     await state.clear()
 
@@ -598,7 +609,7 @@ async def process_price_7d(message: Message, state: FSMContext, db: Database):
         await state.clear()
         return
     try:
-        price = float(message.text.strip().replace(",", "."))
+        price = float((message.text or "").strip().replace(",", "."))
         if price <= 0:
             raise ValueError
     except ValueError:
@@ -628,7 +639,7 @@ async def process_price_30d(message: Message, state: FSMContext, db: Database):
         await state.clear()
         return
     try:
-        price = float(message.text.strip().replace(",", "."))
+        price = float((message.text or "").strip().replace(",", "."))
         if price <= 0:
             raise ValueError
     except ValueError:
@@ -658,7 +669,7 @@ async def process_ref_percent(message: Message, state: FSMContext, db: Database)
         await state.clear()
         return
     try:
-        pct = float(message.text.strip().replace(",", "."))
+        pct = float((message.text or "").strip().replace(",", "."))
         if pct < 0 or pct > 100:
             raise ValueError
     except ValueError:
@@ -688,7 +699,7 @@ async def process_min_withdraw(message: Message, state: FSMContext, db: Database
         await state.clear()
         return
     try:
-        amount = float(message.text.strip().replace(",", "."))
+        amount = float((message.text or "").strip().replace(",", "."))
         if amount <= 0:
             raise ValueError
     except ValueError:
@@ -719,7 +730,7 @@ async def process_card_manager(message: Message, state: FSMContext, db: Database
     if not is_admin(message.from_user.id):
         await state.clear()
         return
-    username = message.text.strip().lstrip("@")
+    username = (message.text or "").strip().lstrip("@")
     if not username:
         await message.answer(pe("❌ Введите корректный юзернейм:"), parse_mode="HTML", reply_markup=cancel_keyboard())
         return
@@ -792,7 +803,10 @@ async def process_channel_id(message: Message, state: FSMContext, db: Database):
         return
 
     # Handle manual input: ID|@username|Title
-    text = message.text.strip()
+    text = (message.text or "").strip()
+    if not text:
+        await message.answer(pe("❌ Перешлите сообщение из канала или введите данные текстом."), parse_mode="HTML", reply_markup=cancel_keyboard())
+        return
     parts = text.split("|")
     if len(parts) >= 3:
         try:

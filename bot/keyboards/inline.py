@@ -237,7 +237,7 @@ def mailings_keyboard(mailings: list[Mailing]) -> InlineKeyboardMarkup:
     return builder.as_markup()
 
 
-def mailing_menu_keyboard(mailing: Mailing) -> InlineKeyboardMarkup:
+def mailing_menu_keyboard(mailing: Mailing, show_remove_ads: bool = False) -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
     toggle_text = "🔴 Остановить" if mailing.is_active else "🟢 Запустить"
     toggle_style = "danger" if mailing.is_active else "success"
@@ -255,6 +255,8 @@ def mailing_menu_keyboard(mailing: Mailing) -> InlineKeyboardMarkup:
     )
     reply_label = "↩️ Ответная рассылка: ВКЛ" if mailing.reply_mode else "↩️ Ответная рассылка: ВЫКЛ"
     builder.row(_btn(reply_label, callback_data=f"mailing_reply_mode:{mailing.id}", style="primary"))
+    if show_remove_ads:
+        builder.row(_btn("🚫 Убрать рекламу из рассылки", callback_data="subscription", style="danger"))
     builder.row(
         _btn("❌ Удалить рассылку", callback_data=f"delete_mailing:{mailing.id}", style="danger"),
         _btn("◀️ Назад", callback_data="mailings", style="primary"),
@@ -477,7 +479,24 @@ def subscription_keyboard(has_subscription: bool) -> InlineKeyboardMarkup:
         _btn("🎟 Ввести промокод", callback_data="enter_promocode", style="primary"),
         _btn(sub_text, callback_data="buy_subscription", style="success"),
     )
+    if not has_subscription:
+        builder.row(_btn("🆓 Использовать бесплатно (с рекламой)", callback_data="activate_free_tier", style="primary"))
     builder.row(_btn("◀️ Главное меню", callback_data="main_menu", style="primary"))
+    return builder.as_markup()
+
+
+def subscription_expired_keyboard() -> InlineKeyboardMarkup:
+    builder = InlineKeyboardBuilder()
+    builder.row(_btn("💳 Продлить подписку", callback_data="subscription", style="success"))
+    builder.row(_btn("🆓 Включить бесплатный тариф", callback_data="activate_free_tier", style="success"))
+    return builder.as_markup()
+
+
+def free_tier_info_keyboard(already_active: bool = False) -> InlineKeyboardMarkup:
+    builder = InlineKeyboardBuilder()
+    if not already_active:
+        builder.row(_btn("✅ Активировать бесплатный тариф", callback_data="activate_free_tier_confirm", style="success"))
+    builder.row(_btn("◀️ Назад", callback_data="subscription", style="primary"))
     return builder.as_markup()
 
 

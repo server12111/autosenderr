@@ -253,7 +253,11 @@ async def callback_mailing_menu(callback: CallbackQuery, db: Database, state: FS
         "Выберите действие:"
     )
 
-    await callback.message.edit_text(text, parse_mode="HTML", reply_markup=mailing_menu_keyboard(mailing))
+    user = await db.get_user(callback.from_user.id)
+    has_paid = user.subscription_end and user.subscription_end > datetime.now() if user else False
+    show_ads_btn = bool(user and user.subscription_type == "free_ad" and not has_paid)
+
+    await callback.message.edit_text(text, parse_mode="HTML", reply_markup=mailing_menu_keyboard(mailing, show_remove_ads=show_ads_btn))
     await callback.answer()
 
 
@@ -353,7 +357,16 @@ async def callback_add_mailing_message(callback: CallbackQuery, state: FSMContex
 
 
 @router.callback_query(F.data.startswith("add_mailing_forward:"))
-async def callback_add_mailing_forward(callback: CallbackQuery, state: FSMContext):
+async def callback_add_mailing_forward(callback: CallbackQuery, state: FSMContext, db: Database):
+    user = await db.get_user(callback.from_user.id)
+    has_paid = user.subscription_end and user.subscription_end > datetime.now() if user else False
+    if user and user.subscription_type == "free_ad" and not has_paid:
+        await callback.answer(
+            "❌ Пересылка сообщений недоступна на бесплатном тарифе.\n\nПерейдите в «Подписка» для активации.",
+            show_alert=True,
+        )
+        return
+
     mailing_id = int(callback.data.split(":")[1])
     await state.update_data(mailing_id=mailing_id)
     await state.set_state(EditMailingStates.waiting_forward_message)
@@ -371,7 +384,11 @@ async def process_edit_forward_message(message: Message, state: FSMContext, db: 
     from aiogram.types import MessageOriginChannel, MessageOriginChat, MessageOriginUser
     origin = message.forward_origin
     data = await state.get_data()
-    mailing_id = data["mailing_id"]
+    mailing_id = data.get("mailing_id")
+    if not mailing_id:
+        await message.answer(pe("❌ Сессия устарела. Начните заново."), parse_mode="HTML", reply_markup=main_menu_keyboard())
+        await state.clear()
+        return
 
     if isinstance(origin, MessageOriginChannel):
         peer = f"@{origin.chat.username}" if origin.chat.username else str(origin.chat.id)
@@ -426,7 +443,11 @@ async def process_edit_message_photo(
     message: Message, state: FSMContext, db: Database, album: list[Message] = None
 ):
     data = await state.get_data()
-    mailing_id = data["mailing_id"]
+    mailing_id = data.get("mailing_id")
+    if not mailing_id:
+        await message.answer(pe("❌ Сессия устарела. Начните заново."), parse_mode="HTML", reply_markup=main_menu_keyboard())
+        await state.clear()
+        return
     pending_photos = data.get("pending_photos", [])
 
     messages_to_process = album or [message]
@@ -470,7 +491,11 @@ async def process_edit_message_text(message: Message, state: FSMContext, db: Dat
         return
     entities_json = serialize_entities(message.entities)
     data = await state.get_data()
-    mailing_id = data["mailing_id"]
+    mailing_id = data.get("mailing_id")
+    if not mailing_id:
+        await message.answer(pe("❌ Сессия устарела. Начните заново."), parse_mode="HTML", reply_markup=main_menu_keyboard())
+        await state.clear()
+        return
     pending_photos = data.get("pending_photos", [])
 
     if pending_photos:
@@ -600,9 +625,16 @@ async def callback_add_mailing_target(callback: CallbackQuery, state: FSMContext
 
 @router.message(EditMailingStates.waiting_target)
 async def process_edit_target(message: Message, state: FSMContext, db: Database, userbot_manager: UserbotManager):
-    text = message.text.strip()
+    text = (message.text or "").strip()
+    if not text:
+        await message.answer(pe("❌ Отправьте текстовое сообщение."), parse_mode="HTML", reply_markup=cancel_keyboard())
+        return
     data = await state.get_data()
-    mailing_id = data["mailing_id"]
+    mailing_id = data.get("mailing_id")
+    if not mailing_id:
+        await message.answer(pe("❌ Сессия устарела. Начните заново."), parse_mode="HTML", reply_markup=main_menu_keyboard())
+        await state.clear()
+        return
 
     parsed = parse_chat_link(text)
     target = parsed if parsed else text
@@ -703,7 +735,7 @@ async def callback_edit_target_interval(callback: CallbackQuery, state: FSMConte
 @router.message(EditMailingStates.waiting_target_interval)
 async def process_target_interval(message: Message, state: FSMContext, db: Database):
     try:
-        interval = int(message.text.strip())
+        interval = int((message.text or "").strip())
         if interval != 0 and interval < 30:
             await message.answer(pe("❌ Минимальный интервал — 30 секунд (или 0 для использования общего интервала)"), parse_mode="HTML")
             return
@@ -712,8 +744,12 @@ async def process_target_interval(message: Message, state: FSMContext, db: Datab
         return
 
     data = await state.get_data()
-    target_id = data["target_id"]
-    mailing_id = data["mailing_id"]
+    target_id = data.get("target_id")
+    mailing_id = data.get("mailing_id")
+    if not target_id or not mailing_id:
+        await message.answer(pe("❌ Сессия устарела. Начните заново."), parse_mode="HTML", reply_markup=main_menu_keyboard())
+        await state.clear()
+        return
 
     await db.update_target_interval(target_id, interval if interval > 0 else None)
     await state.clear()
@@ -749,9 +785,16 @@ async def callback_add_folder_target(callback: CallbackQuery, state: FSMContext)
 async def process_edit_folder(
     message: Message, state: FSMContext, db: Database, userbot_manager: UserbotManager
 ):
-    text = message.text.strip()
+    text = (message.text or "").strip()
+    if not text:
+        await message.answer(pe("❌ Отправьте текстовое сообщение."), parse_mode="HTML", reply_markup=cancel_keyboard())
+        return
     data = await state.get_data()
-    mailing_id = data["mailing_id"]
+    mailing_id = data.get("mailing_id")
+    if not mailing_id:
+        await message.answer(pe("❌ Сессия устарела. Начните заново."), parse_mode="HTML", reply_markup=main_menu_keyboard())
+        await state.clear()
+        return
 
     slug = parse_folder_slug(text)
     if not slug:
@@ -869,7 +912,11 @@ async def process_edit_txt_file(message: Message, state: FSMContext, db: Databas
         return
 
     data = await state.get_data()
-    mailing_id = data["mailing_id"]
+    mailing_id = data.get("mailing_id")
+    if not mailing_id:
+        await message.answer(pe("❌ Сессия устарела. Начните заново."), parse_mode="HTML", reply_markup=main_menu_keyboard())
+        await state.clear()
+        return
 
     file_io = await message.bot.download(doc)
     try:
@@ -958,9 +1005,16 @@ async def callback_mailing_hours(callback: CallbackQuery, db: Database, state: F
 
 @router.message(EditMailingStates.waiting_hours)
 async def process_edit_hours(message: Message, state: FSMContext, db: Database):
-    text = message.text.strip().lower()
+    text = (message.text or "").strip().lower()
+    if not text:
+        await message.answer(pe("❌ Отправьте текстовое сообщение."), parse_mode="HTML", reply_markup=cancel_keyboard())
+        return
     data = await state.get_data()
-    mailing_id = data["mailing_id"]
+    mailing_id = data.get("mailing_id")
+    if not mailing_id:
+        await message.answer(pe("❌ Сессия устарела. Начните заново."), parse_mode="HTML", reply_markup=main_menu_keyboard())
+        await state.clear()
+        return
 
     if text in ("сброс", "reset", "24/7"):
         await db.update_mailing_active_hours(mailing_id, None)
@@ -1055,6 +1109,9 @@ async def callback_create_mailing(callback: CallbackQuery, state: FSMContext):
 
 @router.message(CreateMailingStates.waiting_name)
 async def process_mailing_name(message: Message, state: FSMContext, db: Database):
+    if not message.text:
+        await message.answer(pe("❌ Отправьте название текстом."), parse_mode="HTML", reply_markup=cancel_keyboard())
+        return
     name = message.text.strip()
     await state.update_data(name=name)
 
@@ -1097,7 +1154,7 @@ async def process_select_account(callback: CallbackQuery, state: FSMContext):
 @router.message(CreateMailingStates.waiting_interval)
 async def process_mailing_interval(message: Message, state: FSMContext, db: Database):
     try:
-        interval = int(message.text.strip())
+        interval = int((message.text or "").strip())
         if interval < 30:
             await message.answer(pe("❌ Минимальный интервал - 30 секунд"), parse_mode="HTML")
             return
@@ -1106,12 +1163,18 @@ async def process_mailing_interval(message: Message, state: FSMContext, db: Data
         return
 
     data = await state.get_data()
+    account_id = data.get("account_id")
+    name = data.get("name")
+    if not account_id or not name:
+        await message.answer(pe("❌ Сессия устарела. Начните заново."), parse_mode="HTML", reply_markup=main_menu_keyboard())
+        await state.clear()
+        return
     user = await db.get_user(message.from_user.id)
 
     mailing_id = await db.create_mailing(
         user_id=user.id,
-        account_id=data["account_id"],
-        name=data["name"],
+        account_id=account_id,
+        name=name,
         interval_seconds=interval,
     )
 
@@ -1129,10 +1192,10 @@ async def process_mailing_interval(message: Message, state: FSMContext, db: Data
     )
 
 
-@router.callback_query(
-    CreateMailingStates.adding_messages, F.data.startswith("create_add_message:")
-)
+@router.callback_query(F.data.startswith("create_add_message:"))
 async def callback_create_add_message(callback: CallbackQuery, state: FSMContext):
+    mailing_id = int(callback.data.split(":")[1])
+    await state.update_data(mailing_id=mailing_id)
     await state.set_state(CreateMailingStates.waiting_message_text)
 
     await callback.message.edit_text(
@@ -1144,10 +1207,19 @@ async def callback_create_add_message(callback: CallbackQuery, state: FSMContext
     await callback.answer()
 
 
-@router.callback_query(
-    CreateMailingStates.adding_messages, F.data.startswith("create_add_forward:")
-)
-async def callback_create_add_forward(callback: CallbackQuery, state: FSMContext):
+@router.callback_query(F.data.startswith("create_add_forward:"))
+async def callback_create_add_forward(callback: CallbackQuery, state: FSMContext, db: Database):
+    user = await db.get_user(callback.from_user.id)
+    has_paid = user.subscription_end and user.subscription_end > datetime.now() if user else False
+    if user and user.subscription_type == "free_ad" and not has_paid:
+        await callback.answer(
+            "❌ Пересылка сообщений недоступна на бесплатном тарифе.\n\nПерейдите в «Подписка» для активации.",
+            show_alert=True,
+        )
+        return
+
+    mailing_id = int(callback.data.split(":")[1])
+    await state.update_data(mailing_id=mailing_id)
     await state.set_state(CreateMailingStates.waiting_forward_message)
     await callback.message.edit_text(
         pe("📨 Перешлите любое сообщение из канала, группы или от пользователя.\n"
@@ -1163,7 +1235,11 @@ async def process_create_forward_message(message: Message, state: FSMContext, db
     from aiogram.types import MessageOriginChannel, MessageOriginChat, MessageOriginUser
     origin = message.forward_origin
     data = await state.get_data()
-    mailing_id = data["mailing_id"]
+    mailing_id = data.get("mailing_id")
+    if not mailing_id:
+        await message.answer(pe("❌ Сессия устарела. Начните заново."), parse_mode="HTML", reply_markup=main_menu_keyboard())
+        await state.clear()
+        return
 
     if isinstance(origin, MessageOriginChannel):
         peer = f"@{origin.chat.username}" if origin.chat.username else str(origin.chat.id)
@@ -1218,7 +1294,11 @@ async def process_create_message_photo(
     message: Message, state: FSMContext, db: Database, album: list[Message] = None
 ):
     data = await state.get_data()
-    mailing_id = data["mailing_id"]
+    mailing_id = data.get("mailing_id")
+    if not mailing_id:
+        await message.answer(pe("❌ Сессия устарела. Начните заново."), parse_mode="HTML", reply_markup=main_menu_keyboard())
+        await state.clear()
+        return
     pending_photos = data.get("pending_photos", [])
 
     messages_to_process = album or [message]
@@ -1262,7 +1342,11 @@ async def process_create_message_text(message: Message, state: FSMContext, db: D
         return
     entities_json = serialize_entities(message.entities)
     data = await state.get_data()
-    mailing_id = data["mailing_id"]
+    mailing_id = data.get("mailing_id")
+    if not mailing_id:
+        await message.answer(pe("❌ Сессия устарела. Начните заново."), parse_mode="HTML", reply_markup=main_menu_keyboard())
+        await state.clear()
+        return
     pending_photos = data.get("pending_photos", [])
 
     if pending_photos:
@@ -1324,7 +1408,11 @@ async def callback_create_save_photos(callback: CallbackQuery, state: FSMContext
 async def callback_create_delete_msg(callback: CallbackQuery, state: FSMContext, db: Database):
     message_id = int(callback.data.split(":")[1])
     data = await state.get_data()
-    mailing_id = data["mailing_id"]
+    mailing_id = data.get("mailing_id")
+    if not mailing_id:
+        await callback.answer("Сессия устарела. Начните заново.", show_alert=True)
+        await state.clear()
+        return
 
     await db.delete_mailing_message(message_id)
     messages = await db.get_mailing_messages(mailing_id)
@@ -1341,7 +1429,11 @@ async def callback_create_delete_msg(callback: CallbackQuery, state: FSMContext,
 )
 async def callback_create_messages_done(callback: CallbackQuery, state: FSMContext, db: Database):
     data = await state.get_data()
-    mailing_id = data["mailing_id"]
+    mailing_id = data.get("mailing_id")
+    if not mailing_id:
+        await callback.answer("Сессия устарела. Начните заново.", show_alert=True)
+        await state.clear()
+        return
     targets = await db.get_mailing_targets(mailing_id)
 
     await state.set_state(CreateMailingStates.adding_targets)
@@ -1375,9 +1467,16 @@ async def callback_create_add_target(callback: CallbackQuery, state: FSMContext)
 
 @router.message(CreateMailingStates.waiting_target)
 async def process_create_target(message: Message, state: FSMContext, db: Database, userbot_manager: UserbotManager):
-    text = message.text.strip()
+    text = (message.text or "").strip()
+    if not text:
+        await message.answer(pe("❌ Отправьте текстовое сообщение."), parse_mode="HTML", reply_markup=cancel_keyboard())
+        return
     data = await state.get_data()
-    mailing_id = data["mailing_id"]
+    mailing_id = data.get("mailing_id")
+    if not mailing_id:
+        await message.answer(pe("❌ Сессия устарела. Начните создание рассылки заново."), parse_mode="HTML", reply_markup=main_menu_keyboard())
+        await state.clear()
+        return
 
     parsed = parse_chat_link(text)
     target = parsed if parsed else text
@@ -1420,7 +1519,11 @@ async def process_create_target(message: Message, state: FSMContext, db: Databas
 async def callback_create_delete_target(callback: CallbackQuery, state: FSMContext, db: Database):
     target_id = int(callback.data.split(":")[1])
     data = await state.get_data()
-    mailing_id = data["mailing_id"]
+    mailing_id = data.get("mailing_id")
+    if not mailing_id:
+        await callback.answer("Сессия устарела. Начните заново.", show_alert=True)
+        await state.clear()
+        return
 
     await db.delete_mailing_target(target_id)
     targets = await db.get_mailing_targets(mailing_id)
@@ -1452,9 +1555,16 @@ async def callback_create_add_folder(callback: CallbackQuery, state: FSMContext)
 async def process_create_folder(
     message: Message, state: FSMContext, db: Database, userbot_manager: UserbotManager
 ):
-    text = message.text.strip()
+    text = (message.text or "").strip()
+    if not text:
+        await message.answer(pe("❌ Отправьте текстовое сообщение."), parse_mode="HTML", reply_markup=cancel_keyboard())
+        return
     data = await state.get_data()
-    mailing_id = data["mailing_id"]
+    mailing_id = data.get("mailing_id")
+    if not mailing_id:
+        await message.answer(pe("❌ Сессия устарела. Начните заново."), parse_mode="HTML", reply_markup=main_menu_keyboard())
+        await state.clear()
+        return
 
     slug = parse_folder_slug(text)
     if not slug:
@@ -1573,7 +1683,11 @@ async def process_create_txt_file(message: Message, state: FSMContext, db: Datab
         return
 
     data = await state.get_data()
-    mailing_id = data["mailing_id"]
+    mailing_id = data.get("mailing_id")
+    if not mailing_id:
+        await message.answer(pe("❌ Сессия устарела. Начните заново."), parse_mode="HTML", reply_markup=main_menu_keyboard())
+        await state.clear()
+        return
 
     file_io = await message.bot.download(doc)
     try:
@@ -1637,7 +1751,11 @@ async def process_create_txt_wrong(message: Message):
 )
 async def callback_create_targets_done(callback: CallbackQuery, state: FSMContext):
     data = await state.get_data()
-    mailing_id = data["mailing_id"]
+    mailing_id = data.get("mailing_id")
+    if not mailing_id:
+        await callback.answer("Сессия устарела. Начните заново.", show_alert=True)
+        await state.clear()
+        return
 
     await state.set_state(CreateMailingStates.waiting_hours)
 
@@ -1653,7 +1771,11 @@ async def callback_create_targets_done(callback: CallbackQuery, state: FSMContex
 @router.callback_query(CreateMailingStates.waiting_hours, F.data.startswith("skip_hours:"))
 async def callback_skip_hours(callback: CallbackQuery, state: FSMContext):
     data = await state.get_data()
-    mailing_id = data["mailing_id"]
+    mailing_id = data.get("mailing_id")
+    if not mailing_id:
+        await callback.answer("Сессия устарела. Начните заново.", show_alert=True)
+        await state.clear()
+        return
 
     await state.clear()
 
@@ -1681,9 +1803,16 @@ async def callback_setup_hours(callback: CallbackQuery, state: FSMContext):
 
 @router.message(CreateMailingStates.waiting_hours)
 async def process_create_hours(message: Message, state: FSMContext, db: Database):
-    text = message.text.strip()
+    text = (message.text or "").strip()
+    if not text:
+        await message.answer(pe("❌ Отправьте текстовое сообщение."), parse_mode="HTML", reply_markup=cancel_keyboard())
+        return
     data = await state.get_data()
-    mailing_id = data["mailing_id"]
+    mailing_id = data.get("mailing_id")
+    if not mailing_id:
+        await message.answer(pe("❌ Сессия устарела. Начните заново."), parse_mode="HTML", reply_markup=main_menu_keyboard())
+        await state.clear()
+        return
 
     ranges = []
     for part in text.split(","):
@@ -2007,10 +2136,17 @@ async def callback_set_target_thread(callback: CallbackQuery, state: FSMContext)
 
 @router.message(EditMailingStates.waiting_thread_id_for_target)
 async def process_thread_id_for_target(message: Message, state: FSMContext, db: Database):
-    text = message.text.strip()
+    text = (message.text or "").strip()
+    if not text:
+        await message.answer(pe("❌ Отправьте текстовое сообщение."), parse_mode="HTML", reply_markup=cancel_keyboard())
+        return
     data = await state.get_data()
-    target_id = data["target_id"]
-    mailing_id = data["mailing_id"]
+    target_id = data.get("target_id")
+    mailing_id = data.get("mailing_id")
+    if not target_id or not mailing_id:
+        await message.answer(pe("❌ Сессия устарела. Начните заново."), parse_mode="HTML", reply_markup=main_menu_keyboard())
+        await state.clear()
+        return
 
     if text == "0":
         await db.update_target_thread(target_id, None)
@@ -2205,9 +2341,16 @@ async def callback_reply_mode_random(callback: CallbackQuery, state: FSMContext)
 
 @router.message(EditMailingStates.waiting_reply_range)
 async def process_reply_range(message: Message, state: FSMContext, db: Database):
-    text = message.text.strip()
+    text = (message.text or "").strip()
+    if not text:
+        await message.answer(pe("❌ Отправьте текстовое сообщение."), parse_mode="HTML", reply_markup=cancel_keyboard())
+        return
     data = await state.get_data()
-    mailing_id = data["mailing_id"]
+    mailing_id = data.get("mailing_id")
+    if not mailing_id:
+        await message.answer(pe("❌ Сессия устарела. Начните заново."), parse_mode="HTML", reply_markup=main_menu_keyboard())
+        await state.clear()
+        return
 
     m = re.match(r'^(\d+)\s*[-–]\s*(\d+)$', text)
     if not m:

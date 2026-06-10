@@ -1,5 +1,6 @@
 import asyncio
 import time
+from datetime import datetime
 from aiogram import Router, F
 from aiogram.types import Message, CallbackQuery
 from aiogram.fsm.context import FSMContext
@@ -137,7 +138,10 @@ async def callback_add_account(callback: CallbackQuery, state: FSMContext, db: D
     user = await db.get_user(callback.from_user.id)
     accounts_count = await db.count_user_accounts(user.id)
 
-    if accounts_count >= config.FREE_ACCOUNTS_LIMIT:
+    has_paid = user.subscription_end and user.subscription_end > datetime.now()
+    account_limit = 1 if (user.subscription_type == "free_ad" and not has_paid) else config.FREE_ACCOUNTS_LIMIT
+
+    if accounts_count >= account_limit:
         if config.TON_WALLET_ADDRESS:
             ton_service_instance = TonPaymentService(config.TON_WALLET_ADDRESS, config.TONCENTER_API_KEY)
             ton_amount = await ton_service_instance.calculate_ton_amount(config.EXTRA_ACCOUNT_PRICE)
@@ -147,7 +151,7 @@ async def callback_add_account(callback: CallbackQuery, state: FSMContext, db: D
                 ton_text = f"💠 TON — ≈ {config.EXTRA_ACCOUNT_PRICE} USDT в TON"
             text = pe(
                 f"➕ Добавление аккаунта\n\n"
-                f"⚠️ Вы достигли лимита в {config.FREE_ACCOUNTS_LIMIT} бесплатных аккаунтов.\n\n"
+                f"⚠️ Вы достигли лимита в {account_limit} аккаунтов.\n\n"
                 f"Выберите способ оплаты:\n\n"
                 f"💎 CryptoBot — {config.EXTRA_ACCOUNT_PRICE} {config.SUBSCRIPTION_CURRENCY}\n"
                 f"{ton_text}"
@@ -156,15 +160,15 @@ async def callback_add_account(callback: CallbackQuery, state: FSMContext, db: D
                 text, parse_mode="HTML", reply_markup=account_payment_method_keyboard()
             )
         else:
-            await _create_cryptobot_account_payment(callback, db, accounts_count)
+            await _create_cryptobot_account_payment(callback, db, accounts_count, account_limit)
         await callback.answer()
         return
 
-    remaining = config.FREE_ACCOUNTS_LIMIT - accounts_count
+    remaining = account_limit - accounts_count
     text = pe(
         "➕ Добавление аккаунта\n\n"
-        f"📊 У вас {accounts_count}/{config.FREE_ACCOUNTS_LIMIT} бесплатных аккаунтов\n"
-        f"Осталось бесплатных: {remaining}\n\n"
+        f"📊 У вас {accounts_count}/{account_limit} аккаунтов\n"
+        f"Осталось: {remaining}\n\n"
         "<b>Шаг 1 из 3</b>\n\n"
         "Хотите использовать прокси SOCKS5?\n\n"
         "Если да — введите в формате:\n"
@@ -177,7 +181,7 @@ async def callback_add_account(callback: CallbackQuery, state: FSMContext, db: D
     await callback.answer()
 
 
-async def _create_cryptobot_account_payment(callback: CallbackQuery, db: Database, accounts_count: int):
+async def _create_cryptobot_account_payment(callback: CallbackQuery, db: Database, accounts_count: int, account_limit: int = config.FREE_ACCOUNTS_LIMIT):
     """Create CryptoBot invoice for extra account."""
     extra_cost = config.EXTRA_ACCOUNT_PRICE
     crypto_service = CryptoBotService(config.CRYPTOBOT_TOKEN, config.CRYPTOBOT_TESTNET)
@@ -198,7 +202,7 @@ async def _create_cryptobot_account_payment(callback: CallbackQuery, db: Databas
 
     text = pe(
         f"➕ Добавление аккаунта\n\n"
-        f"⚠️ Вы достигли лимита в {config.FREE_ACCOUNTS_LIMIT} бесплатных аккаунтов.\n\n"
+        f"⚠️ Вы достигли лимита в {account_limit} аккаунтов.\n\n"
         f"💰 Стоимость дополнительного аккаунта: <b>{extra_cost} USDT</b>\n\n"
         "Оплатите счёт и нажмите «Проверить оплату»."
     )
@@ -447,7 +451,7 @@ async def callback_add_account_skip_api(callback: CallbackQuery, state: FSMConte
 @router.message(AddAccountStates.waiting_api_id)
 async def process_api_id(message: Message, state: FSMContext):
     try:
-        api_id = int(message.text.strip())
+        api_id = int((message.text or "").strip())
     except ValueError:
         await message.answer(pe("❌ API ID должен быть числом. Попробуйте снова:"), parse_mode="HTML")
         return
@@ -459,6 +463,9 @@ async def process_api_id(message: Message, state: FSMContext):
 
 @router.message(AddAccountStates.waiting_api_hash)
 async def process_api_hash(message: Message, state: FSMContext):
+    if not message.text:
+        await message.answer(pe("❌ Введите API Hash текстом."), parse_mode="HTML", reply_markup=cancel_keyboard())
+        return
     api_hash = message.text.strip()
 
     if len(api_hash) < 20:
@@ -466,30 +473,32 @@ async def process_api_hash(message: Message, state: FSMContext):
         return
 
     await state.update_data(api_hash=api_hash)
-    await message.answer(
-        "➕ Добавление аккаунта\n\n"
-        "<b>Шаг 3 из 3</b>\n\n"
-        "Введите номер телефона в международном формате:\n"
-        "Например: <code>+380991234567</code>",
-        reply_markup=cancel_keyboard(),
-    )
-    await state.set_state(AddAccountStates.waiting_phone)
-
-
-@router.message(AddAccountStates.waiting_phone)
-async def process_phone(
-    message: Message, state: FSMContext, userbot_manager: UserbotManager
-):
-    phone = message.text.strip()
-
-    if not phone.startswith("+"):
-        await message.answer(pe("❌ Номер должен начинаться с +. Попробуйте снова:"), parse_mode="HTML")
-        return
-
-    await state.update_data(phone=phone)
     data = await state.get_data()
 
-    if data.get("proxy"):
+    if data.get("phone"):
+        # Phone is already known (retry after API credentials error) — connect immediately
+        await _connect_and_send_code(message, state, data)
+    else:
+        await message.answer(
+            pe("➕ Добавление аккаунта\n\n"
+            "<b>Шаг 3 из 3</b>\n\n"
+            "Введите номер телефона в международном формате:\n"
+            "Например: <code>+380991234567</code>"),
+            parse_mode="HTML",
+            reply_markup=cancel_keyboard(),
+        )
+        await state.set_state(AddAccountStates.waiting_phone)
+
+
+async def _connect_and_send_code(message: Message, state: FSMContext, data: dict):
+    """Connect to Telegram and request login code. On API credentials error, asks for new ones."""
+    from telethon import TelegramClient
+    from telethon.sessions import StringSession
+
+    phone = data["phone"]
+    has_proxy = bool(data.get("proxy"))
+
+    if has_proxy:
         status_msg = await message.answer(
             pe("⏳ Подключаемся через прокси...\n<i>Это может занять до 60 секунд</i>"),
             parse_mode="HTML",
@@ -497,10 +506,6 @@ async def process_phone(
     else:
         status_msg = await message.answer(pe("⏳ Отправляем код на телефон..."), parse_mode="HTML")
 
-    from telethon import TelegramClient
-    from telethon.sessions import StringSession
-
-    has_proxy = bool(data.get("proxy"))
     client = None
     try:
         device = _DEVICE_POOL[abs(hash(phone)) % len(_DEVICE_POOL)]
@@ -519,11 +524,9 @@ async def process_phone(
 
         connect_timeout = 60 if has_proxy else 20
         await asyncio.wait_for(client.connect(), timeout=connect_timeout)
-
         sent = await asyncio.wait_for(client.send_code_request(phone), timeout=30)
 
         await state.update_data(client=client, entered_code="", phone_code_hash=sent.phone_code_hash)
-
         await status_msg.delete()
         await message.answer(
             pe("📱 Код отправлен!\n\n"
@@ -547,25 +550,67 @@ async def process_phone(
             reply_markup=main_menu_keyboard(),
         )
         await state.clear()
+
     except Exception as e:
         if client:
             await client.disconnect()
         await status_msg.delete()
         err = str(e)
         if "Connection to Telegram failed" in err or "ConnectionError" in type(e).__name__:
-            msg = pe(
-                "❌ Не удалось подключиться к Telegram.\n\n"
+            await message.answer(
+                pe("❌ Не удалось подключиться к Telegram.\n\n"
                 "Возможные причины:\n"
                 "• Нет интернета на сервере\n"
                 "• Telegram заблокирован — попробуйте добавить прокси\n\n"
-                "Попробуйте снова позже."
+                "Попробуйте снова позже."),
+                parse_mode="HTML",
+                reply_markup=main_menu_keyboard(),
             )
+            await state.clear()
+        elif "api_id" in err.lower() or "api_hash" in err.lower() or "api_id/api_hash" in err.lower():
+            # Keep phone/proxy in state, ask for new API credentials
+            await state.update_data(api_id=None, api_hash=None)
+            await message.answer(
+                pe("❌ <b>Неверные API ID или API Hash.</b>\n\n"
+                "Стандартные учётные данные не подходят для этого номера.\n\n"
+                "Введите свои API ID и Hash (номер телефона сохранён, вводить снова не нужно):\n"
+                "Получить: <a href=\"https://my.telegram.org\">my.telegram.org</a>"),
+                parse_mode="HTML",
+                reply_markup=cancel_keyboard(),
+            )
+            await state.set_state(AddAccountStates.waiting_api_id)
         elif "phone" in err.lower() or "invalid" in err.lower():
-            msg = pe(f"❌ Неверный номер телефона: {e}\n\nПроверьте формат: +380991234567")
+            await message.answer(
+                pe(f"❌ Неверный номер телефона.\n\nПроверьте формат: +380991234567"),
+                parse_mode="HTML",
+                reply_markup=main_menu_keyboard(),
+            )
+            await state.clear()
         else:
-            msg = pe(f"❌ Ошибка при отправке кода: {e}\n\nПопробуйте снова.")
-        await message.answer(msg, parse_mode="HTML", reply_markup=main_menu_keyboard())
-        await state.clear()
+            await message.answer(
+                pe(f"❌ Ошибка при отправке кода: {e}\n\nПопробуйте снова."),
+                parse_mode="HTML",
+                reply_markup=main_menu_keyboard(),
+            )
+            await state.clear()
+
+
+@router.message(AddAccountStates.waiting_phone)
+async def process_phone(
+    message: Message, state: FSMContext, userbot_manager: UserbotManager
+):
+    if not message.text:
+        await message.answer(pe("❌ Введите номер телефона."), parse_mode="HTML", reply_markup=cancel_keyboard())
+        return
+    phone = message.text.strip()
+
+    if not phone.startswith("+"):
+        await message.answer(pe("❌ Номер должен начинаться с +. Попробуйте снова:"), parse_mode="HTML")
+        return
+
+    await state.update_data(phone=phone)
+    data = await state.get_data()
+    await _connect_and_send_code(message, state, data)
 
 
 @router.message(AddAccountStates.waiting_code)
@@ -585,6 +630,9 @@ async def process_code(message: Message, state: FSMContext, db: Database):
 
 @router.message(AddAccountStates.waiting_password)
 async def process_password(message: Message, state: FSMContext, db: Database):
+    if not message.text:
+        await message.answer(pe("❌ Введите пароль текстом."), parse_mode="HTML", reply_markup=cancel_keyboard())
+        return
     password = message.text.strip()
     data = await state.get_data()
     client = data.get("client")
@@ -866,12 +914,19 @@ async def callback_rename_account(callback: CallbackQuery, state: FSMContext):
 
 @router.message(RenameAccountStates.waiting_name)
 async def process_rename_account(message: Message, state: FSMContext, db: Database):
+    if not message.text:
+        await message.answer(pe("❌ Введите название текстом."), parse_mode="HTML", reply_markup=cancel_keyboard())
+        return
     name = message.text.strip()
     if not name:
         await message.answer(pe("❌ Название не может быть пустым."), parse_mode="HTML", reply_markup=cancel_keyboard())
         return
     data = await state.get_data()
-    account_id = data["account_id"]
+    account_id = data.get("account_id")
+    if not account_id:
+        await message.answer(pe("❌ Сессия устарела. Начните заново."), parse_mode="HTML")
+        await state.clear()
+        return
     await db.update_account_name(account_id, name)
     await state.clear()
 
@@ -934,7 +989,11 @@ async def callback_set_proxy(callback: CallbackQuery, state: FSMContext, db: Dat
 async def process_set_proxy(message: Message, state: FSMContext, db: Database, userbot_manager: UserbotManager):
     text = message.text.strip() if message.text else ""
     data = await state.get_data()
-    account_id = data["account_id"]
+    account_id = data.get("account_id")
+    if not account_id:
+        await message.answer(pe("❌ Сессия устарела. Начните заново."), parse_mode="HTML")
+        await state.clear()
+        return
 
     if text.lower() in ("удалить", "remove", "delete"):
         await db.update_account_proxy(account_id, None)

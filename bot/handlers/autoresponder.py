@@ -153,7 +153,11 @@ async def callback_edit_autoresponder_text(
 @router.message(AutoresponderStates.waiting_text)
 async def process_autoresponder_text(message: Message, state: FSMContext, db: Database):
     data = await state.get_data()
-    account_id = data["account_id"]
+    account_id = data.get("account_id")
+    if not account_id:
+        await message.answer(pe("❌ Сессия устарела. Начните заново."), parse_mode="HTML")
+        await state.clear()
+        return
 
     text = None
     photo_path = None
@@ -175,6 +179,9 @@ async def process_autoresponder_text(message: Message, state: FSMContext, db: Da
     await state.clear()
 
     account = await db.get_account(account_id)
+    if not account:
+        await message.answer(pe("❌ Аккаунт не найден."), parse_mode="HTML")
+        return
     saved = "Фото + текст сохранены" if photo_path else "Текст автоответа сохранён"
 
     await message.answer(
@@ -276,7 +283,11 @@ async def callback_edit_group_autoresponder_text(callback: CallbackQuery, state:
 @router.message(AutoresponderStates.waiting_group_text)
 async def process_group_autoresponder_text(message: Message, state: FSMContext, db: Database):
     data = await state.get_data()
-    account_id = data["account_id"]
+    account_id = data.get("account_id")
+    if not account_id:
+        await message.answer(pe("❌ Сессия устарела. Начните заново."), parse_mode="HTML")
+        await state.clear()
+        return
 
     text = None
     photo_path = None
@@ -298,6 +309,9 @@ async def process_group_autoresponder_text(message: Message, state: FSMContext, 
     await state.clear()
 
     account = await db.get_account(account_id)
+    if not account:
+        await message.answer(pe("❌ Аккаунт не найден."), parse_mode="HTML")
+        return
     saved = "Фото + текст сохранены" if photo_path else "Текст автоответа для групп сохранён"
     await message.answer(
         pe(f"✅ {saved}!\n\n"

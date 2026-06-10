@@ -121,8 +121,9 @@ async def main():
                 logger.critical(f"Background task '{task.get_name()}' died unexpectedly: {exc}", exc_info=exc)
 
     try:
-        await userbot_manager.start_all_clients()
-        logger.info("Userbot clients started")
+        # Start account connections in background — bot responds immediately
+        await userbot_manager.start_all_clients(background=True)
+        logger.info("Userbot clients starting in background...")
 
         userbot_manager.start_monitor()
         if userbot_manager._monitor_task:
@@ -144,24 +145,31 @@ async def main():
             logger.critical(f"Polling stopped unexpectedly: {e}", exc_info=True)
             raise
     finally:
-        if subscription_checker._task and not subscription_checker._task.done():
-            subscription_checker._task.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
-                await subscription_checker._task
-        if userbot_manager._monitor_task and not userbot_manager._monitor_task.done():
-            userbot_manager._monitor_task.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
-                await userbot_manager._monitor_task
-        await mailing_service.stop()
-        await userbot_manager.stop_all_clients()
-        await db.close()
-        await bot.session.close()
+        with contextlib.suppress(Exception):
+            if subscription_checker._task and not subscription_checker._task.done():
+                subscription_checker._task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await subscription_checker._task
+        with contextlib.suppress(Exception):
+            if userbot_manager._monitor_task and not userbot_manager._monitor_task.done():
+                userbot_manager._monitor_task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await userbot_manager._monitor_task
+        with contextlib.suppress(Exception):
+            await mailing_service.stop()
+        with contextlib.suppress(Exception):
+            await userbot_manager.stop_all_clients()
+        with contextlib.suppress(Exception):
+            await db.close()
+        with contextlib.suppress(Exception):
+            await bot.session.close()
         logger.info("Bot stopped")
 
 
 if __name__ == "__main__":
     import time
     attempt = 0
+    consecutive_failures = 0
     while True:
         attempt += 1
         logger.info(f"=== Bot starting (attempt #{attempt}) ===")
@@ -173,6 +181,8 @@ if __name__ == "__main__":
             logger.info("Bot stopped by user")
             break
         except Exception as e:
+            consecutive_failures += 1
             logger.critical(f"Bot crashed: {e}", exc_info=True)
-            logger.info("Restarting in 5 seconds...")
-            time.sleep(5)
+            backoff = min(5 * (2 ** (consecutive_failures - 1)), 300)
+            logger.info(f"Restarting in {backoff}s (crash #{consecutive_failures})...")
+            time.sleep(backoff)

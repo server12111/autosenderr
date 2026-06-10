@@ -53,6 +53,7 @@ import certifi
 
 from .config import config
 from .database.db import Database
+from .keyboards.inline import subscription_expired_keyboard
 from .utils.time_utils import is_within_active_hours
 from .utils.premium_emoji import pe
 
@@ -514,13 +515,16 @@ class AutoresponderService:
             return
 
         try:
+            ar_user = await self.db.get_user_by_id(account.user_id)
+            sig = _FREE_TIER_SIGNATURE if (ar_user and Database.is_free_ad_active(ar_user)) else ""
+            ar_text = ((account.autoresponder_text or "") + sig) or None
             if account.autoresponder_photo and os.path.exists(account.autoresponder_photo):
                 await event.client.send_file(
                     sender_id, account.autoresponder_photo,
-                    caption=account.autoresponder_text or None
+                    caption=ar_text
                 )
             else:
-                await event.respond(account.autoresponder_text)
+                await event.respond(ar_text or "")
             await self.db.add_autoresponder_history(account.id, sender_id, event.text)
             logger.info(f"Autoresponder sent to {sender_id} from {account.phone}")
         except Exception as e:
@@ -550,14 +554,17 @@ class AutoresponderService:
                 return
 
             sender_id = sender.id
+            gr_user = await self.db.get_user_by_id(account.user_id)
+            sig = _FREE_TIER_SIGNATURE if (gr_user and Database.is_free_ad_active(gr_user)) else ""
+            gr_text = ((account.group_autoresponder_text or "") + sig) or None
             if account.group_autoresponder_photo and os.path.exists(account.group_autoresponder_photo):
                 await event.client.send_file(
                     event.chat_id, account.group_autoresponder_photo,
-                    caption=account.group_autoresponder_text or None,
+                    caption=gr_text,
                     reply_to=event.id
                 )
             else:
-                await event.reply(account.group_autoresponder_text)
+                await event.reply(gr_text or "")
             logger.info(f"Group autoresponder replied to {sender_id} from {account.phone}")
         except Exception as e:
             logger.error(f"Group autoresponder error: {e}")
@@ -729,6 +736,9 @@ def _build_telethon_entities(entities_json: str) -> list:
     return result
 
 
+_FREE_TIER_SIGNATURE = "\n━━━━━━━━━━\n🤖 Отправлено через @feAutoSenderBot"
+
+
 class MailingService:
     def __init__(self, db: Database, userbot_manager):
         self.db = db
@@ -770,9 +780,9 @@ class MailingService:
 
     async def stop_mailing(self, mailing_id: int):
         await self.db.update_mailing_status(mailing_id, False)
-        if mailing_id in self._tasks:
-            self._tasks[mailing_id].cancel()
-            del self._tasks[mailing_id]
+        task = self._tasks.pop(mailing_id, None)
+        if task:
+            task.cancel()
         self._stagger_until.pop(mailing_id, None)
 
     async def stop_user_mailings(self, user_id: int):
@@ -798,7 +808,7 @@ class MailingService:
         except Exception:
             return True  # якщо не можемо перевірити — дозволяємо відправку
 
-    async def _send_msg(self, client, target: str, msg, pm: Optional[str], reply_to=None) -> None:
+    async def _send_msg(self, client, target: str, msg, pm: Optional[str], reply_to=None, add_signature: bool = False) -> None:
         """Send one mailing message to target (forward / text / photo)."""
         if msg.is_forward:
             peer = int(msg.forward_peer) if msg.forward_peer.lstrip('-').isdigit() else msg.forward_peer
@@ -808,8 +818,9 @@ class MailingService:
             )
             return
 
+        sig = _FREE_TIER_SIGNATURE if add_signature else ""
         entities = _build_telethon_entities(msg.entities_json) if msg.entities_json else None
-        text = msg.text or None
+        text = (msg.text or "") + sig if (msg.text or sig) else None
         eff_pm = None if entities else pm  # use entities directly — skip parse_mode
 
         photos = [p for p in msg.photo_paths if os.path.exists(p)]
@@ -927,6 +938,10 @@ class MailingService:
                         pool_clients.append((pool_acc.id, pc, pc_me))
                         client_map[pool_acc.id] = (pc, pc_me)
 
+                    # Free tier: check once per cycle
+                    mailing_user = await self.db.get_user_by_id(mailing.user_id)
+                    add_sig = Database.is_free_ad_active(mailing_user) if mailing_user else False
+
                     for target_idx, target_obj in enumerate(targets):
                         # Interval check per target
                         target_interval = target_obj.interval_seconds or mailing.interval_seconds
@@ -971,7 +986,11 @@ class MailingService:
                         if not target.startswith('-') and not target.startswith('@') and not target.isdigit():
                             target = f"@{target}"
 
-                        msg = random.choice(messages)
+                        sendable = [m for m in messages if not m.is_forward] if add_sig else messages
+                        if not sendable:
+                            logger.debug(f"Mailing {mailing_id}: all messages are forwards, skipping target for free-tier user")
+                            continue
+                        msg = random.choice(sendable)
                         pm = msg.parse_mode or 'html'
                         if pm == 'plain':
                             pm = None
@@ -1005,7 +1024,7 @@ class MailingService:
                                 f"→ {target} (account {current_account_id})"
                             )
                         try:
-                            await self._send_msg(target_client, target, msg, pm, reply_to=reply_to_id)
+                            await self._send_msg(target_client, target, msg, pm, reply_to=reply_to_id, add_signature=add_sig)
                             if config.MAILING_DEBUG:
                                 logger.info(f"Mailing {mailing_id}: ✓ sent to {target} via account {current_account_id}")
                             else:
@@ -1073,7 +1092,7 @@ class MailingService:
                             await self._handle_chat_ban(mailing_id, current_account_id, target_obj, e)
                         except _NOT_MEMBER_ERRORS:
                             logger.info(f"Mailing {mailing_id}: not participant/forbidden in '{target}', attempting auto-join")
-                            joined = await self._try_join_and_send(target_client, target, target_obj, msg, pm, mailing_id, current_account_id, reply_to=reply_to_id)
+                            joined = await self._try_join_and_send(target_client, target, target_obj, msg, pm, mailing_id, current_account_id, reply_to=reply_to_id, add_signature=add_sig)
                             if joined:
                                 sent_any = True
                         except SlowModeWaitError as e:
@@ -1086,7 +1105,7 @@ class MailingService:
                                     if fb_id == current_account_id:
                                         continue
                                     try:
-                                        await self._send_msg(fb_client, target, msg, pm, reply_to=reply_to_id)
+                                        await self._send_msg(fb_client, target, msg, pm, reply_to=reply_to_id, add_signature=add_sig)
                                         logger.info(f"Mailing {mailing_id}: FloodWait fallback → account {fb_id} → {target}")
                                         await self.db.update_target_last_sent(target_obj.id, fb_id)
                                         sent_any = True
@@ -1126,7 +1145,7 @@ class MailingService:
                                         if fb_id == current_account_id:
                                             continue
                                         try:
-                                            await self._send_msg(fb_client, target, msg, pm, reply_to=reply_to_id)
+                                            await self._send_msg(fb_client, target, msg, pm, reply_to=reply_to_id, add_signature=add_sig)
                                             logger.info(f"Mailing {mailing_id}: PEER_FLOOD fallback → account {fb_id} → {target}")
                                             await self.db.update_target_last_sent(target_obj.id, fb_id)
                                             sent_any = True
@@ -1179,6 +1198,7 @@ class MailingService:
             logger.info(f"Mailing {mailing_id} task cancelled")
         except Exception as e:
             logger.error(f"Mailing {mailing_id} loop fatal error: {e}", exc_info=True)
+            self._tasks.pop(mailing_id, None)
             if self._running:
                 await asyncio.sleep(30)
                 try:
@@ -1237,7 +1257,7 @@ class MailingService:
         error_name = type(error).__name__
         logger.warning(f"Mailing {mailing_id}: restricted in '{chat}' ({error_name}) — skipping this cycle, target kept")
 
-    async def _try_join_and_send(self, client, target: str, target_obj, msg, pm, mailing_id: int, account_id: Optional[int] = None, reply_to=None) -> bool:
+    async def _try_join_and_send(self, client, target: str, target_obj, msg, pm, mailing_id: int, account_id: Optional[int] = None, reply_to=None, add_signature: bool = False) -> bool:
         """Try to join target channel/group, then retry sending. Returns True if message was sent."""
         try:
             await client(JoinChannelRequest(target))
@@ -1252,7 +1272,7 @@ class MailingService:
             return False
 
         try:
-            await self._send_msg(client, target, msg, pm, reply_to=reply_to)
+            await self._send_msg(client, target, msg, pm, reply_to=reply_to, add_signature=add_signature)
             await self.db.update_target_last_sent(target_obj.id, account_id)
             logger.info(f"Mailing {mailing_id}: sent to '{target}' after auto-join")
             return True
@@ -1303,7 +1323,6 @@ class SubscriptionCheckerService:
             logger.warning(f"Failed to send {days}d reminder to {user.telegram_id}: {e}")
 
     async def _check(self, bot):
-        from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
         users = await self.db.get_users_needing_subscription_check()
         now = datetime.now()
         for user in users:
@@ -1317,18 +1336,19 @@ class SubscriptionCheckerService:
                 await self.db.disable_user_autoresponders(user.id)
                 if not user.subscription_expired_notified_at:
                     try:
-                        keyboard = InlineKeyboardMarkup(inline_keyboard=[[
-                            InlineKeyboardButton(text="💳 Купить подписку", callback_data="subscription")
-                        ]])
-                        msg = pe("⚠️ <b>Ваша подписка истекла.</b>\n\n"
-                                 "Доступ к автофункциям ограничен.\n"
-                                 "Продлите подписку, чтобы продолжить работу.")
                         if stopped > 0:
                             msg = pe(f"⚠️ <b>Ваша подписка истекла.</b>\n\n"
-                                     f"Остановлено {stopped} рассылок.\n"
-                                     "Доступ к автофункциям ограничен.\n"
-                                     "Продлите подписку, чтобы продолжить работу.")
-                        await bot.send_message(user.telegram_id, msg, parse_mode="HTML", reply_markup=keyboard)
+                                     f"⛔️ Остановлено рассылок: <b>{stopped}</b>\n"
+                                     "Доступ к авторассылкам и автоответчику ограничен.\n\n"
+                                     "🔄 Продлите подписку или включите бесплатный тариф\n"
+                                     "для продолжения работы.")
+                        else:
+                            msg = pe("⚠️ <b>Ваша подписка истекла.</b>\n\n"
+                                     "Доступ к авторассылкам и автоответчику ограничен.\n\n"
+                                     "🔄 Продлите подписку или включите бесплатный тариф\n"
+                                     "для продолжения работы.")
+                        await bot.send_message(user.telegram_id, msg, parse_mode="HTML",
+                                               reply_markup=subscription_expired_keyboard())
                         await self.db.set_subscription_expired_notified(user.id)
                     except Exception:
                         pass

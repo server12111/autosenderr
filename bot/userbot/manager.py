@@ -58,7 +58,7 @@ _BAN_ERRORS = (
     AuthKeyDuplicatedError,
 )
 
-_MONITOR_INTERVAL = 600  # seconds between health checks
+_MONITOR_INTERVAL = 1800  # seconds between health checks (30 min)
 
 
 class UserbotManager:
@@ -90,6 +90,12 @@ class UserbotManager:
             client = self._clients[account.id]
             if client.is_connected():
                 return client
+            # Old client is disconnected — clean it up before creating a new one
+            try:
+                await client.disconnect()
+            except Exception:
+                pass
+            del self._clients[account.id]
 
         client = None
         try:
@@ -105,6 +111,8 @@ class UserbotManager:
                 app_version=device["app_version"],
                 lang_code="uk",
                 system_lang_code="uk-UA",
+                connection_retries=5,
+                retry_delay=10,
             )
             await client.connect()
 
@@ -222,6 +230,8 @@ class UserbotManager:
                 client = TelegramClient(
                     StringSession(account.session_string), account.api_id, account.api_hash,
                     proxy=proxy,
+                    connection_retries=3,
+                    retry_delay=5,
                 )
                 await client.connect()
                 await client.log_out()
@@ -319,21 +329,32 @@ class UserbotManager:
             except Exception as e:
                 logger.error(f"Failed to notify about account {account_id} problem: {e}")
 
-    async def start_all_clients(self):
-        accounts = await self.db.get_all_active_accounts()
+    async def start_all_clients(self, background: bool = False):
+        accounts = await self.db.get_needed_accounts()
         if not accounts:
-            logger.info("No active accounts to start")
+            logger.info("No accounts need connection at startup")
             return
 
-        semaphore = asyncio.Semaphore(5)
+        semaphore = asyncio.Semaphore(20)
 
         async def _start(account):
             async with semaphore:
                 return await self.start_client(account)
 
-        results = await asyncio.gather(*[_start(a) for a in accounts], return_exceptions=True)
-        started = sum(1 for r in results if r is not None and not isinstance(r, Exception))
-        logger.info(f"Startup complete: {started}/{len(accounts)} accounts active")
+        async def _run_all():
+            results = await asyncio.gather(*[_start(a) for a in accounts], return_exceptions=True)
+            started = sum(1 for r in results if r is not None and not isinstance(r, Exception))
+            logger.info(f"Startup complete: {started}/{len(accounts)} accounts active")
+
+        if background:
+            def _on_startup_done(t: asyncio.Task):
+                if not t.cancelled() and t.exception():
+                    logger.error(f"Account startup task failed: {t.exception()}", exc_info=t.exception())
+
+            task = asyncio.create_task(_run_all(), name="startup_clients")
+            task.add_done_callback(_on_startup_done)
+        else:
+            await _run_all()
 
     async def stop_all_clients(self):
         for account_id in list(self._clients.keys()):

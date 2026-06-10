@@ -28,6 +28,7 @@ class User:
     reminder_3d_sent_at: Optional[datetime] = None
     reminder_1d_sent_at: Optional[datetime] = None
     welcome_pin_msg_id: Optional[int] = None
+    subscription_type: Optional[str] = None
 
     @property
     def display_name(self) -> str:
@@ -267,6 +268,7 @@ class Database:
         await _add_col("users", "reminder_3d_sent_at", "DATETIME DEFAULT NULL")
         await _add_col("users", "reminder_1d_sent_at", "DATETIME DEFAULT NULL")
         await _add_col("users", "welcome_pin_msg_id", "INTEGER DEFAULT NULL")
+        await _add_col("users", "subscription_type", "TEXT DEFAULT NULL")
         # mailing_accounts — multiple accounts per mailing (round-robin)
         await self._conn.execute("""
             CREATE TABLE IF NOT EXISTS mailing_accounts (
@@ -339,6 +341,7 @@ class Database:
             reminder_3d_sent_at=self._parse_datetime(row["reminder_3d_sent_at"]) if "reminder_3d_sent_at" in keys else None,
             reminder_1d_sent_at=self._parse_datetime(row["reminder_1d_sent_at"]) if "reminder_1d_sent_at" in keys else None,
             welcome_pin_msg_id=row["welcome_pin_msg_id"] if "welcome_pin_msg_id" in keys and row["welcome_pin_msg_id"] is not None else None,
+            subscription_type=row["subscription_type"] if "subscription_type" in keys else None,
         )
 
     def _row_to_account(self, row) -> "Account":
@@ -449,6 +452,27 @@ class Database:
             (subscription_end.isoformat(), user_id),
         )
         await self._conn.commit()
+
+    async def activate_free_tier(self, user_id: int):
+        await self._conn.execute(
+            "UPDATE users SET subscription_type = 'free_ad' WHERE id = ?", (user_id,)
+        )
+        await self._conn.commit()
+
+    async def deactivate_free_tier(self, user_id: int):
+        await self._conn.execute(
+            "UPDATE users SET subscription_type = NULL WHERE id = ?", (user_id,)
+        )
+        await self._conn.commit()
+
+    @staticmethod
+    def is_free_ad_active(user: "User") -> bool:
+        """True if user is on free_ad tier and has no active paid subscription."""
+        if user.subscription_type != "free_ad":
+            return False
+        if user.subscription_end and user.subscription_end > datetime.now():
+            return False
+        return True
 
     async def get_all_users(self) -> list[User]:
         async with self._conn.execute("SELECT * FROM users") as cur:
@@ -606,6 +630,38 @@ class Database:
 
     async def get_all_active_accounts(self) -> list[Account]:
         async with self._conn.execute("SELECT * FROM accounts WHERE is_active = 1") as cur:
+            return [self._row_to_account(r) for r in await cur.fetchall()]
+
+    async def get_needed_accounts(self) -> list[Account]:
+        """Accounts that need an active Telethon connection: autoresponder on OR active mailing.
+        Accounts of users with active subscription come first; expired-subscription users last."""
+        async with self._conn.execute("""
+            SELECT DISTINCT a.*,
+                CASE
+                    WHEN u.is_admin = 1 THEN 0
+                    WHEN u.subscription_end IS NOT NULL
+                         AND u.subscription_end > datetime('now') THEN 1
+                    WHEN u.subscription_type = 'free_ad' THEN 2
+                    ELSE 3
+                END AS _priority
+            FROM accounts a
+            JOIN users u ON a.user_id = u.id
+            WHERE a.is_active = 1 AND (
+                a.autoresponder_enabled = 1 OR
+                a.group_autoresponder_enabled = 1 OR
+                a.notify_messages = 1 OR
+                EXISTS (
+                    SELECT 1 FROM mailings m
+                    WHERE m.account_id = a.id AND m.is_active = 1
+                ) OR
+                EXISTS (
+                    SELECT 1 FROM mailing_accounts ma
+                    JOIN mailings m ON ma.mailing_id = m.id
+                    WHERE ma.account_id = a.id AND m.is_active = 1
+                )
+            )
+            ORDER BY _priority ASC
+        """) as cur:
             return [self._row_to_account(r) for r in await cur.fetchall()]
 
     async def get_registrations_by_period(self, period: str) -> list:

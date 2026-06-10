@@ -69,6 +69,9 @@ async def callback_withdraw(callback: CallbackQuery, state: FSMContext, db: Data
 
 @router.message(ReferralStates.waiting_wallet)
 async def process_wallet(message: Message, state: FSMContext, db: Database):
+    if not message.text:
+        await message.answer(pe("❌ Введите адрес кошелька текстом."), parse_mode="HTML")
+        return
     wallet = message.text.strip()
 
     if len(wallet) < 10:

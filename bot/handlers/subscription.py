@@ -9,6 +9,7 @@ from ..database.db import Database
 from ..keyboards.inline import (
     subscription_keyboard,
     subscription_plan_keyboard,
+    free_tier_info_keyboard,
     payment_keyboard,
     payment_method_keyboard,
     ton_payment_keyboard,
@@ -58,7 +59,8 @@ async def callback_subscription(callback: CallbackQuery, db: Database):
             f"Для использования всех функций бота необходима подписка.\n\n"
             f"Стоимость:\n"
             f"• 7 дней — {price_7d} USDT\n"
-            f"• 30 дней — {price_30d} USDT"
+            f"• 30 дней — {price_30d} USDT\n\n"
+            f"🆓 Или используйте бота бесплатно с рекламной подписью."
         )
         has_subscription = False
 
@@ -252,6 +254,9 @@ async def callback_check_ton_payment(
             await callback.answer("✅ Этот платёж уже обработан", show_alert=True)
             return
         user = await db.get_user(callback.from_user.id)
+        if not user:
+            await callback.answer("Ошибка: пользователь не найден", show_alert=True)
+            return
         plan_days = getattr(payment, "plan_days", 30) or 30
 
         if user.subscription_end and user.subscription_end > datetime.now():
@@ -260,6 +265,8 @@ async def callback_check_ton_payment(
             new_end = datetime.now() + timedelta(days=plan_days)
 
         await db.update_subscription(user.id, new_end)
+        if user.subscription_type == "free_ad":
+            await db.deactivate_free_tier(user.id)
         price_usdt = await db.get_price(plan_days)
         await _pay_referral(user, db, price_usdt)
 
@@ -301,6 +308,9 @@ async def callback_check_payment(
             await callback.answer("✅ Этот платёж уже обработан", show_alert=True)
             return
         user = await db.get_user(callback.from_user.id)
+        if not user:
+            await callback.answer("Ошибка: пользователь не найден", show_alert=True)
+            return
         plan_days = getattr(payment, "plan_days", 30) or 30
 
         if user.subscription_end and user.subscription_end > datetime.now():
@@ -309,6 +319,8 @@ async def callback_check_payment(
             new_end = datetime.now() + timedelta(days=plan_days)
 
         await db.update_subscription(user.id, new_end)
+        if user.subscription_type == "free_ad":
+            await db.deactivate_free_tier(user.id)
         await _pay_referral(user, db, payment.amount)
 
         await safe_edit(
@@ -413,6 +425,9 @@ async def callback_check_platega_payment(
             await callback.answer("✅ Этот платёж уже обработан", show_alert=True)
             return
         user = await db.get_user(callback.from_user.id)
+        if not user:
+            await callback.answer("Ошибка: пользователь не найден", show_alert=True)
+            return
         plan_days = getattr(payment, "plan_days", 30) or 30
 
         if user.subscription_end and user.subscription_end > datetime.now():
@@ -421,6 +436,8 @@ async def callback_check_platega_payment(
             new_end = datetime.now() + timedelta(days=plan_days)
 
         await db.update_subscription(user.id, new_end)
+        if user.subscription_type == "free_ad":
+            await db.deactivate_free_tier(user.id)
         price_usdt = await db.get_price(plan_days)
         await _pay_referral(user, db, price_usdt)
 
@@ -452,6 +469,63 @@ async def _pay_referral(user, db: Database, payment_amount: float):
         pass
 
 
+@router.callback_query(F.data == "activate_free_tier")
+async def callback_activate_free_tier(callback: CallbackQuery, db: Database):
+    user = await db.get_user(callback.from_user.id)
+    if not user:
+        await callback.answer()
+        return
+
+    has_paid = user.subscription_end and user.subscription_end > datetime.now()
+    already_active = user.subscription_type == "free_ad" and not has_paid
+
+    if has_paid:
+        status_line = "✅ У вас активная подписка — реклама не добавляется."
+    elif already_active:
+        status_line = "✅ Бесплатный тариф уже активен."
+    else:
+        status_line = ""
+
+    text = pe(
+        "🆓 <b>Бесплатный тариф</b>\n\n"
+        "Полный доступ ко всем функциям бота — бесплатно.\n\n"
+        "<b>Что включено:</b>\n"
+        "• Рассылки по чатам и группам\n"
+        "• Автоответчик в ЛС и группах\n"
+        "• До 1 аккаунта\n\n"
+        "<b>Ограничения:</b>\n"
+        "• К каждому сообщению добавляется подпись:\n"
+        "<i>━━━━━━━━━━\n🤖 Отправлено через @feAutoSenderBot</i>\n"
+        "• Пересылка сообщений (forward) недоступна\n\n"
+        "Купите подписку — и реклама исчезнет автоматически."
+        + (f"\n\n{status_line}" if status_line else "")
+    )
+    await safe_edit(callback.message, text, parse_mode="HTML",
+                    reply_markup=free_tier_info_keyboard(already_active or bool(has_paid)))
+    await callback.answer()
+
+
+@router.callback_query(F.data == "activate_free_tier_confirm")
+async def callback_activate_free_tier_confirm(callback: CallbackQuery, db: Database):
+    user = await db.get_user(callback.from_user.id)
+    if not user:
+        await callback.answer()
+        return
+
+    has_paid = user.subscription_end and user.subscription_end > datetime.now()
+    if has_paid:
+        await callback.answer("✅ У вас активная подписка.", show_alert=True)
+        return
+
+    if user.subscription_type == "free_ad":
+        await callback.answer("ℹ️ Бесплатный тариф уже активен.", show_alert=True)
+        return
+
+    await db.activate_free_tier(user.id)
+    await callback.answer("✅ Бесплатный тариф активирован!", show_alert=True)
+    await callback_subscription(callback, db)
+
+
 @router.callback_query(F.data == "enter_promocode")
 async def callback_enter_promocode(callback: CallbackQuery, state: FSMContext):
     await state.set_state(SubscriptionStates.waiting_promocode)
@@ -461,6 +535,9 @@ async def callback_enter_promocode(callback: CallbackQuery, state: FSMContext):
 
 @router.message(SubscriptionStates.waiting_promocode)
 async def process_promocode(message: Message, state: FSMContext, db: Database):
+    if not message.text:
+        await message.answer(pe("❌ Введите промокод текстом."), parse_mode="HTML", reply_markup=cancel_keyboard())
+        return
     code = message.text.strip()
     promo = await db.get_promocode(code)
 
@@ -498,6 +575,8 @@ async def process_promocode(message: Message, state: FSMContext, db: Database):
         new_end = datetime.now() + timedelta(days=promo.duration_days)
 
     await db.update_subscription(user.id, new_end)
+    if user.subscription_type == "free_ad":
+        await db.deactivate_free_tier(user.id)
     await db.use_promocode(code, user.id, promo.id)
 
     if promo.is_subscription:
