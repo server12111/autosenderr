@@ -497,10 +497,18 @@ async def process_edit_message_text(message: Message, state: FSMContext, db: Dat
         await state.clear()
         return
     pending_photos = data.get("pending_photos", [])
+    pending_caption = data.get("pending_caption")
+    pending_caption_entities = data.get("pending_caption_entities")
 
     if pending_photos:
-        await db.add_mailing_message(mailing_id, text, photo_paths=pending_photos,
-                                     entities_json=entities_json)
+        if pending_caption is not None:
+            save_text = pending_caption
+            save_entities = pending_caption_entities
+        else:
+            save_text = text
+            save_entities = entities_json
+        await db.add_mailing_message(mailing_id, save_text, photo_paths=pending_photos,
+                                     entities_json=save_entities)
         await state.clear()
         messages = await db.get_mailing_messages(mailing_id)
         await message.answer(
@@ -1348,10 +1356,18 @@ async def process_create_message_text(message: Message, state: FSMContext, db: D
         await state.clear()
         return
     pending_photos = data.get("pending_photos", [])
+    pending_caption = data.get("pending_caption")
+    pending_caption_entities = data.get("pending_caption_entities")
 
     if pending_photos:
-        await db.add_mailing_message(mailing_id, text, photo_paths=pending_photos,
-                                     entities_json=entities_json)
+        if pending_caption is not None:
+            save_text = pending_caption
+            save_entities = pending_caption_entities
+        else:
+            save_text = text
+            save_entities = entities_json
+        await db.add_mailing_message(mailing_id, save_text, photo_paths=pending_photos,
+                                     entities_json=save_entities)
         await state.update_data(pending_photos=[], pending_caption=None,
                                 pending_caption_entities=None)
         await state.set_state(CreateMailingStates.adding_messages)
