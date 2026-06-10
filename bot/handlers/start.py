@@ -66,6 +66,8 @@ async def cmd_start(message: Message, db: Database, state: FSMContext):
     if channels:
         not_subscribed = await check_channels_subscription(message.bot, message.from_user.id, channels)
         if not_subscribed:
+            if is_new:
+                await state.update_data(welcome_promo_pending=True)
             await message.answer(
                 pe("📢 Для использования бота необходимо подписаться на каналы:"),
                 parse_mode="HTML",
@@ -110,7 +112,7 @@ async def cmd_start(message: Message, db: Database, state: FSMContext):
 
 
 @router.callback_query(F.data == "check_channels")
-async def callback_check_channels(callback: CallbackQuery, db: Database):
+async def callback_check_channels(callback: CallbackQuery, db: Database, state: FSMContext):
     channels = await db.get_required_channels()
     if channels:
         not_subscribed = await check_channels_subscription(callback.bot, callback.from_user.id, channels)
@@ -130,10 +132,12 @@ async def callback_check_channels(callback: CallbackQuery, db: Database):
         reply_markup=main_menu_keyboard(),
     )
 
-    user, is_new = await db.get_or_create_user(callback.from_user.id, callback.from_user.username)
-    if is_new:
+    data = await state.get_data()
+    if data.get("welcome_promo_pending"):
+        await state.update_data(welcome_promo_pending=False)
+        user = await db.get_user(callback.from_user.id)
         promo = await db.get_promocode("free")
-        if promo and promo.uses_count < promo.max_uses:
+        if user and promo and promo.uses_count < promo.max_uses:
             try:
                 pin_msg = await callback.message.answer(
                     pe(
