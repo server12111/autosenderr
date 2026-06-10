@@ -130,6 +130,29 @@ async def callback_check_channels(callback: CallbackQuery, db: Database):
         reply_markup=main_menu_keyboard(),
     )
 
+    user, is_new = await db.get_or_create_user(callback.from_user.id, callback.from_user.username)
+    if is_new:
+        promo = await db.get_promocode("free")
+        if promo and promo.uses_count < promo.max_uses:
+            try:
+                pin_msg = await callback.message.answer(
+                    pe(
+                        "🎟 <b>Промокод в подарок!</b>\n\n"
+                        "🔥 <b>1 день</b> бесплатного доступа — специально для тебя:\n\n"
+                        "<code>free</code>\n\n"
+                        "⭐ Активируй в разделе <b>«Подписка»</b>"
+                    ),
+                    parse_mode="HTML",
+                )
+                await callback.bot.pin_chat_message(
+                    chat_id=callback.from_user.id,
+                    message_id=pin_msg.message_id,
+                    disable_notification=True,
+                )
+                await db.update_user_pin_msg_id(user.id, pin_msg.message_id)
+            except Exception:
+                pass
+
 
 @router.callback_query(F.data == "main_menu")
 async def callback_main_menu(callback: CallbackQuery, db: Database):
