@@ -736,7 +736,7 @@ def _build_telethon_entities(entities_json: str) -> list:
     return result
 
 
-_FREE_TIER_SIGNATURE = "\n━━━━━━━━━━\n🤖 Отправлено через @feAutoSenderBot"
+_FREE_TIER_SIGNATURE = "\n━━━━━━━━━━\nРассылаю с помощью бесплатного бота - @feAutoSenderbot"
 
 
 class MailingService:
@@ -820,10 +820,17 @@ class MailingService:
 
         sig = _FREE_TIER_SIGNATURE if add_signature else ""
         entities = _build_telethon_entities(msg.entities_json) if msg.entities_json else None
-        text = (msg.text or "") + sig if (msg.text or sig) else None
-        eff_pm = None if entities else pm  # use entities directly — skip parse_mode
-
         photos = [p for p in msg.photo_paths if os.path.exists(p)]
+
+        raw_text = msg.text or ""
+        if raw_text or sig:
+            max_len = 1024 if photos else 4096
+            if sig and len(raw_text) + len(sig) > max_len:
+                raw_text = raw_text[:max_len - len(sig)]
+            text = raw_text + sig
+        else:
+            text = None
+        eff_pm = None if entities else pm  # use entities directly — skip parse_mode
         if len(photos) > 1:
             await client.send_file(target, photos, caption=text, parse_mode=eff_pm,
                                    formatting_entities=entities, reply_to=reply_to)
