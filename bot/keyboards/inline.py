@@ -255,12 +255,26 @@ def mailing_menu_keyboard(mailing: Mailing, show_remove_ads: bool = False) -> In
     )
     reply_label = "↩️ Ответная рассылка: ВКЛ" if mailing.reply_mode else "↩️ Ответная рассылка: ВЫКЛ"
     builder.row(_btn(reply_label, callback_data=f"mailing_reply_mode:{mailing.id}", style="primary"))
+    if mailing.batch_size:
+        batch_label = f"📦 Пакет: {mailing.batch_size} шт / {mailing.batch_pause}с паузы"
+    else:
+        batch_label = "📦 Пакетная отправка: ВЫКЛ"
+    builder.row(_btn(batch_label, callback_data=f"mailing_batch:{mailing.id}", style="primary"))
     if show_remove_ads:
         builder.row(_btn("🚫 Убрать рекламу из рассылки", callback_data="subscription", style="danger"))
     builder.row(
         _btn("❌ Удалить рассылку", callback_data=f"delete_mailing:{mailing.id}", style="danger"),
         _btn("◀️ Назад", callback_data="mailings", style="primary"),
     )
+    return builder.as_markup()
+
+
+def mailing_batch_keyboard(mailing_id: int, batch_size, batch_pause: int) -> InlineKeyboardMarkup:
+    builder = InlineKeyboardBuilder()
+    builder.row(_btn("✏️ Настроить пакет", callback_data=f"set_batch_config:{mailing_id}", style="primary"))
+    if batch_size:
+        builder.row(_btn("❌ Отключить пакетную отправку", callback_data=f"disable_batch:{mailing_id}", style="danger"))
+    builder.row(_btn("◀️ Назад", callback_data=f"mailing:{mailing_id}", style="primary"))
     return builder.as_markup()
 
 
@@ -300,6 +314,10 @@ def delete_mailing_confirm_keyboard(mailing_id: int) -> InlineKeyboardMarkup:
 def _msg_button_preview(msg: MailingMessage) -> str:
     if msg.is_forward:
         return f"[Переслано] {msg.forward_peer} #{msg.forward_msg_id}"
+    if msg.video_path:
+        text = _strip_html(msg.text or "")
+        preview = text[:25] + "..." if len(text) > 25 else text
+        return f"[Видео] {preview}" if preview else "[Видео]"
     photo_count = len(msg.photo_paths)
     prefix = f"[{photo_count} Фото] " if photo_count > 1 else "[Фото] " if photo_count == 1 else ""
     text = _strip_html(msg.text or "")
@@ -314,7 +332,7 @@ def mailing_messages_keyboard(mailing_id: int, messages: list[MailingMessage]) -
         preview = _msg_button_preview(msg)
         builder.row(_btn(f"🗑️ {preview}", callback_data=f"delete_msg:{msg.id}", style="danger"))
     builder.row(
-        _btn("➕ Текст/фото", callback_data=f"add_mailing_message:{mailing_id}", style="primary"),
+        _btn("➕ Текст/фото/видео", callback_data=f"add_mailing_message:{mailing_id}", style="primary"),
         _btn("📨 Переслать", callback_data=f"add_mailing_forward:{mailing_id}", style="primary"),
     )
     builder.row(_btn("◀️ Назад", callback_data=f"mailing:{mailing_id}", style="primary"))
@@ -375,6 +393,9 @@ def mailing_targets_keyboard(mailing_id: int, targets: list[MailingTarget]) -> I
         _btn("📁 Добавить папку", callback_data=f"add_folder_target:{mailing_id}", style="primary"),
     )
     builder.row(_btn("📄 Загрузить .txt", callback_data=f"add_txt_target:{mailing_id}", style="primary"))
+    sent_count = sum(1 for t in targets if t.last_sent_at is not None)
+    if sent_count > 0:
+        builder.row(_btn(f"🧹 Удалить проспамленные ({sent_count})", callback_data=f"clear_sent_targets:{mailing_id}", style="danger"))
     builder.row(_btn("◀️ Назад", callback_data=f"mailing:{mailing_id}", style="primary"))
     return builder.as_markup()
 

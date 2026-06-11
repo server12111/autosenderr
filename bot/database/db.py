@@ -78,6 +78,8 @@ class Mailing:
     reply_random_max: int = 5
     keep_targets_on_ban: bool = False
     account_rotation_mode: str = "per_target"
+    batch_size: Optional[int] = None
+    batch_pause: int = 10
 
 
 @dataclass
@@ -86,6 +88,7 @@ class MailingMessage:
     mailing_id: int
     text: str
     photo_path: Optional[str] = None
+    video_path: Optional[str] = None
     parse_mode: str = 'html'
     entities_json: Optional[str] = None
     forward_peer: Optional[str] = None
@@ -232,6 +235,7 @@ class Database:
         await _add_col("accounts", "auto_subscribe_sponsors",      "BOOLEAN DEFAULT FALSE")
         # mailing_messages
         await _add_col("mailing_messages", "photo_path",    "TEXT")
+        await _add_col("mailing_messages", "video_path",    "TEXT")
         await _add_col("mailing_messages", "parse_mode",    "TEXT DEFAULT 'html'")
         await _add_col("mailing_messages", "entities_json", "TEXT")
         await _add_col("mailing_messages", "forward_peer",  "TEXT")
@@ -259,6 +263,9 @@ class Database:
         await _add_col("mailings", "keep_targets_on_ban", "INTEGER DEFAULT 0")
         # mailings — account rotation mode for multi-account mailings
         await _add_col("mailings", "account_rotation_mode", "TEXT DEFAULT 'per_target'")
+        # mailings — batch sending mode
+        await _add_col("mailings", "batch_size",  "INTEGER DEFAULT NULL")
+        await _add_col("mailings", "batch_pause", "INTEGER DEFAULT 10")
         # users
         await _add_col("users", "ref_code",       "TEXT")
         await _add_col("users", "referred_by",    "INTEGER")
@@ -711,6 +718,8 @@ class Database:
             reply_random_max=r["reply_random_max"] if "reply_random_max" in keys else 5,
             keep_targets_on_ban=bool(r["keep_targets_on_ban"]) if "keep_targets_on_ban" in keys else False,
             account_rotation_mode=r["account_rotation_mode"] if "account_rotation_mode" in keys else "per_target",
+            batch_size=r["batch_size"] if "batch_size" in keys and r["batch_size"] is not None else None,
+            batch_pause=r["batch_pause"] if "batch_pause" in keys and r["batch_pause"] is not None else 10,
         )
 
     async def get_mailing(self, mailing_id: int) -> Optional[Mailing]:
@@ -752,6 +761,13 @@ class Database:
 
     async def update_mailing_rotation_mode(self, mailing_id: int, mode: str):
         await self._conn.execute("UPDATE mailings SET account_rotation_mode = ? WHERE id = ?", (mode, mailing_id))
+        await self._conn.commit()
+
+    async def update_mailing_batch(self, mailing_id: int, batch_size: Optional[int], batch_pause: int):
+        await self._conn.execute(
+            "UPDATE mailings SET batch_size = ?, batch_pause = ? WHERE id = ?",
+            (batch_size, batch_pause, mailing_id)
+        )
         await self._conn.commit()
 
     async def update_mailing_account(self, mailing_id: int, account_id: int):
@@ -800,6 +816,7 @@ class Database:
                 result.append(MailingMessage(
                     id=r["id"], mailing_id=r["mailing_id"], text=r["text"],
                     photo_path=r["photo_path"] if "photo_path" in keys else None,
+                    video_path=r["video_path"] if "video_path" in keys else None,
                     parse_mode=r["parse_mode"] if "parse_mode" in keys and r["parse_mode"] else 'html',
                     entities_json=r["entities_json"] if "entities_json" in keys else None,
                     forward_peer=r["forward_peer"] if "forward_peer" in keys else None,
@@ -808,12 +825,12 @@ class Database:
             return result
 
     async def add_mailing_message(self, mailing_id: int, text: str, photo_path: Optional[str] = None,
-                                   photo_paths: Optional[list[str]] = None, parse_mode: str = 'html',
-                                   entities_json: Optional[str] = None) -> int:
+                                   photo_paths: Optional[list[str]] = None, video_path: Optional[str] = None,
+                                   parse_mode: str = 'html', entities_json: Optional[str] = None) -> int:
         stored = json.dumps(photo_paths) if photo_paths else photo_path
         cursor = await self._conn.execute(
-            "INSERT INTO mailing_messages (mailing_id, text, photo_path, parse_mode, entities_json) VALUES (?, ?, ?, ?, ?)",
-            (mailing_id, text, stored, parse_mode, entities_json),
+            "INSERT INTO mailing_messages (mailing_id, text, photo_path, video_path, parse_mode, entities_json) VALUES (?, ?, ?, ?, ?, ?)",
+            (mailing_id, text, stored, video_path, parse_mode, entities_json),
         )
         await self._conn.commit()
         return cursor.lastrowid
@@ -836,20 +853,26 @@ class Database:
     async def delete_mailing_message(self, message_id: int):
         import os
         async with self._conn.execute(
-            "SELECT photo_path FROM mailing_messages WHERE id = ?", (message_id,)
+            "SELECT photo_path, video_path FROM mailing_messages WHERE id = ?", (message_id,)
         ) as cur:
             row = await cur.fetchone()
-            if row and row["photo_path"]:
-                paths = []
-                try:
-                    parsed = json.loads(row["photo_path"])
-                    if isinstance(parsed, list):
-                        paths = parsed
-                except (json.JSONDecodeError, TypeError):
-                    paths = [row["photo_path"]]
-                for path in paths:
+            if row:
+                if row["photo_path"]:
+                    paths = []
                     try:
-                        os.remove(path)
+                        parsed = json.loads(row["photo_path"])
+                        if isinstance(parsed, list):
+                            paths = parsed
+                    except (json.JSONDecodeError, TypeError):
+                        paths = [row["photo_path"]]
+                    for path in paths:
+                        try:
+                            os.remove(path)
+                        except OSError:
+                            pass
+                if row["video_path"]:
+                    try:
+                        os.remove(row["video_path"])
                     except OSError:
                         pass
         await self._conn.execute("DELETE FROM mailing_messages WHERE id = ?", (message_id,))
@@ -911,6 +934,20 @@ class Database:
     async def delete_mailing_target(self, target_id: int):
         await self._conn.execute("DELETE FROM mailing_targets WHERE id = ?", (target_id,))
         await self._conn.commit()
+
+    async def delete_sent_targets(self, mailing_id: int) -> int:
+        async with self._conn.execute(
+            "SELECT COUNT(*) as cnt FROM mailing_targets WHERE mailing_id = ? AND last_sent_at IS NOT NULL",
+            (mailing_id,)
+        ) as cur:
+            row = await cur.fetchone()
+            count = row["cnt"] if row else 0
+        await self._conn.execute(
+            "DELETE FROM mailing_targets WHERE mailing_id = ? AND last_sent_at IS NOT NULL",
+            (mailing_id,)
+        )
+        await self._conn.commit()
+        return count
 
     # === Autoresponder History ===
     async def autoresponder_history_exists(self, account_id: int, sender_telegram_id: int) -> bool:

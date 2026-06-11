@@ -273,9 +273,8 @@ async def process_broadcast(message: Message, state: FSMContext, db: Database):
         await state.clear()
         return
 
-    has_photo = bool(message.photo)
-    if not has_photo and not message.text:
-        await message.answer(pe("❌ Отправьте текст или фото."), parse_mode="HTML", reply_markup=cancel_keyboard())
+    if not message.photo and not message.text and not message.video and not message.document and not message.animation:
+        await message.answer(pe("❌ Отправьте текст, фото, видео или файл."), parse_mode="HTML", reply_markup=cancel_keyboard())
         return
 
     users = await db.get_all_users()
@@ -285,14 +284,7 @@ async def process_broadcast(message: Message, state: FSMContext, db: Database):
     status_msg = await message.answer("⏳ Рассылка...")
     for user in users:
         try:
-            if has_photo:
-                await message.bot.send_photo(
-                    user.telegram_id,
-                    message.photo[-1].file_id,
-                    caption=message.caption or None,
-                )
-            else:
-                await message.bot.send_message(user.telegram_id, message.text)
+            await message.copy_to(user.telegram_id)
             sent += 1
         except Exception:
             failed += 1

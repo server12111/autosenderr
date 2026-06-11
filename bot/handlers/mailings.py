@@ -42,6 +42,7 @@ from ..keyboards.inline import (
     reply_mode_select_keyboard,
     reply_mode_fixed_keyboard,
     skip_thread_keyboard,
+    mailing_batch_keyboard,
 )
 from ..utils.time_utils import format_active_hours, parse_time_range, create_active_hours_json
 from ..services import MailingService
@@ -53,6 +54,7 @@ logger = logging.getLogger(__name__)
 router = Router()
 
 PHOTOS_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), "data", "mailing_photos")
+VIDEOS_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), "data", "mailing_videos")
 
 
 async def save_photo_from_message(message: Message) -> str | None:
@@ -64,6 +66,17 @@ async def save_photo_from_message(message: Message) -> str | None:
     file_name = f"{uuid.uuid4().hex}.jpg"
     file_path = os.path.join(PHOTOS_DIR, file_name)
     await message.bot.download(photo, destination=file_path)
+    return file_path
+
+
+async def save_video_from_message(message: Message) -> str | None:
+    """Download video from message and save to disk. Returns file path."""
+    if not message.video:
+        return None
+    os.makedirs(VIDEOS_DIR, exist_ok=True)
+    file_name = f"{uuid.uuid4().hex}.mp4"
+    file_path = os.path.join(VIDEOS_DIR, file_name)
+    await message.bot.download(message.video, destination=file_path)
     return file_path
 
 
@@ -178,6 +191,7 @@ class EditMailingStates(StatesGroup):
     waiting_reply_range = State()
     waiting_thread_id = State()
     waiting_thread_id_for_target = State()
+    waiting_batch_config = State()
 
 
 @router.callback_query(F.data.startswith("account_mailings:"))
@@ -349,7 +363,8 @@ async def callback_add_mailing_message(callback: CallbackQuery, state: FSMContex
 
     await callback.message.edit_text(
         pe("✏️ Отправьте текст или фото для рассылки.\n"
-        "Можно отправить несколько фото (до 10) — они будут отправлены альбомом."),
+        "Можно отправить несколько фото (до 10) — они будут отправлены альбомом.\n\n"
+        "💡 <b>Форматирование</b> (жирный, курсив и т.д.) — выделите текст прямо в Telegram, оно сохранится автоматически."),
         parse_mode="HTML",
         reply_markup=cancel_keyboard(),
     )
@@ -483,11 +498,35 @@ async def process_edit_message_photo(
         )
 
 
+@router.message(EditMailingStates.waiting_message_text, F.video)
+async def process_edit_message_video(message: Message, state: FSMContext, db: Database):
+    data = await state.get_data()
+    mailing_id = data.get("mailing_id")
+    if not mailing_id:
+        await message.answer(pe("❌ Сессия устарела. Начните заново."), parse_mode="HTML", reply_markup=main_menu_keyboard())
+        await state.clear()
+        return
+    video_path = await save_video_from_message(message)
+    if not video_path:
+        await message.answer(pe("❌ Не удалось сохранить видео."), parse_mode="HTML")
+        return
+    caption = (message.caption or "").strip()
+    caption_entities_json = serialize_entities(message.caption_entities)
+    await db.add_mailing_message(mailing_id, caption, video_path=video_path, entities_json=caption_entities_json)
+    await state.clear()
+    messages = await db.get_mailing_messages(mailing_id)
+    await message.answer(
+        pe(f"✅ Видео добавлено! Всего сообщений: {len(messages)}"),
+        parse_mode="HTML",
+        reply_markup=mailing_messages_keyboard(mailing_id, messages),
+    )
+
+
 @router.message(EditMailingStates.waiting_message_text)
 async def process_edit_message_text(message: Message, state: FSMContext, db: Database):
     text = (message.text or "").strip()
     if not text:
-        await message.answer(pe("❌ Отправьте текст или фото."), parse_mode="HTML")
+        await message.answer(pe("❌ Отправьте текст, фото или видео."), parse_mode="HTML")
         return
     entities_json = serialize_entities(message.entities)
     data = await state.get_data()
@@ -701,6 +740,33 @@ async def callback_delete_target(callback: CallbackQuery, db: Database):
     targets = await db.get_mailing_targets(mailing_id)
 
     await callback.answer("Чат удалён")
+
+    text = f"🎯 Целевые чаты ({len(targets)} шт.):\n\n"
+    if targets:
+        for i, target in enumerate(targets, 1):
+            text += f"{i}. {target.chat_identifier}\n"
+    else:
+        text += "Целевых чатов пока нет.\n"
+
+    await callback.message.edit_text(
+        pe(text), parse_mode="HTML", reply_markup=mailing_targets_keyboard(mailing_id, targets)
+    )
+
+
+@router.callback_query(F.data.startswith("clear_sent_targets:"))
+async def callback_clear_sent_targets(callback: CallbackQuery, db: Database):
+    mailing_id = int(callback.data.split(":")[1])
+
+    mailing = await db.get_mailing(mailing_id)
+    user = await db.get_user(callback.from_user.id)
+    if not mailing or mailing.user_id != user.id:
+        await callback.answer("⛔ Нет доступа", show_alert=True)
+        return
+
+    count = await db.delete_sent_targets(mailing_id)
+    targets = await db.get_mailing_targets(mailing_id)
+
+    await callback.answer(f"✅ Удалено {count} проспамленных чатов", show_alert=True)
 
     text = f"🎯 Целевые чаты ({len(targets)} шт.):\n\n"
     if targets:
@@ -1208,7 +1274,8 @@ async def callback_create_add_message(callback: CallbackQuery, state: FSMContext
 
     await callback.message.edit_text(
         pe("✏️ Отправьте текст или фото для рассылки.\n"
-        "Можно отправить несколько фото (до 10) — они будут отправлены альбомом."),
+        "Можно отправить несколько фото (до 10) — они будут отправлены альбомом.\n\n"
+        "💡 <b>Форматирование</b> (жирный, курсив и т.д.) — выделите текст прямо в Telegram, оно сохранится автоматически."),
         parse_mode="HTML",
         reply_markup=cancel_keyboard(),
     )
@@ -1342,11 +1409,35 @@ async def process_create_message_photo(
         )
 
 
+@router.message(CreateMailingStates.waiting_message_text, F.video)
+async def process_create_message_video(message: Message, state: FSMContext, db: Database):
+    data = await state.get_data()
+    mailing_id = data.get("mailing_id")
+    if not mailing_id:
+        await message.answer(pe("❌ Сессия устарела. Начните заново."), parse_mode="HTML", reply_markup=main_menu_keyboard())
+        await state.clear()
+        return
+    video_path = await save_video_from_message(message)
+    if not video_path:
+        await message.answer(pe("❌ Не удалось сохранить видео."), parse_mode="HTML")
+        return
+    caption = (message.caption or "").strip()
+    caption_entities_json = serialize_entities(message.caption_entities)
+    await db.add_mailing_message(mailing_id, caption, video_path=video_path, entities_json=caption_entities_json)
+    await state.clear()
+    messages = await db.get_mailing_messages(mailing_id)
+    await message.answer(
+        pe(f"✅ Видео добавлено! Всего сообщений: {len(messages)}\n\nДобавьте ещё или нажмите «Готово»:"),
+        parse_mode="HTML",
+        reply_markup=mailing_creation_messages_keyboard(mailing_id, messages),
+    )
+
+
 @router.message(CreateMailingStates.waiting_message_text)
 async def process_create_message_text(message: Message, state: FSMContext, db: Database):
     text = (message.text or "").strip()
     if not text:
-        await message.answer(pe("❌ Отправьте текст или фото."), parse_mode="HTML")
+        await message.answer(pe("❌ Отправьте текст, фото или видео."), parse_mode="HTML")
         return
     entities_json = serialize_entities(message.entities)
     data = await state.get_data()
@@ -2413,4 +2504,105 @@ async def process_reply_range(message: Message, state: FSMContext, db: Database)
     await message.answer(
         text_out, parse_mode="HTML",
         reply_markup=mailing_menu_keyboard(mailing),
+    )
+
+
+# === Batch sending mode ===
+@router.callback_query(F.data.startswith("mailing_batch:"))
+async def callback_mailing_batch(callback: CallbackQuery, db: Database):
+    mailing_id = int(callback.data.split(":")[1])
+    mailing = await db.get_mailing(mailing_id)
+    if not mailing:
+        await callback.answer("Рассылка не найдена", show_alert=True)
+        return
+
+    if mailing.batch_size:
+        status_text = pe(f"📦 Пакетная отправка: <b>включена</b>\n"
+                         f"Размер пакета: <b>{mailing.batch_size} чатов</b>\n"
+                         f"Пауза между пакетами: <b>{mailing.batch_pause} сек</b>\n\n"
+                         "Бот отправит сообщение в указанное количество чатов, затем сделает паузу.")
+    else:
+        status_text = pe("📦 Пакетная отправка: <b>выключена</b>\n\n"
+                         "Включите для отправки пачками: N чатов → пауза X секунд → следующие N чатов.")
+
+    await callback.message.edit_text(
+        status_text,
+        parse_mode="HTML",
+        reply_markup=mailing_batch_keyboard(mailing_id, mailing.batch_size, mailing.batch_pause),
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("set_batch_config:"))
+async def callback_set_batch_config(callback: CallbackQuery, state: FSMContext):
+    mailing_id = int(callback.data.split(":")[1])
+    await state.update_data(mailing_id=mailing_id)
+    await state.set_state(EditMailingStates.waiting_batch_config)
+    await callback.message.edit_text(
+        pe("📦 Введите настройки пакетной отправки в формате:\n\n"
+           "<code>размер_пакета пауза_секунды</code>\n\n"
+           "Примеры:\n"
+           "• <code>100 10</code> — 100 чатов, пауза 10 сек\n"
+           "• <code>50 5</code> — 50 чатов, пауза 5 сек\n"
+           "• <code>200 30</code> — 200 чатов, пауза 30 сек"),
+        parse_mode="HTML",
+        reply_markup=cancel_keyboard(),
+    )
+    await callback.answer()
+
+
+@router.message(EditMailingStates.waiting_batch_config)
+async def process_batch_config(message: Message, state: FSMContext, db: Database):
+    text = (message.text or "").strip()
+    parts = text.split()
+    if len(parts) != 2:
+        await message.answer(
+            pe("❌ Неверный формат. Введите два числа через пробел:\n"
+               "<code>размер_пакета пауза_секунды</code>\n\n"
+               "Пример: <code>100 10</code>"),
+            parse_mode="HTML",
+        )
+        return
+    try:
+        batch_size = int(parts[0])
+        batch_pause = int(parts[1])
+        if batch_size < 1 or batch_pause < 0:
+            raise ValueError
+    except ValueError:
+        await message.answer(pe("❌ Оба значения должны быть положительными числами."), parse_mode="HTML")
+        return
+
+    data = await state.get_data()
+    mailing_id = data.get("mailing_id")
+    if not mailing_id:
+        await message.answer(pe("❌ Сессия устарела."), parse_mode="HTML", reply_markup=main_menu_keyboard())
+        await state.clear()
+        return
+
+    await db.update_mailing_batch(mailing_id, batch_size, batch_pause)
+    await state.clear()
+
+    await message.answer(
+        pe(f"✅ Пакетная отправка настроена!\n"
+           f"Размер пакета: <b>{batch_size} чатов</b>\n"
+           f"Пауза: <b>{batch_pause} сек</b>"),
+        parse_mode="HTML",
+        reply_markup=mailing_menu_keyboard(await db.get_mailing(mailing_id)),
+    )
+
+
+@router.callback_query(F.data.startswith("disable_batch:"))
+async def callback_disable_batch(callback: CallbackQuery, db: Database):
+    mailing_id = int(callback.data.split(":")[1])
+    await db.update_mailing_batch(mailing_id, None, 10)
+    await callback.answer("✅ Пакетная отправка отключена")
+    mailing = await db.get_mailing(mailing_id)
+    if not mailing:
+        await callback.answer("Рассылка не найдена", show_alert=True)
+        return
+    await callback.message.edit_text(
+        pe("📦 Пакетная отправка: <b>выключена</b>\n\n"
+           "Включите для отправки пачками: N чатов → пауза X секунд → следующие N чатов."),
+        parse_mode="HTML",
+        reply_markup=mailing_batch_keyboard(mailing_id, None, 10),
     )

@@ -821,17 +821,21 @@ class MailingService:
         sig = _FREE_TIER_SIGNATURE if add_signature else ""
         entities = _build_telethon_entities(msg.entities_json) if msg.entities_json else None
         photos = [p for p in msg.photo_paths if os.path.exists(p)]
+        video = msg.video_path if msg.video_path and os.path.exists(msg.video_path) else None
 
         raw_text = msg.text or ""
         if raw_text or sig:
-            max_len = 1024 if photos else 4096
+            max_len = 1024 if (photos or video) else 4096
             if sig and len(raw_text) + len(sig) > max_len:
                 raw_text = raw_text[:max_len - len(sig)]
             text = raw_text + sig
         else:
             text = None
         eff_pm = None if entities else pm  # use entities directly — skip parse_mode
-        if len(photos) > 1:
+        if video:
+            await client.send_file(target, video, caption=text, parse_mode=eff_pm,
+                                   formatting_entities=entities, reply_to=reply_to)
+        elif len(photos) > 1:
             await client.send_file(target, photos, caption=text, parse_mode=eff_pm,
                                    formatting_entities=entities, reply_to=reply_to)
         elif len(photos) == 1:
@@ -1039,6 +1043,10 @@ class MailingService:
                             await self.db.update_target_last_sent(target_obj.id, current_account_id)
                             sent_any = True
                             cycle_sent += 1
+                            # Batch mode: pause after every N successful sends
+                            if mailing.batch_size and cycle_sent % mailing.batch_size == 0:
+                                logger.debug(f"Mailing {mailing_id}: batch pause {mailing.batch_pause}s after {cycle_sent} sends")
+                                await asyncio.sleep(mailing.batch_pause)
                         except _BAN_ERRORS as e:
                             if current_account_id == mailing.account_id:
                                 # Головний акаунт — зупиняємо розсилку повністю
