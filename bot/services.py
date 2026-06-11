@@ -736,7 +736,7 @@ def _build_telethon_entities(entities_json: str) -> list:
     return result
 
 
-_FREE_TIER_SIGNATURE = "\n━━━━━━━━━━\nРассылаю с помощью бесплатного бота - @feAutoSenderbot"
+_FREE_TIER_SIGNATURE = "\n━━━━━━━━━━\n🤖 Отправлено через @feAutoSenderBot"
 
 
 class MailingService:
