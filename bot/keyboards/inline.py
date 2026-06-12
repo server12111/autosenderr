@@ -255,11 +255,6 @@ def mailing_menu_keyboard(mailing: Mailing, show_remove_ads: bool = False) -> In
     )
     reply_label = "↩️ Ответная рассылка: ВКЛ" if mailing.reply_mode else "↩️ Ответная рассылка: ВЫКЛ"
     builder.row(_btn(reply_label, callback_data=f"mailing_reply_mode:{mailing.id}", style="primary"))
-    if mailing.batch_size:
-        batch_label = f"📦 Пакет: {mailing.batch_size} шт / {mailing.batch_pause}с паузы"
-    else:
-        batch_label = "📦 Пакетная отправка: ВЫКЛ"
-    builder.row(_btn(batch_label, callback_data=f"mailing_batch:{mailing.id}", style="primary"))
     if show_remove_ads:
         builder.row(_btn("🚫 Убрать рекламу из рассылки", callback_data="subscription", style="danger"))
     builder.row(
@@ -268,14 +263,6 @@ def mailing_menu_keyboard(mailing: Mailing, show_remove_ads: bool = False) -> In
     )
     return builder.as_markup()
 
-
-def mailing_batch_keyboard(mailing_id: int, batch_size, batch_pause: int) -> InlineKeyboardMarkup:
-    builder = InlineKeyboardBuilder()
-    builder.row(_btn("✏️ Настроить пакет", callback_data=f"set_batch_config:{mailing_id}", style="primary"))
-    if batch_size:
-        builder.row(_btn("❌ Отключить пакетную отправку", callback_data=f"disable_batch:{mailing_id}", style="danger"))
-    builder.row(_btn("◀️ Назад", callback_data=f"mailing:{mailing_id}", style="primary"))
-    return builder.as_markup()
 
 
 def reply_mode_select_keyboard(mailing_id: int) -> InlineKeyboardMarkup:
@@ -393,9 +380,6 @@ def mailing_targets_keyboard(mailing_id: int, targets: list[MailingTarget]) -> I
         _btn("📁 Добавить папку", callback_data=f"add_folder_target:{mailing_id}", style="primary"),
     )
     builder.row(_btn("📄 Загрузить .txt", callback_data=f"add_txt_target:{mailing_id}", style="primary"))
-    sent_count = sum(1 for t in targets if t.last_sent_at is not None)
-    if sent_count > 0:
-        builder.row(_btn(f"🧹 Удалить проспамленные ({sent_count})", callback_data=f"clear_sent_targets:{mailing_id}", style="danger"))
     builder.row(_btn("◀️ Назад", callback_data=f"mailing:{mailing_id}", style="primary"))
     return builder.as_markup()
 

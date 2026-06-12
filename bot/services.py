@@ -1043,10 +1043,6 @@ class MailingService:
                             await self.db.update_target_last_sent(target_obj.id, current_account_id)
                             sent_any = True
                             cycle_sent += 1
-                            # Batch mode: pause after every N successful sends
-                            if mailing.batch_size and cycle_sent % mailing.batch_size == 0:
-                                logger.debug(f"Mailing {mailing_id}: batch pause {mailing.batch_pause}s after {cycle_sent} sends")
-                                await asyncio.sleep(mailing.batch_pause)
                         except _BAN_ERRORS as e:
                             if current_account_id == mailing.account_id:
                                 # Головний акаунт — зупиняємо розсилку повністю

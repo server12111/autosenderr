@@ -42,7 +42,6 @@ from ..keyboards.inline import (
     reply_mode_select_keyboard,
     reply_mode_fixed_keyboard,
     skip_thread_keyboard,
-    mailing_batch_keyboard,
 )
 from ..utils.time_utils import format_active_hours, parse_time_range, create_active_hours_json
 from ..services import MailingService
@@ -191,7 +190,6 @@ class EditMailingStates(StatesGroup):
     waiting_reply_range = State()
     waiting_thread_id = State()
     waiting_thread_id_for_target = State()
-    waiting_batch_config = State()
 
 
 @router.callback_query(F.data.startswith("account_mailings:"))
@@ -752,32 +750,6 @@ async def callback_delete_target(callback: CallbackQuery, db: Database):
         pe(text), parse_mode="HTML", reply_markup=mailing_targets_keyboard(mailing_id, targets)
     )
 
-
-@router.callback_query(F.data.startswith("clear_sent_targets:"))
-async def callback_clear_sent_targets(callback: CallbackQuery, db: Database):
-    mailing_id = int(callback.data.split(":")[1])
-
-    mailing = await db.get_mailing(mailing_id)
-    user = await db.get_user(callback.from_user.id)
-    if not mailing or mailing.user_id != user.id:
-        await callback.answer("⛔ Нет доступа", show_alert=True)
-        return
-
-    count = await db.delete_sent_targets(mailing_id)
-    targets = await db.get_mailing_targets(mailing_id)
-
-    await callback.answer(f"✅ Удалено {count} проспамленных чатов", show_alert=True)
-
-    text = f"🎯 Целевые чаты ({len(targets)} шт.):\n\n"
-    if targets:
-        for i, target in enumerate(targets, 1):
-            text += f"{i}. {target.chat_identifier}\n"
-    else:
-        text += "Целевых чатов пока нет.\n"
-
-    await callback.message.edit_text(
-        pe(text), parse_mode="HTML", reply_markup=mailing_targets_keyboard(mailing_id, targets)
-    )
 
 
 # === Per-target interval (edit mode) ===
@@ -2507,102 +2479,3 @@ async def process_reply_range(message: Message, state: FSMContext, db: Database)
     )
 
 
-# === Batch sending mode ===
-@router.callback_query(F.data.startswith("mailing_batch:"))
-async def callback_mailing_batch(callback: CallbackQuery, db: Database):
-    mailing_id = int(callback.data.split(":")[1])
-    mailing = await db.get_mailing(mailing_id)
-    if not mailing:
-        await callback.answer("Рассылка не найдена", show_alert=True)
-        return
-
-    if mailing.batch_size:
-        status_text = pe(f"📦 Пакетная отправка: <b>включена</b>\n"
-                         f"Размер пакета: <b>{mailing.batch_size} чатов</b>\n"
-                         f"Пауза между пакетами: <b>{mailing.batch_pause} сек</b>\n\n"
-                         "Бот отправит сообщение в указанное количество чатов, затем сделает паузу.")
-    else:
-        status_text = pe("📦 Пакетная отправка: <b>выключена</b>\n\n"
-                         "Включите для отправки пачками: N чатов → пауза X секунд → следующие N чатов.")
-
-    await callback.message.edit_text(
-        status_text,
-        parse_mode="HTML",
-        reply_markup=mailing_batch_keyboard(mailing_id, mailing.batch_size, mailing.batch_pause),
-    )
-    await callback.answer()
-
-
-@router.callback_query(F.data.startswith("set_batch_config:"))
-async def callback_set_batch_config(callback: CallbackQuery, state: FSMContext):
-    mailing_id = int(callback.data.split(":")[1])
-    await state.update_data(mailing_id=mailing_id)
-    await state.set_state(EditMailingStates.waiting_batch_config)
-    await callback.message.edit_text(
-        pe("📦 Введите настройки пакетной отправки в формате:\n\n"
-           "<code>размер_пакета пауза_секунды</code>\n\n"
-           "Примеры:\n"
-           "• <code>100 10</code> — 100 чатов, пауза 10 сек\n"
-           "• <code>50 5</code> — 50 чатов, пауза 5 сек\n"
-           "• <code>200 30</code> — 200 чатов, пауза 30 сек"),
-        parse_mode="HTML",
-        reply_markup=cancel_keyboard(),
-    )
-    await callback.answer()
-
-
-@router.message(EditMailingStates.waiting_batch_config)
-async def process_batch_config(message: Message, state: FSMContext, db: Database):
-    text = (message.text or "").strip()
-    parts = text.split()
-    if len(parts) != 2:
-        await message.answer(
-            pe("❌ Неверный формат. Введите два числа через пробел:\n"
-               "<code>размер_пакета пауза_секунды</code>\n\n"
-               "Пример: <code>100 10</code>"),
-            parse_mode="HTML",
-        )
-        return
-    try:
-        batch_size = int(parts[0])
-        batch_pause = int(parts[1])
-        if batch_size < 1 or batch_pause < 0:
-            raise ValueError
-    except ValueError:
-        await message.answer(pe("❌ Оба значения должны быть положительными числами."), parse_mode="HTML")
-        return
-
-    data = await state.get_data()
-    mailing_id = data.get("mailing_id")
-    if not mailing_id:
-        await message.answer(pe("❌ Сессия устарела."), parse_mode="HTML", reply_markup=main_menu_keyboard())
-        await state.clear()
-        return
-
-    await db.update_mailing_batch(mailing_id, batch_size, batch_pause)
-    await state.clear()
-
-    await message.answer(
-        pe(f"✅ Пакетная отправка настроена!\n"
-           f"Размер пакета: <b>{batch_size} чатов</b>\n"
-           f"Пауза: <b>{batch_pause} сек</b>"),
-        parse_mode="HTML",
-        reply_markup=mailing_menu_keyboard(await db.get_mailing(mailing_id)),
-    )
-
-
-@router.callback_query(F.data.startswith("disable_batch:"))
-async def callback_disable_batch(callback: CallbackQuery, db: Database):
-    mailing_id = int(callback.data.split(":")[1])
-    await db.update_mailing_batch(mailing_id, None, 10)
-    await callback.answer("✅ Пакетная отправка отключена")
-    mailing = await db.get_mailing(mailing_id)
-    if not mailing:
-        await callback.answer("Рассылка не найдена", show_alert=True)
-        return
-    await callback.message.edit_text(
-        pe("📦 Пакетная отправка: <b>выключена</b>\n\n"
-           "Включите для отправки пачками: N чатов → пауза X секунд → следующие N чатов."),
-        parse_mode="HTML",
-        reply_markup=mailing_batch_keyboard(mailing_id, None, 10),
-    )
