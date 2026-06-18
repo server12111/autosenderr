@@ -57,14 +57,17 @@ async def callback_toggle_autoresponder(callback: CallbackQuery, db: Database):
 
     new_status = not account.autoresponder_enabled
 
+    free_ad_notice = False
     if new_status:
         user = await db.get_user(callback.from_user.id)
         if not await db.has_paid_subscription(user.id):
-            await callback.answer(
-                "⛔️ Автоответ в ЛС доступен только при платной подписке.",
-                show_alert=True
-            )
-            return
+            if not Database.is_free_ad_active(user):
+                await callback.answer(
+                    "⛔️ Автоответ в ЛС доступен только при наличии подписки.",
+                    show_alert=True
+                )
+                return
+            free_ad_notice = True
 
     if new_status and not account.autoresponder_text:
         await callback.answer(
@@ -75,7 +78,10 @@ async def callback_toggle_autoresponder(callback: CallbackQuery, db: Database):
     await db.update_autoresponder(account_id, new_status)
 
     status_text = "включён" if new_status else "выключен"
-    await callback.answer(f"Автоответчик {status_text}")
+    if free_ad_notice:
+        await callback.answer(f"Автоответчик {status_text} (бесплатный тариф — к ответам добавляется реклама)", show_alert=True)
+    else:
+        await callback.answer(f"Автоответчик {status_text}")
 
     account = await db.get_account(account_id)
 
@@ -85,13 +91,14 @@ async def callback_toggle_autoresponder(callback: CallbackQuery, db: Database):
     if len(text_preview) > 100:
         text_preview = text_preview[:100] + "..."
 
+    ad_note = "\n⚠️ Бесплатный тариф: к каждому автоответу добавляется реклама бота." if (account.autoresponder_enabled and free_ad_notice) else ""
     text = (
         f"🤖 Автоответчик для {account.phone}\n\n"
         f"Статус: {status}\n"
         f"Уведомления о сообщениях: {notify_status}\n\n"
         f"Текст автоответа:\n{text_preview}\n\n"
         "ℹ️ Автоответчик отвечает на каждое входящее личное сообщение.\n\n"
-        "📬 Уведомления — получайте сообщения о каждом входящем ЛС."
+        f"📬 Уведомления — получайте сообщения о каждом входящем ЛС.{ad_note}"
     )
 
     await safe_edit(callback.message, pe(text), parse_mode="HTML", reply_markup=autoresponder_keyboard(account_id, account.autoresponder_enabled, account.notify_messages))
@@ -229,14 +236,17 @@ async def callback_toggle_group_autoresponder(callback: CallbackQuery, db: Datab
 
     new_status = not account.group_autoresponder_enabled
 
+    free_ad_notice = False
     if new_status:
         user = await db.get_user(callback.from_user.id)
         if not await db.has_paid_subscription(user.id):
-            await callback.answer(
-                "⛔️ Автоответ в чате доступен только при платной подписке.",
-                show_alert=True
-            )
-            return
+            if not Database.is_free_ad_active(user):
+                await callback.answer(
+                    "⛔️ Автоответ в чате доступен только при наличии подписки.",
+                    show_alert=True
+                )
+                return
+            free_ad_notice = True
 
     if new_status and not account.group_autoresponder_text:
         await callback.answer("⚠️ Сначала задайте текст автоответа для групп", show_alert=True)
@@ -245,7 +255,10 @@ async def callback_toggle_group_autoresponder(callback: CallbackQuery, db: Datab
     await db.update_group_autoresponder(account_id, new_status)
 
     status_text = "включён" if new_status else "выключен"
-    await callback.answer(f"Автоответчик (группы) {status_text}")
+    if free_ad_notice:
+        await callback.answer(f"Автоответчик (группы) {status_text} (бесплатный тариф — к ответам добавляется реклама)", show_alert=True)
+    else:
+        await callback.answer(f"Автоответчик (группы) {status_text}")
 
     account = await db.get_account(account_id)
     status = "✅ Включён" if account.group_autoresponder_enabled else "❌ Выключен"
@@ -253,13 +266,14 @@ async def callback_toggle_group_autoresponder(callback: CallbackQuery, db: Datab
     if len(text_preview) > 100:
         text_preview = text_preview[:100] + "..."
 
+    ad_note = "\n⚠️ Бесплатный тариф: к каждому автоответу добавляется реклама бота." if (account.group_autoresponder_enabled and free_ad_notice) else ""
     await safe_edit(
         callback.message,
         pe(f"💬 Автоответчик (группы) для {account.display_name}\n\n"
         f"Статус: {status}\n\n"
         f"Текст автоответа:\n{text_preview}\n\n"
         "ℹ️ Автоответчик отвечает, когда кто-то отвечает на сообщение этого аккаунта в группе.\n"
-        "Каждому пользователю отвечает только один раз."),
+        f"Каждому пользователю отвечает только один раз.{ad_note}"),
         parse_mode="HTML",
         reply_markup=group_autoresponder_keyboard(account_id, account.group_autoresponder_enabled),
     )
