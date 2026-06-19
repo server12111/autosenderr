@@ -994,7 +994,9 @@ class MailingService:
                             target_me = me
 
                         target = target_obj.chat_identifier
-                        if not target.startswith('-') and not target.startswith('@') and not target.isdigit():
+                        if target.lstrip('-').isdigit():
+                            target = int(target)
+                        elif not target.startswith('@'):
                             target = f"@{target}"
 
                         sendable = [m for m in messages if not m.is_forward] if add_sig else messages
