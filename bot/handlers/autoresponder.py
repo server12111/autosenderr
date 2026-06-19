@@ -1,3 +1,4 @@
+import asyncio
 import os
 
 from aiogram import Router, F
@@ -7,6 +8,7 @@ from aiogram.fsm.state import State, StatesGroup
 
 from ..database.db import Database
 from ..keyboards.inline import autoresponder_keyboard, group_autoresponder_keyboard, cancel_keyboard
+from ..userbot.manager import UserbotManager
 from ..utils.premium_emoji import pe
 from ..utils.tg import safe_edit
 
@@ -47,7 +49,7 @@ async def callback_autoresponder(callback: CallbackQuery, db: Database):
 
 
 @router.callback_query(F.data.startswith("toggle_autoresponder:"))
-async def callback_toggle_autoresponder(callback: CallbackQuery, db: Database):
+async def callback_toggle_autoresponder(callback: CallbackQuery, db: Database, userbot_manager: UserbotManager):
     account_id = int(callback.data.split(":")[1])
     account = await db.get_account(account_id)
 
@@ -77,6 +79,9 @@ async def callback_toggle_autoresponder(callback: CallbackQuery, db: Database):
 
     await db.update_autoresponder(account_id, new_status)
 
+    if new_status:
+        asyncio.create_task(userbot_manager.get_client(account_id))
+
     status_text = "включён" if new_status else "выключен"
     if free_ad_notice:
         await callback.answer(f"Автоответчик {status_text} (бесплатный тариф — к ответам добавляется реклама)", show_alert=True)
@@ -105,7 +110,7 @@ async def callback_toggle_autoresponder(callback: CallbackQuery, db: Database):
 
 
 @router.callback_query(F.data.startswith("toggle_notify:"))
-async def callback_toggle_notify(callback: CallbackQuery, db: Database):
+async def callback_toggle_notify(callback: CallbackQuery, db: Database, userbot_manager: UserbotManager):
     account_id = int(callback.data.split(":")[1])
     account = await db.get_account(account_id)
 
@@ -115,6 +120,8 @@ async def callback_toggle_notify(callback: CallbackQuery, db: Database):
 
     new_status = not account.notify_messages
     await db.update_notify_messages(account_id, new_status)
+    if new_status:
+        asyncio.create_task(userbot_manager.get_client(account_id))
 
     status_text = "включены" if new_status else "выключены"
     await callback.answer(f"Уведомления {status_text}")
@@ -226,7 +233,7 @@ async def callback_group_autoresponder(callback: CallbackQuery, db: Database):
 
 
 @router.callback_query(F.data.startswith("toggle_group_autoresponder:"))
-async def callback_toggle_group_autoresponder(callback: CallbackQuery, db: Database):
+async def callback_toggle_group_autoresponder(callback: CallbackQuery, db: Database, userbot_manager: UserbotManager):
     account_id = int(callback.data.split(":")[1])
     account = await db.get_account(account_id)
 
@@ -253,6 +260,9 @@ async def callback_toggle_group_autoresponder(callback: CallbackQuery, db: Datab
         return
 
     await db.update_group_autoresponder(account_id, new_status)
+
+    if new_status:
+        asyncio.create_task(userbot_manager.get_client(account_id))
 
     status_text = "включён" if new_status else "выключен"
     if free_ad_notice:
