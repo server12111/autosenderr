@@ -462,7 +462,9 @@ class Database:
 
     async def activate_free_tier(self, user_id: int):
         await self._conn.execute(
-            "UPDATE users SET subscription_type = 'free_ad' WHERE id = ?", (user_id,)
+            "UPDATE users SET subscription_type = 'free_ad', subscription_end = NULL,"
+            " subscription_expired_notified_at = NULL WHERE id = ?",
+            (user_id,)
         )
         await self._conn.commit()
 
