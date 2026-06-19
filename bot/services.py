@@ -949,18 +949,9 @@ class MailingService:
                         pool_clients.append((pool_acc.id, pc, pc_me))
                         client_map[pool_acc.id] = (pc, pc_me)
 
-                    # Subscription check: stop mailing if no valid sub (don't wait for hourly checker)
+                    # Free tier: check once per cycle
                     mailing_user = await self.db.get_user_by_id(mailing.user_id)
-                    if mailing_user and not mailing_user.is_admin:
-                        is_free = Database.is_free_ad_active(mailing_user)
-                        has_paid = await self.db.has_paid_subscription(mailing_user.id)
-                        if not is_free and not has_paid:
-                            logger.info(f"Mailing {mailing_id}: subscription expired — stopping")
-                            await self.stop_mailing(mailing_id)
-                            return
-                        add_sig = is_free
-                    else:
-                        add_sig = False
+                    add_sig = Database.is_free_ad_active(mailing_user) if mailing_user else False
 
                     for target_idx, target_obj in enumerate(targets):
                         # Interval check per target
