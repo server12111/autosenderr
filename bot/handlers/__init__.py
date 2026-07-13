@@ -11,11 +11,22 @@ from .referral import router as referral_router
 
 def setup_routers() -> Router:
     main_router = Router()
-    main_router.include_router(start_router)
-    main_router.include_router(accounts_router)
-    main_router.include_router(autoresponder_router)
-    main_router.include_router(mailings_router)
-    main_router.include_router(subscription_router)
-    main_router.include_router(admin_router)
-    main_router.include_router(referral_router)
+
+    # Створюємо список усіх твоїх роутерів
+    routers = [
+        start_router,
+        accounts_router,
+        autoresponder_router,
+        mailings_router,
+        subscription_router,
+        admin_router,
+        referral_router
+    ]
+
+    # Безпечно підключаємо кожен, якщо він ще не має батька
+    for r in routers:
+        if r.parent_router is None:
+            main_router.include_router(r)
+
     return main_router
+
