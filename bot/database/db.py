@@ -1,4 +1,6 @@
+import asyncio
 import json
+import os
 import secrets
 import time
 import aiosqlite
@@ -7,6 +9,7 @@ from typing import Optional
 from dataclasses import dataclass, field
 
 from .models import SCHEMA
+from ..utils.time_utils import now_moscow
 
 _SETTINGS_TTL = 60      # seconds — settings/prices
 _CHANNELS_TTL = 300     # seconds — required channels list
@@ -80,6 +83,7 @@ class Mailing:
     account_rotation_mode: str = "per_target"
     batch_size: Optional[int] = None
     batch_pause: int = 10
+    hidden_tag_enabled: bool = False
 
 
 @dataclass
@@ -189,6 +193,7 @@ class Database:
         self._conn: Optional[aiosqlite.Connection] = None
         self._cache: dict = {}          # key -> value
         self._cache_ts: dict = {}       # key -> timestamp
+        self._transaction_lock = asyncio.Lock()
 
     def _cache_get(self, key: str, ttl: float):
         if key in self._cache and (time.monotonic() - self._cache_ts.get(key, 0)) < ttl:
@@ -205,6 +210,7 @@ class Database:
             self._cache_ts.pop(k, None)
 
     async def connect(self):
+        os.makedirs(os.path.dirname(os.path.abspath(self.db_path)), exist_ok=True)
         self._conn = await aiosqlite.connect(self.db_path)
         self._conn.row_factory = aiosqlite.Row
         await self._conn.execute("PRAGMA foreign_keys = ON")
@@ -212,8 +218,17 @@ class Database:
         await self._conn.execute("PRAGMA synchronous = NORMAL")
         await self._conn.execute("PRAGMA cache_size = -8000")
         await self._conn.executescript(SCHEMA)
-        await self._conn.commit()
         await self._run_migrations()
+        await self._conn.execute("CREATE INDEX IF NOT EXISTS idx_users_created_at ON users (created_at)")
+        await self._conn.execute("CREATE INDEX IF NOT EXISTS idx_payments_status_paid_at ON payments (status, paid_at)")
+        await self._conn.execute("CREATE INDEX IF NOT EXISTS idx_mailings_user_active ON mailings (user_id, is_active)")
+        await self._conn.execute("CREATE INDEX IF NOT EXISTS idx_targets_mailing_last_sent ON mailing_targets (mailing_id, last_sent_at)")
+        await self._conn.execute("CREATE INDEX IF NOT EXISTS idx_accounts_user_active ON accounts (user_id, is_active)")
+        await self._conn.execute("CREATE INDEX IF NOT EXISTS idx_mailing_messages_mailing ON mailing_messages (mailing_id)")
+        await self._conn.execute("CREATE INDEX IF NOT EXISTS idx_targets_mailing ON mailing_targets (mailing_id)")
+        await self._conn.execute("CREATE INDEX IF NOT EXISTS idx_payments_user_status ON payments (user_id, status)")
+        await self._conn.execute("CREATE INDEX IF NOT EXISTS idx_users_subscription_end ON users (subscription_end)")
+        await self._conn.commit()
 
     async def _run_migrations(self):
         """Run database migrations for new columns."""
@@ -266,6 +281,7 @@ class Database:
         # mailings — batch sending mode
         await _add_col("mailings", "batch_size",  "INTEGER DEFAULT NULL")
         await _add_col("mailings", "batch_pause", "INTEGER DEFAULT 10")
+        await _add_col("mailings", "hidden_tag_enabled", "INTEGER DEFAULT 0")
         # users
         await _add_col("users", "ref_code",       "TEXT")
         await _add_col("users", "referred_by",    "INTEGER")
@@ -431,12 +447,15 @@ class Database:
         )
         await self._conn.commit()
 
-    async def deduct_ref_balance(self, user_id: int, amount: float):
-        await self._conn.execute(
-            "UPDATE users SET ref_balance = ref_balance - ? WHERE id = ?",
-            (amount, user_id)
-        )
+    async def deduct_ref_balance(self, user_id: int, amount: float) -> bool:
+        async with self._conn.execute(
+            "UPDATE users SET ref_balance = ref_balance - ? "
+            "WHERE id = ? AND ref_balance >= ?",
+            (amount, user_id, amount),
+        ) as cur:
+            updated = cur.rowcount > 0
         await self._conn.commit()
+        return updated
 
     async def update_user_pin_msg_id(self, user_id: int, msg_id: Optional[int]):
         await self._conn.execute(
@@ -479,7 +498,7 @@ class Database:
         """True if user is on free_ad tier and has no active paid subscription."""
         if user.subscription_type != "free_ad":
             return False
-        if user.subscription_end and user.subscription_end > datetime.now():
+        if user.subscription_end and user.subscription_end > now_moscow():
             return False
         return True
 
@@ -492,7 +511,7 @@ class Database:
         async with self._conn.execute(
             """SELECT * FROM users
                WHERE subscription_end IS NOT NULL
-                 AND subscription_end > datetime('now', '-2 days')"""
+                 """
         ) as cur:
             return [self._row_to_user(r) for r in await cur.fetchall()]
 
@@ -517,6 +536,15 @@ class Database:
     # === Accounts ===
     async def get_account(self, account_id: int) -> Optional[Account]:
         async with self._conn.execute("SELECT * FROM accounts WHERE id = ?", (account_id,)) as cur:
+            row = await cur.fetchone()
+            return self._row_to_account(row) if row else None
+
+    async def get_account_for_user(self, account_id: int, telegram_id: int) -> Optional[Account]:
+        async with self._conn.execute(
+            "SELECT a.* FROM accounts a JOIN users u ON u.id = a.user_id "
+            "WHERE a.id = ? AND u.telegram_id = ?",
+            (account_id, telegram_id),
+        ) as cur:
             row = await cur.fetchone()
             return self._row_to_account(row) if row else None
 
@@ -566,6 +594,18 @@ class Database:
             return row["cnt"] if row else 0
 
     async def create_account(self, user_id: int, phone: str, api_id: int, api_hash: str, session_string: str) -> int:
+        async with self._conn.execute(
+            "SELECT id FROM accounts WHERE user_id = ? AND phone = ? AND is_active = 0 LIMIT 1",
+            (user_id, phone),
+        ) as cur:
+            existing = await cur.fetchone()
+        if existing:
+            await self._conn.execute(
+                "UPDATE accounts SET api_id=?, api_hash=?, session_string=?, is_active=1 WHERE id=?",
+                (api_id, api_hash, session_string, existing["id"]),
+            )
+            await self._conn.commit()
+            return existing["id"]
         cursor = await self._conn.execute(
             "INSERT INTO accounts (user_id, phone, api_id, api_hash, session_string) VALUES (?, ?, ?, ?, ?)",
             (user_id, phone, api_id, api_hash, session_string),
@@ -586,29 +626,51 @@ class Database:
 
     async def update_autoresponder(self, account_id: int, enabled: bool, text: Optional[str] = None, photo: Optional[str] = None):
         if text is not None:
+            async with self._conn.execute(
+                "SELECT autoresponder_photo FROM accounts WHERE id = ?", (account_id,)
+            ) as cur:
+                row = await cur.fetchone()
+            old_photo = row["autoresponder_photo"] if row else None
             await self._conn.execute(
                 "UPDATE accounts SET autoresponder_enabled = ?, autoresponder_text = ?, autoresponder_photo = ? WHERE id = ?",
                 (enabled, text, photo, account_id),
             )
         else:
+            old_photo = None
             await self._conn.execute(
                 "UPDATE accounts SET autoresponder_enabled = ? WHERE id = ?",
                 (enabled, account_id),
             )
         await self._conn.commit()
+        if old_photo and old_photo != photo:
+            try:
+                os.remove(old_photo)
+            except OSError:
+                pass
 
     async def update_group_autoresponder(self, account_id: int, enabled: bool, text: Optional[str] = None, photo: Optional[str] = None):
         if text is not None:
+            async with self._conn.execute(
+                "SELECT group_autoresponder_photo FROM accounts WHERE id = ?", (account_id,)
+            ) as cur:
+                row = await cur.fetchone()
+            old_photo = row["group_autoresponder_photo"] if row else None
             await self._conn.execute(
                 "UPDATE accounts SET group_autoresponder_enabled = ?, group_autoresponder_text = ?, group_autoresponder_photo = ? WHERE id = ?",
                 (enabled, text, photo, account_id),
             )
         else:
+            old_photo = None
             await self._conn.execute(
                 "UPDATE accounts SET group_autoresponder_enabled = ? WHERE id = ?",
                 (enabled, account_id),
             )
         await self._conn.commit()
+        if old_photo and old_photo != photo:
+            try:
+                os.remove(old_photo)
+            except OSError:
+                pass
 
     async def update_notify_messages(self, account_id: int, enabled: bool):
         await self._conn.execute(
@@ -649,7 +711,7 @@ class Database:
                 CASE
                     WHEN u.is_admin = 1 THEN 0
                     WHEN u.subscription_end IS NOT NULL
-                         AND u.subscription_end > datetime('now') THEN 1
+                         AND replace(u.subscription_end, 'T', ' ') > datetime('now', '+3 hours') THEN 1
                     WHEN u.subscription_type = 'free_ad' THEN 2
                     ELSE 3
                 END AS _priority
@@ -662,11 +724,6 @@ class Database:
                 EXISTS (
                     SELECT 1 FROM mailings m
                     WHERE m.account_id = a.id AND m.is_active = 1
-                ) OR
-                EXISTS (
-                    SELECT 1 FROM mailing_accounts ma
-                    JOIN mailings m ON ma.mailing_id = m.id
-                    WHERE ma.account_id = a.id AND m.is_active = 1
                 )
             )
             ORDER BY _priority ASC
@@ -676,19 +733,19 @@ class Database:
     async def get_registrations_by_period(self, period: str) -> list:
         if period == "day":
             sql = ("SELECT strftime('%H:00', created_at) as label, COUNT(*) as cnt "
-                   "FROM users WHERE created_at >= datetime('now', '-1 day') "
+                   "FROM users WHERE created_at >= datetime('now', '+3 hours', '-1 day') "
                    "GROUP BY label ORDER BY label")
         elif period == "week":
             sql = ("SELECT strftime('%d.%m', created_at) as label, COUNT(*) as cnt "
-                   "FROM users WHERE created_at >= datetime('now', '-7 days') "
+                   "FROM users WHERE created_at >= datetime('now', '+3 hours', '-7 days') "
                    "GROUP BY label ORDER BY label")
         elif period == "month":
             sql = ("SELECT strftime('%d.%m', created_at) as label, COUNT(*) as cnt "
-                   "FROM users WHERE created_at >= datetime('now', '-30 days') "
+                   "FROM users WHERE created_at >= datetime('now', '+3 hours', '-30 days') "
                    "GROUP BY label ORDER BY label")
         else:  # year
             sql = ("SELECT strftime('%m.%Y', created_at) as label, COUNT(*) as cnt "
-                   "FROM users WHERE created_at >= datetime('now', '-1 year') "
+                   "FROM users WHERE created_at >= datetime('now', '+3 hours', '-1 year') "
                    "GROUP BY label ORDER BY label")
         async with self._conn.execute(sql) as cur:
             return [(r["label"], r["cnt"]) for r in await cur.fetchall()]
@@ -698,10 +755,32 @@ class Database:
             return (await cur.fetchone())[0]
 
     async def purge_inactive_accounts(self) -> int:
-        """Permanently delete all inactive accounts. Returns count deleted."""
-        count = await self.count_inactive_accounts()
-        await self._conn.execute("DELETE FROM accounts WHERE is_active = 0")
+        """Delete inactive accounts that are not referenced by any mailing."""
+        async with self._conn.execute(
+            "SELECT id, autoresponder_photo, group_autoresponder_photo FROM accounts a WHERE a.is_active = 0 "
+            "AND NOT EXISTS (SELECT 1 FROM mailings m WHERE m.account_id = a.id) "
+            "AND NOT EXISTS (SELECT 1 FROM mailing_accounts ma WHERE ma.account_id = a.id)"
+        ) as cur:
+            rows = await cur.fetchall()
+        count = len(rows)
+        await self._conn.execute(
+            "DELETE FROM accounts WHERE is_active = 0 "
+            "AND NOT EXISTS (SELECT 1 FROM mailings m WHERE m.account_id = accounts.id) "
+            "AND NOT EXISTS (SELECT 1 FROM mailing_accounts ma WHERE ma.account_id = accounts.id)"
+        )
         await self._conn.commit()
+        for row in rows:
+            async with self._conn.execute(
+                "SELECT 1 FROM accounts WHERE id = ?", (row["id"],)
+            ) as cur:
+                if await cur.fetchone():
+                    continue
+            for path in (row["autoresponder_photo"], row["group_autoresponder_photo"]):
+                if path:
+                    try:
+                        os.remove(path)
+                    except OSError:
+                        pass
         return count
 
     # === Mailings ===
@@ -722,6 +801,7 @@ class Database:
             account_rotation_mode=r["account_rotation_mode"] if "account_rotation_mode" in keys else "per_target",
             batch_size=r["batch_size"] if "batch_size" in keys and r["batch_size"] is not None else None,
             batch_pause=r["batch_pause"] if "batch_pause" in keys and r["batch_pause"] is not None else 10,
+            hidden_tag_enabled=bool(r["hidden_tag_enabled"]) if "hidden_tag_enabled" in keys else False,
         )
 
     async def get_mailing(self, mailing_id: int) -> Optional[Mailing]:
@@ -730,6 +810,15 @@ class Database:
             if row:
                 return self._row_to_mailing(row)
         return None
+
+    async def get_mailing_for_user(self, mailing_id: int, telegram_id: int) -> Optional[Mailing]:
+        async with self._conn.execute(
+            "SELECT m.* FROM mailings m JOIN users u ON u.id = m.user_id "
+            "WHERE m.id = ? AND u.telegram_id = ?",
+            (mailing_id, telegram_id),
+        ) as cur:
+            row = await cur.fetchone()
+            return self._row_to_mailing(row) if row else None
 
     async def get_user_mailings(self, user_id: int) -> list[Mailing]:
         async with self._conn.execute("SELECT * FROM mailings WHERE user_id = ?", (user_id,)) as cur:
@@ -761,6 +850,13 @@ class Database:
         await self._conn.execute("UPDATE mailings SET is_active = ? WHERE id = ?", (is_active, mailing_id))
         await self._conn.commit()
 
+    async def update_mailing_hidden_tag(self, mailing_id: int, enabled: bool):
+        await self._conn.execute(
+            "UPDATE mailings SET hidden_tag_enabled = ? WHERE id = ?",
+            (1 if enabled else 0, mailing_id),
+        )
+        await self._conn.commit()
+
     async def update_mailing_rotation_mode(self, mailing_id: int, mode: str):
         await self._conn.execute("UPDATE mailings SET account_rotation_mode = ? WHERE id = ?", (mode, mailing_id))
         await self._conn.commit()
@@ -779,7 +875,7 @@ class Database:
     async def update_mailing_last_sent(self, mailing_id: int):
         await self._conn.execute(
             "UPDATE mailings SET last_sent_at = ? WHERE id = ?",
-            (datetime.utcnow().isoformat(), mailing_id),
+            (now_moscow().isoformat(), mailing_id),
         )
         await self._conn.commit()
 
@@ -798,8 +894,28 @@ class Database:
         await self._conn.commit()
 
     async def delete_mailing(self, mailing_id: int):
+        async with self._conn.execute(
+            "SELECT photo_path, video_path FROM mailing_messages WHERE mailing_id = ?",
+            (mailing_id,),
+        ) as cur:
+            rows = await cur.fetchall()
         await self._conn.execute("DELETE FROM mailings WHERE id = ?", (mailing_id,))
         await self._conn.commit()
+        for row in rows:
+            paths = []
+            if row["photo_path"]:
+                try:
+                    parsed = json.loads(row["photo_path"])
+                    paths = parsed if isinstance(parsed, list) else [row["photo_path"]]
+                except (json.JSONDecodeError, TypeError):
+                    paths = [row["photo_path"]]
+            if row["video_path"]:
+                paths.append(row["video_path"])
+            for path in paths:
+                try:
+                    os.remove(path)
+                except OSError:
+                    pass
 
     async def count_all_mailings(self) -> int:
         async with self._conn.execute("SELECT COUNT(*) as cnt FROM mailings") as cur:
@@ -903,7 +1019,7 @@ class Database:
 
     async def add_mailing_target(self, mailing_id: int, chat_identifier: str, is_forum: bool = False) -> int:
         normalized = chat_identifier.strip()
-        if not normalized.startswith('-') and not normalized.isdigit():
+        if not normalized.startswith('-') and not normalized.isdigit() and not normalized.startswith("https://t.me/+"):
             if not normalized.startswith('@'):
                 normalized = f"@{normalized}"
         cursor = await self._conn.execute(
@@ -926,10 +1042,33 @@ class Database:
         )
         await self._conn.commit()
 
+    async def update_all_target_intervals(self, interval_seconds: int):
+        await self._conn.execute(
+            "UPDATE mailing_targets SET interval_seconds = ?", (interval_seconds,)
+        )
+        await self._conn.commit()
+
+    async def get_dashboard_stats(self) -> dict:
+        async with self._conn.execute("""
+            SELECT
+                (SELECT COUNT(*) FROM users) AS total_users,
+                (SELECT COUNT(*) FROM users WHERE subscription_end IS NOT NULL
+                    AND replace(subscription_end, 'T', ' ') > datetime('now', '+3 hours')) AS active_subs,
+                (SELECT COUNT(*) FROM accounts WHERE is_active = 1) AS accounts,
+                (SELECT COUNT(*) FROM mailings WHERE is_active = 1) AS active_mailings,
+                (SELECT COUNT(*) FROM mailings) AS total_mailings,
+                (SELECT COUNT(*) FROM payments WHERE status = 'paid') AS paid_subs
+        """) as cur:
+            row = await cur.fetchone()
+        return {key: int(row[key] or 0) for key in (
+            "total_users", "active_subs", "accounts", "active_mailings",
+            "total_mailings", "paid_subs"
+        )}
+
     async def update_target_last_sent(self, target_id: int, account_id: Optional[int] = None):
         await self._conn.execute(
             "UPDATE mailing_targets SET last_sent_at = ?, last_account_id = ? WHERE id = ?",
-            (datetime.utcnow().isoformat(), account_id, target_id),
+            (now_moscow().isoformat(), account_id, target_id),
         )
         await self._conn.commit()
 
@@ -959,6 +1098,17 @@ class Database:
         ) as cur:
             return await cur.fetchone() is not None
 
+    async def claim_autoresponder_history(self, account_id: int, sender_telegram_id: int,
+                                          message_text: Optional[str]) -> bool:
+        async with self._conn.execute(
+            "INSERT OR IGNORE INTO autoresponder_history "
+            "(account_id, sender_telegram_id, message_text) VALUES (?, ?, ?)",
+            (account_id, sender_telegram_id, message_text),
+        ) as cur:
+            claimed = cur.rowcount > 0
+        await self._conn.commit()
+        return claimed
+
     async def add_autoresponder_history(self, account_id: int, sender_telegram_id: int, message_text: Optional[str]):
         await self._conn.execute(
             "INSERT OR IGNORE INTO autoresponder_history (account_id, sender_telegram_id, message_text) VALUES (?, ?, ?)",
@@ -968,6 +1118,13 @@ class Database:
 
     async def clear_autoresponder_history(self, account_id: int):
         await self._conn.execute("DELETE FROM autoresponder_history WHERE account_id = ?", (account_id,))
+        await self._conn.commit()
+
+    async def clear_autoresponder_history_for_sender(self, account_id: int, sender_telegram_id: int):
+        await self._conn.execute(
+            "DELETE FROM autoresponder_history WHERE account_id = ? AND sender_telegram_id = ?",
+            (account_id, sender_telegram_id),
+        )
         await self._conn.commit()
 
     # === Payments ===
@@ -997,7 +1154,7 @@ class Database:
 
     async def update_payment_status(self, invoice_id: str, status: str) -> bool:
         """Returns True if row was actually updated (not already in that status)."""
-        paid_at = datetime.now().isoformat() if status == "paid" else None
+        paid_at = now_moscow().isoformat() if status == "paid" else None
         async with self._conn.execute(
             "UPDATE payments SET status = ?, paid_at = ? WHERE invoice_id = ? AND status != ?",
             (status, paid_at, invoice_id, status),
@@ -1022,8 +1179,8 @@ class Database:
         async with self._conn.execute("""
             SELECT
                 COALESCE(SUM(p.amount), 0) as total_rub,
-                COALESCE(SUM(CASE WHEN date(p.paid_at) = date('now', '-1 day') THEN p.amount ELSE 0 END), 0) as yesterday_rub,
-                COALESCE(SUM(CASE WHEN date(p.paid_at) = date('now') THEN p.amount ELSE 0 END), 0) as today_rub,
+                COALESCE(SUM(CASE WHEN date(p.paid_at) = date('now', '+3 hours', '-1 day') THEN p.amount ELSE 0 END), 0) as yesterday_rub,
+                COALESCE(SUM(CASE WHEN date(p.paid_at) = date('now', '+3 hours') THEN p.amount ELSE 0 END), 0) as today_rub,
                 COUNT(*) as total_count
             FROM payments p
             WHERE p.payment_method = 'platega' AND p.status = 'paid'
@@ -1051,14 +1208,14 @@ class Database:
         """Stats for a specific payment method: today/yesterday/week/month/total."""
         async with self._conn.execute("""
             SELECT
-                COUNT(CASE WHEN date(paid_at) = date('now') THEN 1 END)                          AS today_count,
-                COALESCE(SUM(CASE WHEN date(paid_at) = date('now') THEN amount END), 0)           AS today_amount,
-                COUNT(CASE WHEN date(paid_at) = date('now', '-1 day') THEN 1 END)                AS yesterday_count,
-                COALESCE(SUM(CASE WHEN date(paid_at) = date('now', '-1 day') THEN amount END), 0) AS yesterday_amount,
-                COUNT(CASE WHEN paid_at >= date('now', '-7 days') THEN 1 END)                    AS week_count,
-                COALESCE(SUM(CASE WHEN paid_at >= date('now', '-7 days') THEN amount END), 0)     AS week_amount,
-                COUNT(CASE WHEN paid_at >= date('now', 'start of month') THEN 1 END)             AS month_count,
-                COALESCE(SUM(CASE WHEN paid_at >= date('now', 'start of month') THEN amount END), 0) AS month_amount,
+                COUNT(CASE WHEN date(paid_at) = date('now', '+3 hours') THEN 1 END)                          AS today_count,
+                COALESCE(SUM(CASE WHEN date(paid_at) = date('now', '+3 hours') THEN amount END), 0)           AS today_amount,
+                COUNT(CASE WHEN date(paid_at) = date('now', '+3 hours', '-1 day') THEN 1 END)                AS yesterday_count,
+                COALESCE(SUM(CASE WHEN date(paid_at) = date('now', '+3 hours', '-1 day') THEN amount END), 0) AS yesterday_amount,
+                COUNT(CASE WHEN paid_at >= date('now', '+3 hours', '-7 days') THEN 1 END)                    AS week_count,
+                COALESCE(SUM(CASE WHEN paid_at >= date('now', '+3 hours', '-7 days') THEN amount END), 0)     AS week_amount,
+                COUNT(CASE WHEN paid_at >= date('now', '+3 hours', 'start of month') THEN 1 END)             AS month_count,
+                COALESCE(SUM(CASE WHEN paid_at >= date('now', '+3 hours', 'start of month') THEN amount END), 0) AS month_amount,
                 COUNT(*)                                                                           AS total_count,
                 COALESCE(SUM(amount), 0)                                                           AS total_amount
             FROM payments
@@ -1088,7 +1245,7 @@ class Database:
     async def update_last_activity(self, telegram_id: int) -> None:
         await self._conn.execute(
             "UPDATE users SET last_activity=? WHERE telegram_id=?",
-            (datetime.now(), telegram_id),
+            (now_moscow().isoformat(), telegram_id),
         )
         await self._conn.commit()
 
@@ -1098,7 +1255,7 @@ class Database:
             """
             SELECT CAST(strftime('%H', last_activity) AS INTEGER) as h, COUNT(*) as cnt
             FROM users
-            WHERE last_activity >= datetime('now', ?)
+            WHERE replace(last_activity, 'T', ' ') >= datetime('now', '+3 hours', ?)
             GROUP BY h
             """,
             (f"-{hours} hours",),
@@ -1115,13 +1272,13 @@ class Database:
             row = await cur.fetchone()
             if row and row[0]:
                 end = self._parse_datetime(row[0])
-                return end is not None and end > datetime.now()
+                return end is not None and end > now_moscow()
         return False
 
     async def set_subscription_expired_notified(self, user_id: int):
         await self._conn.execute(
             "UPDATE users SET subscription_expired_notified_at = ? WHERE id = ?",
-            (datetime.now().isoformat(), user_id)
+            (now_moscow().isoformat(), user_id)
         )
         await self._conn.commit()
 
@@ -1129,7 +1286,7 @@ class Database:
         col = "reminder_3d_sent_at" if days == 3 else "reminder_1d_sent_at"
         await self._conn.execute(
             f"UPDATE users SET {col} = ? WHERE id = ?",
-            (datetime.now().isoformat(), user_id)
+            (now_moscow().isoformat(), user_id)
         )
         await self._conn.commit()
 
@@ -1222,7 +1379,7 @@ class Database:
             "INSERT OR IGNORE INTO payments "
             "(user_id, invoice_id, amount, currency, payment_method, plan_days, status, paid_at) "
             "VALUES (?, ?, 0, 'USDT', 'promocode', ?, 'paid', ?)",
-            (user_id, invoice_id, plan_days, datetime.now().isoformat())
+            (user_id, invoice_id, plan_days, now_moscow().isoformat())
         )
         await self._conn.commit()
 
@@ -1248,18 +1405,33 @@ class Database:
         ) as cur:
             return await cur.fetchone() is not None
 
-    async def use_promocode(self, code: str, user_id: int, promocode_id: int):
-        await self._conn.execute(
-            "INSERT OR IGNORE INTO promocode_uses (promocode_id, user_id) VALUES (?, ?)",
-            (promocode_id, user_id),
-        )
-        await self._conn.execute(
-            "UPDATE promocodes SET uses_count = uses_count + 1, "
-            "is_used = CASE WHEN uses_count + 1 >= max_uses THEN 1 ELSE 0 END, "
-            "used_by = ?, used_at = ? WHERE code = ?",
-            (user_id, datetime.now().isoformat(), code),
-        )
-        await self._conn.commit()
+    async def use_promocode(self, code: str, user_id: int, promocode_id: int) -> bool:
+        async with self._transaction_lock:
+            await self._conn.execute("BEGIN IMMEDIATE")
+            try:
+                async with self._conn.execute(
+                    "INSERT OR IGNORE INTO promocode_uses (promocode_id, user_id) VALUES (?, ?)",
+                    (promocode_id, user_id),
+                ) as cur:
+                    inserted = cur.rowcount > 0
+                if not inserted:
+                    await self._conn.rollback()
+                    return False
+                async with self._conn.execute(
+                    "UPDATE promocodes SET uses_count = uses_count + 1, "
+                    "is_used = CASE WHEN uses_count + 1 >= max_uses THEN 1 ELSE 0 END, "
+                    "used_by = ?, used_at = ? WHERE code = ? AND uses_count < max_uses",
+                    (user_id, now_moscow().isoformat(), code),
+                ) as cur:
+                    updated = cur.rowcount > 0
+                if not updated:
+                    await self._conn.rollback()
+                    return False
+                await self._conn.commit()
+                return True
+            except BaseException:
+                await self._conn.rollback()
+                raise
 
     async def get_all_promocodes(self) -> list[Promocode]:
         async with self._conn.execute("SELECT * FROM promocodes ORDER BY created_at DESC") as cur:
@@ -1357,10 +1529,12 @@ class Database:
         chat_identifier: Optional[str] = None,
     ):
         await self._conn.execute(
-            "INSERT INTO mailing_error_log (user_id, account_id, mailing_id, error_type, error_text, chat_identifier) "
-            "VALUES (?, ?, ?, ?, ?, ?)",
+            "INSERT INTO mailing_error_log "
+            "(user_id, account_id, mailing_id, error_type, error_text, chat_identifier, created_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?)",
             (user_id, account_id, mailing_id, error_type,
-             error_text[:500] if error_text else None, chat_identifier),
+             error_text[:500] if error_text else None, chat_identifier,
+             now_moscow().isoformat()),
         )
         await self._conn.execute(
             """DELETE FROM mailing_error_log WHERE user_id = ? AND id NOT IN (

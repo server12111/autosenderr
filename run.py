@@ -5,11 +5,13 @@ import os
 from logging.handlers import RotatingFileHandler
 
 from bot.main import main
+from bot.utils.time_utils import moscow_logging_converter
 
 os.makedirs("data", exist_ok=True)
 
 _fmt = "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
 logging.basicConfig(level=logging.INFO, format=_fmt)
+logging.Formatter.converter = staticmethod(moscow_logging_converter)
 
 file_handler = RotatingFileHandler(
     "data/bot.log", maxBytes=5 * 1024 * 1024, backupCount=3, encoding="utf-8"

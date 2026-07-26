@@ -11,11 +11,19 @@ from .referral import router as referral_router
 
 def setup_routers() -> Router:
     main_router = Router()
-    main_router.include_router(start_router)
-    main_router.include_router(accounts_router)
-    main_router.include_router(autoresponder_router)
-    main_router.include_router(mailings_router)
-    main_router.include_router(subscription_router)
-    main_router.include_router(admin_router)
-    main_router.include_router(referral_router)
+    child_routers = (
+        start_router,
+        accounts_router,
+        autoresponder_router,
+        mailings_router,
+        subscription_router,
+        admin_router,
+        referral_router,
+    )
+    for child_router in child_routers:
+        parent_router = child_router.parent_router
+        if parent_router is not None:
+            parent_router.sub_routers.remove(child_router)
+            child_router._parent_router = None
+        main_router.include_router(child_router)
     return main_router

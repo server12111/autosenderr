@@ -85,7 +85,10 @@ async def process_wallet(message: Message, state: FSMContext, db: Database):
     user = await db.get_user(message.from_user.id)
     amount = user.ref_balance
 
-    await db.deduct_ref_balance(user.id, amount)
+    if not await db.deduct_ref_balance(user.id, amount):
+        await state.clear()
+        await message.answer("❌ Баланс уже был изменён. Повторите запрос.", parse_mode="HTML")
+        return
     await db.create_withdrawal_request(user.id, amount, wallet)
     await state.clear()
 

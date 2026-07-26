@@ -4,6 +4,17 @@ from typing import Optional
 
 import pytz
 
+MOSCOW_TZ = pytz.timezone("Europe/Moscow")
+
+
+def now_moscow() -> datetime:
+    """Return the current Moscow time as a naive datetime for DB compatibility."""
+    return datetime.now(MOSCOW_TZ).replace(tzinfo=None)
+
+
+def moscow_logging_converter(timestamp: float):
+    return datetime.fromtimestamp(timestamp, MOSCOW_TZ).timetuple()
+
 
 def is_within_active_hours(active_hours_json: Optional[str]) -> bool:
     """Check if current time is within active hours."""
@@ -12,7 +23,7 @@ def is_within_active_hours(active_hours_json: Optional[str]) -> bool:
 
     try:
         config = json.loads(active_hours_json)
-        tz = pytz.timezone(config.get("timezone", "UTC"))
+        tz = MOSCOW_TZ
         now = datetime.now(tz)
         current_time = now.strftime("%H:%M")
 
@@ -64,7 +75,7 @@ def format_active_hours(active_hours_json: Optional[str]) -> str:
 
     try:
         config = json.loads(active_hours_json)
-        timezone = config.get("timezone", "UTC")
+        timezone = "Europe/Moscow"
         ranges = config.get("ranges", [])
 
         if not ranges:
@@ -76,7 +87,7 @@ def format_active_hours(active_hours_json: Optional[str]) -> str:
         return "Ошибка формата"
 
 
-def create_active_hours_json(ranges: list[dict], timezone: str = "Europe/Kiev") -> str:
+def create_active_hours_json(ranges: list[dict], timezone: str = "Europe/Moscow") -> str:
     """Create active hours JSON string."""
     return json.dumps({
         "timezone": timezone,

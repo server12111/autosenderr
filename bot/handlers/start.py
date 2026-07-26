@@ -1,3 +1,5 @@
+import os
+
 from aiogram import Router, F
 from aiogram.filters import Command
 from aiogram.types import Message, CallbackQuery
@@ -34,14 +36,20 @@ async def check_channels_subscription(bot, user_id: int, channels) -> list:
 @router.message(Command("start"))
 async def cmd_start(message: Message, db: Database, state: FSMContext):
     current_state = await state.get_state()
+    data = await state.get_data() if current_state else {}
     if current_state and "AddAccount" in current_state:
-        data = await state.get_data()
         client = data.get("client")
         if client:
             try:
                 await client.disconnect()
             except Exception:
                 pass
+    for path in data.get("pending_photos", []):
+        try:
+            os.remove(path)
+        except OSError:
+            pass
+    if current_state:
         await state.clear()
 
     args = message.text.split(maxsplit=1)
@@ -181,7 +189,7 @@ async def callback_help(callback: CallbackQuery, db: Database):
         "<b>👤 Аккаунты</b> — добавляй Telegram-аккаунты\n"
         "• Поддержка прокси SOCKS5\n"
         "• Автоответчик в ЛС и группах\n\n"
-        "<b>💳 Подписка</b> — CryptoBot, TON, карта, промокоды\n"
+        "<b>💳 Подписка</b> — CryptoBot, GRAM(TON), карта, промокоды\n"
         "<b>🤝 Рефералы</b> — приглашай друзей и получай % с оплат\n\n"
         "➕ <b>Как добавить аккаунт:</b>\n"
         "1. «Аккаунты» → «Добавить аккаунт»\n"
@@ -222,6 +230,11 @@ async def callback_dm_mailing_info(callback: CallbackQuery):
 async def callback_cancel(callback: CallbackQuery, state: FSMContext, db: Database):
     current_state = await state.get_state()
     data = await state.get_data()  # read BEFORE clear so mailing_id/account_id are available
+    for path in data.get("pending_photos", []):
+        try:
+            os.remove(path)
+        except OSError:
+            pass
     await state.clear()
     await callback.answer()
 

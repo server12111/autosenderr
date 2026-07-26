@@ -1,4 +1,5 @@
 import asyncio
+import logging
 import os
 
 from aiogram import Router, F
@@ -13,6 +14,19 @@ from ..utils.premium_emoji import pe
 from ..utils.tg import safe_edit
 
 router = Router()
+logger = logging.getLogger(__name__)
+
+
+def _log_background_task_error(task: asyncio.Task):
+    if task.cancelled():
+        return
+    error = task.exception()
+    if error:
+        logger.error(
+            "Account connection task failed: %s",
+            error,
+            exc_info=(type(error), error, error.__traceback__),
+        )
 
 
 class AutoresponderStates(StatesGroup):
@@ -23,7 +37,7 @@ class AutoresponderStates(StatesGroup):
 @router.callback_query(F.data.startswith("autoresponder:"))
 async def callback_autoresponder(callback: CallbackQuery, db: Database):
     account_id = int(callback.data.split(":")[1])
-    account = await db.get_account(account_id)
+    account = await db.get_account_for_user(account_id, callback.from_user.id)
 
     if not account:
         await callback.answer("Аккаунт не найден", show_alert=True)
@@ -51,7 +65,7 @@ async def callback_autoresponder(callback: CallbackQuery, db: Database):
 @router.callback_query(F.data.startswith("toggle_autoresponder:"))
 async def callback_toggle_autoresponder(callback: CallbackQuery, db: Database, userbot_manager: UserbotManager):
     account_id = int(callback.data.split(":")[1])
-    account = await db.get_account(account_id)
+    account = await db.get_account_for_user(account_id, callback.from_user.id)
 
     if not account:
         await callback.answer("Аккаунт не найден", show_alert=True)
@@ -80,7 +94,8 @@ async def callback_toggle_autoresponder(callback: CallbackQuery, db: Database, u
     await db.update_autoresponder(account_id, new_status)
 
     if new_status:
-        asyncio.create_task(userbot_manager.get_client(account_id))
+        task = asyncio.create_task(userbot_manager.get_client(account_id))
+        task.add_done_callback(_log_background_task_error)
 
     status_text = "включён" if new_status else "выключен"
     if free_ad_notice:
@@ -88,7 +103,7 @@ async def callback_toggle_autoresponder(callback: CallbackQuery, db: Database, u
     else:
         await callback.answer(f"Автоответчик {status_text}")
 
-    account = await db.get_account(account_id)
+    account = await db.get_account_for_user(account_id, callback.from_user.id)
 
     status = "✅ Включён" if account.autoresponder_enabled else "❌ Выключен"
     notify_status = "✅ Включены" if account.notify_messages else "❌ Выключены"
@@ -112,7 +127,7 @@ async def callback_toggle_autoresponder(callback: CallbackQuery, db: Database, u
 @router.callback_query(F.data.startswith("toggle_notify:"))
 async def callback_toggle_notify(callback: CallbackQuery, db: Database, userbot_manager: UserbotManager):
     account_id = int(callback.data.split(":")[1])
-    account = await db.get_account(account_id)
+    account = await db.get_account_for_user(account_id, callback.from_user.id)
 
     if not account:
         await callback.answer("Аккаунт не найден", show_alert=True)
@@ -121,12 +136,13 @@ async def callback_toggle_notify(callback: CallbackQuery, db: Database, userbot_
     new_status = not account.notify_messages
     await db.update_notify_messages(account_id, new_status)
     if new_status:
-        asyncio.create_task(userbot_manager.get_client(account_id))
+        task = asyncio.create_task(userbot_manager.get_client(account_id))
+        task.add_done_callback(_log_background_task_error)
 
     status_text = "включены" if new_status else "выключены"
     await callback.answer(f"Уведомления {status_text}")
 
-    account = await db.get_account(account_id)
+    account = await db.get_account_for_user(account_id, callback.from_user.id)
 
     status = "✅ Включён" if account.autoresponder_enabled else "❌ Выключен"
     notify_status = "✅ Включены" if account.notify_messages else "❌ Выключены"
@@ -148,9 +164,12 @@ async def callback_toggle_notify(callback: CallbackQuery, db: Database, userbot_
 
 @router.callback_query(F.data.startswith("edit_autoresponder_text:"))
 async def callback_edit_autoresponder_text(
-    callback: CallbackQuery, state: FSMContext
+    callback: CallbackQuery, state: FSMContext, db: Database
 ):
     account_id = int(callback.data.split(":")[1])
+    if not await db.get_account_for_user(account_id, callback.from_user.id):
+        await callback.answer("⛔ Нет доступа", show_alert=True)
+        return
 
     await state.update_data(account_id=account_id)
     await state.set_state(AutoresponderStates.waiting_text)
@@ -172,6 +191,10 @@ async def process_autoresponder_text(message: Message, state: FSMContext, db: Da
         await message.answer(pe("❌ Сессия устарела. Начните заново."), parse_mode="HTML")
         await state.clear()
         return
+    if not await db.get_account_for_user(account_id, message.from_user.id):
+        await state.clear()
+        await message.answer("⛔ Нет доступа", parse_mode="HTML")
+        return
 
     text = None
     photo_path = None
@@ -192,7 +215,7 @@ async def process_autoresponder_text(message: Message, state: FSMContext, db: Da
     await db.update_autoresponder(account_id, False, text, photo=photo_path)
     await state.clear()
 
-    account = await db.get_account(account_id)
+    account = await db.get_account_for_user(account_id, message.from_user.id)
     if not account:
         await message.answer(pe("❌ Аккаунт не найден."), parse_mode="HTML")
         return
@@ -209,7 +232,7 @@ async def process_autoresponder_text(message: Message, state: FSMContext, db: Da
 @router.callback_query(F.data.startswith("group_autoresponder:"))
 async def callback_group_autoresponder(callback: CallbackQuery, db: Database):
     account_id = int(callback.data.split(":")[1])
-    account = await db.get_account(account_id)
+    account = await db.get_account_for_user(account_id, callback.from_user.id)
 
     if not account:
         await callback.answer("Аккаунт не найден", show_alert=True)
@@ -235,7 +258,7 @@ async def callback_group_autoresponder(callback: CallbackQuery, db: Database):
 @router.callback_query(F.data.startswith("toggle_group_autoresponder:"))
 async def callback_toggle_group_autoresponder(callback: CallbackQuery, db: Database, userbot_manager: UserbotManager):
     account_id = int(callback.data.split(":")[1])
-    account = await db.get_account(account_id)
+    account = await db.get_account_for_user(account_id, callback.from_user.id)
 
     if not account:
         await callback.answer("Аккаунт не найден", show_alert=True)
@@ -262,7 +285,8 @@ async def callback_toggle_group_autoresponder(callback: CallbackQuery, db: Datab
     await db.update_group_autoresponder(account_id, new_status)
 
     if new_status:
-        asyncio.create_task(userbot_manager.get_client(account_id))
+        task = asyncio.create_task(userbot_manager.get_client(account_id))
+        task.add_done_callback(_log_background_task_error)
 
     status_text = "включён" if new_status else "выключен"
     if free_ad_notice:
@@ -270,7 +294,7 @@ async def callback_toggle_group_autoresponder(callback: CallbackQuery, db: Datab
     else:
         await callback.answer(f"Автоответчик (группы) {status_text}")
 
-    account = await db.get_account(account_id)
+    account = await db.get_account_for_user(account_id, callback.from_user.id)
     status = "✅ Включён" if account.group_autoresponder_enabled else "❌ Выключен"
     text_preview = account.group_autoresponder_text or "(не задан)"
     if len(text_preview) > 100:
@@ -290,8 +314,13 @@ async def callback_toggle_group_autoresponder(callback: CallbackQuery, db: Datab
 
 
 @router.callback_query(F.data.startswith("edit_group_autoresponder_text:"))
-async def callback_edit_group_autoresponder_text(callback: CallbackQuery, state: FSMContext):
+async def callback_edit_group_autoresponder_text(
+    callback: CallbackQuery, state: FSMContext, db: Database
+):
     account_id = int(callback.data.split(":")[1])
+    if not await db.get_account_for_user(account_id, callback.from_user.id):
+        await callback.answer("⛔ Нет доступа", show_alert=True)
+        return
     await state.update_data(account_id=account_id)
     await state.set_state(AutoresponderStates.waiting_group_text)
 
@@ -313,6 +342,11 @@ async def process_group_autoresponder_text(message: Message, state: FSMContext, 
         await state.clear()
         return
 
+    if not await db.get_account_for_user(account_id, message.from_user.id):
+        await state.clear()
+        await message.answer("⛔ Нет доступа", parse_mode="HTML")
+        return
+
     text = None
     photo_path = None
 
@@ -332,7 +366,7 @@ async def process_group_autoresponder_text(message: Message, state: FSMContext, 
     await db.update_group_autoresponder(account_id, False, text, photo=photo_path)
     await state.clear()
 
-    account = await db.get_account(account_id)
+    account = await db.get_account_for_user(account_id, message.from_user.id)
     if not account:
         await message.answer(pe("❌ Аккаунт не найден."), parse_mode="HTML")
         return
@@ -348,6 +382,10 @@ async def process_group_autoresponder_text(message: Message, state: FSMContext, 
 @router.callback_query(F.data.startswith("clear_autoresponder_history:"))
 async def callback_clear_history(callback: CallbackQuery, db: Database):
     account_id = int(callback.data.split(":")[1])
+
+    if not await db.get_account_for_user(account_id, callback.from_user.id):
+        await callback.answer("⛔ Нет доступа", show_alert=True)
+        return
 
     await db.clear_autoresponder_history(account_id)
 

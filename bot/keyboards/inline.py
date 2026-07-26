@@ -169,7 +169,7 @@ def account_payment_method_keyboard() -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
     builder.row(
         _btn("💎 CryptoBot (USDT)", callback_data="pay_account_cryptobot", style="primary"),
-        _btn("💠 TON", callback_data="pay_account_ton", style="primary"),
+        _btn("💠 GRAM(TON)", callback_data="pay_account_ton", style="primary"),
     )
     builder.row(_btn("💳 На карту", callback_data="pay_account_card", style="primary"))
     builder.row(_btn("◀️ Назад", callback_data="accounts", style="primary"))
@@ -250,9 +250,12 @@ def mailing_menu_keyboard(mailing: Mailing, show_remove_ads: bool = False) -> In
         _btn("⏰ Время активности", callback_data=f"mailing_hours:{mailing.id}", style="primary"),
         _btn("🔃 Аккаунт", callback_data=f"change_mailing_account:{mailing.id}", style="primary"),
     )
-    builder.row(
-        _btn("👥 Несколько аккаунтов", callback_data=f"mailing_multi_accounts:{mailing.id}", style="primary"),
-    )
+    builder.row(InlineKeyboardButton(
+        text="Скрытый тег",
+        icon_custom_emoji_id="5226774675798923342",
+        callback_data=f"hidden_tag:{mailing.id}",
+        style="primary",
+    ))
     reply_label = "↩️ Ответная рассылка: ВКЛ" if mailing.reply_mode else "↩️ Ответная рассылка: ВЫКЛ"
     builder.row(_btn(reply_label, callback_data=f"mailing_reply_mode:{mailing.id}", style="primary"))
     if show_remove_ads:
@@ -261,6 +264,16 @@ def mailing_menu_keyboard(mailing: Mailing, show_remove_ads: bool = False) -> In
         _btn("❌ Удалить рассылку", callback_data=f"delete_mailing:{mailing.id}", style="danger"),
         _btn("◀️ Назад", callback_data="mailings", style="primary"),
     )
+    return builder.as_markup()
+
+
+def hidden_tag_keyboard(mailing_id: int, enabled: bool) -> InlineKeyboardMarkup:
+    builder = InlineKeyboardBuilder()
+    if enabled:
+        builder.row(_btn("🔴 Выключить", callback_data=f"toggle_hidden_tag:{mailing_id}", style="danger"))
+    else:
+        builder.row(_btn("✅ Включить", callback_data=f"toggle_hidden_tag:{mailing_id}", style="success"))
+    builder.row(_btn("◀️ Назад", callback_data=f"mailing:{mailing_id}", style="primary"))
     return builder.as_markup()
 
 
@@ -361,6 +374,7 @@ def _format_target_interval(target: MailingTarget) -> str:
 
 def mailing_targets_keyboard(mailing_id: int, targets: list[MailingTarget]) -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
+    builder.row(_btn("Изменить КД", callback_data=f"change_all_target_interval:{mailing_id}", style="success"))
     for target in targets:
         iv_text = _format_target_interval(target)
         if target.is_forum or target.thread_id:
@@ -537,7 +551,7 @@ def payment_method_keyboard(show_platega: bool = False, show_ton: bool = True) -
     if show_ton:
         builder.row(
             _btn("💎 CryptoBot (USDT)", callback_data="pay_cryptobot", style="primary"),
-            _btn("💠 TON", callback_data="pay_ton", style="primary"),
+            _btn("💠 GRAM(TON)", callback_data="pay_ton", style="primary"),
         )
     else:
         builder.row(_btn("💎 CryptoBot (USDT)", callback_data="pay_cryptobot", style="primary"))
@@ -641,9 +655,6 @@ def admin_keyboard() -> InlineKeyboardMarkup:
         _btn("🎟 Промокоды", callback_data="admin_promocodes", style="primary"),
     )
     builder.row(
-        _btn("💳 Статистика подписок", callback_data="admin_sub_stats", style="primary"),
-    )
-    builder.row(
         _btn("📢 Рассылка всем", callback_data="admin_broadcast", style="primary"),
         InlineKeyboardButton(text="📡 Обяз. каналы", callback_data="admin_channels", style="primary"),
     )
@@ -660,10 +671,7 @@ def admin_keyboard() -> InlineKeyboardMarkup:
     builder.row(
         _btn("📤 Экспорт БД", callback_data="admin_export_db", style="primary"),
     )
-    builder.row(
-        _btn("📥 Импорт БД", callback_data="admin_import_db", style="primary"),
-        _btn("🗑 Очистить мёртвые аккаунты", callback_data="admin_cleanup_accounts", style="danger"),
-    )
+    builder.row(_btn("📥 Импорт БД", callback_data="admin_import_db", style="primary"))
     builder.row(_btn("◀️ Главное меню", callback_data="main_menu", style="primary"))
     return builder.as_markup()
 
@@ -672,7 +680,7 @@ def admin_sub_stats_keyboard() -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
     builder.row(
         _btn("💎 CryptoBot", callback_data="admin_sub_method:cryptobot", style="primary"),
-        _btn("💠 TON", callback_data="admin_sub_method:ton", style="primary"),
+        _btn("💠 GRAM(TON)", callback_data="admin_sub_method:ton", style="primary"),
     )
     builder.row(_btn("🇷🇺 Platega (СБП)", callback_data="admin_sub_method:platega", style="primary"))
     builder.row(_btn("◀️ Назад", callback_data="admin_back", style="primary"))

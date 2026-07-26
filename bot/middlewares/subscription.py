@@ -9,6 +9,7 @@ from ..database.db import Database
 from ..config import config
 from ..handlers.subscription import SubscriptionStates
 from ..handlers.referral import ReferralStates
+from ..utils.time_utils import now_moscow
 
 
 class SubscriptionMiddleware(BaseMiddleware):
@@ -90,7 +91,7 @@ class SubscriptionMiddleware(BaseMiddleware):
                 await self._show_subscription_required(event)
                 return
 
-            if user.subscription_end < datetime.now():
+            if user.subscription_end < now_moscow():
                 await self._show_subscription_expired(event)
                 return
 

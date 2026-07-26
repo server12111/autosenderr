@@ -3,6 +3,7 @@ import contextlib
 import logging
 import os
 import sys
+import time
 
 # Allow running as `python bot/main.py` directly
 if __name__ == "__main__" and __package__ is None:
@@ -21,17 +22,29 @@ from .middlewares.subscription import SubscriptionMiddleware
 from .middlewares.album import AlbumMiddleware
 from .userbot.manager import UserbotManager
 from .services import CryptoBotService, TonPaymentService, PlategaService, AutoresponderService, MailingService, SubscriptionCheckerService
+from .utils.time_utils import moscow_logging_converter
 
 
 class ActivityMiddleware(BaseMiddleware):
     def __init__(self, db):
         self.db = db
+        self._last_update: dict[int, float] = {}
 
     async def __call__(self, handler, event, data):
         from_user = getattr(event, "from_user", None)
         if from_user and not from_user.is_bot:
             try:
-                await self.db.update_last_activity(from_user.id)
+                now = time.monotonic()
+                if now - self._last_update.get(from_user.id, 0) >= 60:
+                    await self.db.update_last_activity(from_user.id)
+                    self._last_update[from_user.id] = now
+                    if len(self._last_update) > 10000:
+                        cutoff = now - 60
+                        self._last_update = {
+                            user_id: timestamp
+                            for user_id, timestamp in self._last_update.items()
+                            if timestamp >= cutoff
+                        }
             except Exception:
                 pass
         return await handler(event, data)
@@ -41,6 +54,7 @@ logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
 )
+logging.Formatter.converter = staticmethod(moscow_logging_converter)
 logging.getLogger("telethon").setLevel(logging.WARNING)
 logger = logging.getLogger(__name__)
 
@@ -70,9 +84,9 @@ async def main():
     ton_service = None
     if config.TON_WALLET_ADDRESS:
         ton_service = TonPaymentService(config.TON_WALLET_ADDRESS, config.TONCENTER_API_KEY)
-        logger.info("TON payment service initialized")
+        logger.info("GRAM(TON) payment service initialized")
     else:
-        logger.info("TON_WALLET_ADDRESS not set, TON payments disabled")
+        logger.info("TON_WALLET_ADDRESS not set, GRAM(TON) payments disabled")
 
     userbot_manager = UserbotManager(db, config.SESSIONS_PATH)
 
@@ -118,7 +132,10 @@ async def main():
         if not task.cancelled():
             exc = task.exception()
             if exc:
-                logger.critical(f"Background task '{task.get_name()}' died unexpectedly: {exc}", exc_info=exc)
+                logger.critical(
+                    f"Background task '{task.get_name()}' died unexpectedly: {exc}",
+                    exc_info=(type(exc), exc, exc.__traceback__),
+                )
 
     try:
         # Start account connections in background — bot responds immediately
@@ -167,7 +184,6 @@ async def main():
 
 
 if __name__ == "__main__":
-    import time
     attempt = 0
     consecutive_failures = 0
     while True:

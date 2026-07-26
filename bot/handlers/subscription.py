@@ -23,6 +23,7 @@ from ..config import config
 from ..services import CryptoBotService, TonPaymentService, PlategaService, get_usd_uah_rate
 from ..utils.premium_emoji import pe
 from ..utils.tg import safe_edit
+from ..utils.time_utils import now_moscow
 
 router = Router()
 
@@ -36,8 +37,8 @@ class SubscriptionStates(StatesGroup):
 async def callback_subscription(callback: CallbackQuery, db: Database):
     user = await db.get_user(callback.from_user.id)
 
-    if user.subscription_end and user.subscription_end > datetime.now():
-        days_left = (user.subscription_end - datetime.now()).days
+    if user.subscription_end and user.subscription_end > now_moscow():
+        days_left = (user.subscription_end - now_moscow()).days
         price_7d = await db.get_price(7)
         price_30d = await db.get_price(30)
         text = (
@@ -96,13 +97,14 @@ async def callback_sub_plan(
     has_ton = bool(config.TON_WALLET_ADDRESS and ton_service)
 
     if has_ton or show_platega:
-        lines = [f"💎 CryptoBot — {round(price * 1.03, 2)} USDT (+3%)"]
+        crypto_price = round(price * 1.03, 2)
+        lines = [f"💎 CryptoBot — {price:.2f} USDT (+3%)"]
         if has_ton:
             ton_amount = await ton_service.calculate_ton_amount(price)
             if ton_amount:
-                lines.append(f"💠 TON — ~{ton_amount} TON (≈ {price} USDT)")
+                lines.append(f"💠 GRAM(TON) — ~{ton_amount} GRAM(TON) (≈ {price} USDT)")
             else:
-                lines.append(f"💠 TON — ≈ {price} USDT в TON")
+                lines.append(f"💠 GRAM(TON) — ≈ {price} USDT в GRAM(TON)")
         if show_platega and platega_service:
             rub_price = await platega_service.calculate_rub_price(price)
             lines.append(f"💳 СБП (рубли) — ~{rub_price:.0f} ₽")
@@ -167,7 +169,7 @@ async def _create_cryptobot_subscription(
 
     text = pe(
         f"💳 Оплата подписки\n\n"
-        f"Сумма: {invoice.amount} {invoice.currency}\n"
+        f"Сумма: {price:.2f} {invoice.currency} (+3%)\n"
         f"Срок: {plan_days} дней\n\n"
         f"Нажмите «Оплатить» для перехода к оплате через CryptoBot.\n"
         f"После оплаты нажмите «Проверить оплату»."
@@ -190,14 +192,14 @@ async def callback_pay_ton(
     user = await db.get_user(callback.from_user.id)
     comment = f"sub_{user.telegram_id}_{int(time.time())}"
 
-    await safe_edit(callback.message, pe("⏳ Получаем курс TON..."), parse_mode="HTML")
+    await safe_edit(callback.message, pe("⏳ Получаем курс GRAM(TON)..."), parse_mode="HTML")
 
     price = await db.get_price(plan_days)
     amount = await ton_service.calculate_ton_amount(price)
     if not amount:
         await safe_edit(
             callback.message,
-            pe("❌ Не удалось получить курс TON. Попробуйте позже."),
+            pe("❌ Не удалось получить курс GRAM(TON). Попробуйте позже."),
             parse_mode="HTML",
             reply_markup=payment_method_keyboard(show_platega=bool(config.PLATEGA_MERCHANT_ID and config.PLATEGA_SECRET)),
         )
@@ -216,8 +218,8 @@ async def callback_pay_ton(
     pay_url = ton_service.generate_payment_link(amount, comment)
 
     text = (
-        f"💠 Оплата подписки через TON\n\n"
-        f"Сумма: <b>{amount} TON</b> (≈ {price} USDT)\n"
+        f"💠 Оплата подписки через GRAM(TON)\n\n"
+        f"Сумма: <b>{amount} GRAM(TON)</b> (≈ {price} USDT)\n"
         f"Срок: {plan_days} дней\n\n"
         f"Кошелёк: <code>{config.TON_WALLET_ADDRESS}</code>\n"
         f"Комментарий: <code>{comment}</code>\n\n"
@@ -242,6 +244,11 @@ async def callback_check_ton_payment(
         await callback.answer("Платёж не найден", show_alert=True)
         return
 
+    user = await db.get_user(callback.from_user.id)
+    if not user or payment.user_id != user.id:
+        await callback.answer("⛔ Нет доступа к этому платежу", show_alert=True)
+        return
+
     if payment.status == "paid":
         await callback.answer("✅ Этот платёж уже обработан", show_alert=True)
         return
@@ -253,16 +260,15 @@ async def callback_check_ton_payment(
         if not updated:
             await callback.answer("✅ Этот платёж уже обработан", show_alert=True)
             return
-        user = await db.get_user(callback.from_user.id)
         if not user:
             await callback.answer("Ошибка: пользователь не найден", show_alert=True)
             return
         plan_days = getattr(payment, "plan_days", 30) or 30
 
-        if user.subscription_end and user.subscription_end > datetime.now():
+        if user.subscription_end and user.subscription_end > now_moscow():
             new_end = user.subscription_end + timedelta(days=plan_days)
         else:
-            new_end = datetime.now() + timedelta(days=plan_days)
+            new_end = now_moscow() + timedelta(days=plan_days)
 
         await db.update_subscription(user.id, new_end)
         if user.subscription_type == "free_ad":
@@ -296,6 +302,11 @@ async def callback_check_payment(
         await callback.answer("Платёж не найден", show_alert=True)
         return
 
+    user = await db.get_user(callback.from_user.id)
+    if not user or payment.user_id != user.id:
+        await callback.answer("⛔ Нет доступа к этому платежу", show_alert=True)
+        return
+
     if payment.status == "paid":
         await callback.answer("✅ Этот платёж уже обработан", show_alert=True)
         return
@@ -307,16 +318,15 @@ async def callback_check_payment(
         if not updated:
             await callback.answer("✅ Этот платёж уже обработан", show_alert=True)
             return
-        user = await db.get_user(callback.from_user.id)
         if not user:
             await callback.answer("Ошибка: пользователь не найден", show_alert=True)
             return
         plan_days = getattr(payment, "plan_days", 30) or 30
 
-        if user.subscription_end and user.subscription_end > datetime.now():
+        if user.subscription_end and user.subscription_end > now_moscow():
             new_end = user.subscription_end + timedelta(days=plan_days)
         else:
-            new_end = datetime.now() + timedelta(days=plan_days)
+            new_end = now_moscow() + timedelta(days=plan_days)
 
         await db.update_subscription(user.id, new_end)
         if user.subscription_type == "free_ad":
@@ -409,6 +419,11 @@ async def callback_check_platega_payment(
         await callback.answer("Платёж не найден", show_alert=True)
         return
 
+    user = await db.get_user(callback.from_user.id)
+    if not user or payment.user_id != user.id:
+        await callback.answer("⛔ Нет доступа к этому платежу", show_alert=True)
+        return
+
     if payment.status == "paid":
         await callback.answer("✅ Этот платёж уже обработан", show_alert=True)
         return
@@ -424,16 +439,15 @@ async def callback_check_platega_payment(
         if not updated:
             await callback.answer("✅ Этот платёж уже обработан", show_alert=True)
             return
-        user = await db.get_user(callback.from_user.id)
         if not user:
             await callback.answer("Ошибка: пользователь не найден", show_alert=True)
             return
         plan_days = getattr(payment, "plan_days", 30) or 30
 
-        if user.subscription_end and user.subscription_end > datetime.now():
+        if user.subscription_end and user.subscription_end > now_moscow():
             new_end = user.subscription_end + timedelta(days=plan_days)
         else:
-            new_end = datetime.now() + timedelta(days=plan_days)
+            new_end = now_moscow() + timedelta(days=plan_days)
 
         await db.update_subscription(user.id, new_end)
         if user.subscription_type == "free_ad":
@@ -476,7 +490,7 @@ async def callback_activate_free_tier(callback: CallbackQuery, db: Database):
         await callback.answer()
         return
 
-    has_paid = user.subscription_end and user.subscription_end > datetime.now()
+    has_paid = user.subscription_end and user.subscription_end > now_moscow()
     already_active = user.subscription_type == "free_ad" and not has_paid
 
     if has_paid:
@@ -512,7 +526,7 @@ async def callback_activate_free_tier_confirm(callback: CallbackQuery, db: Datab
         await callback.answer()
         return
 
-    has_paid = user.subscription_end and user.subscription_end > datetime.now()
+    has_paid = user.subscription_end and user.subscription_end > now_moscow()
     if has_paid:
         await callback.answer("✅ У вас активная подписка.", show_alert=True)
         return
@@ -569,16 +583,23 @@ async def process_promocode(message: Message, state: FSMContext, db: Database):
         await state.clear()
         return
 
-    if user.subscription_end and user.subscription_end > datetime.now():
+    if not await db.use_promocode(code, user.id, promo.id):
+        await message.answer(
+            pe("❌ Промокод уже использован или лимит исчерпан."),
+            parse_mode="HTML",
+            reply_markup=back_to_subscription_keyboard(),
+        )
+        await state.clear()
+        return
+
+    if user.subscription_end and user.subscription_end > now_moscow():
         new_end = user.subscription_end + timedelta(days=promo.duration_days)
     else:
-        new_end = datetime.now() + timedelta(days=promo.duration_days)
+        new_end = now_moscow() + timedelta(days=promo.duration_days)
 
     await db.update_subscription(user.id, new_end)
     if user.subscription_type == "free_ad":
         await db.deactivate_free_tier(user.id)
-    await db.use_promocode(code, user.id, promo.id)
-
     if promo.is_subscription:
         await db.create_paid_promo_payment(
             user_id=user.id,

@@ -24,6 +24,7 @@ from ..keyboards.inline import (
 from ..userbot.manager import UserbotManager, _parse_proxy, _DEVICE_POOL
 from ..config import config
 from ..services import CryptoBotService, TonPaymentService
+from ..utils.time_utils import now_moscow
 
 
 async def _test_proxy_connection(host: str, port: int) -> bool:
@@ -80,7 +81,7 @@ async def callback_accounts(callback: CallbackQuery, db: Database):
 @router.callback_query(F.data.startswith("account:"))
 async def callback_account_menu(callback: CallbackQuery, db: Database):
     account_id = int(callback.data.split(":")[1])
-    account = await db.get_account(account_id)
+    account = await db.get_account_for_user(account_id, callback.from_user.id)
 
     if not account:
         await callback.answer("Аккаунт не найден", show_alert=True)
@@ -114,9 +115,9 @@ async def callback_account_payment_methods(callback: CallbackQuery, db: Database
         ton_service_instance = TonPaymentService(config.TON_WALLET_ADDRESS, config.TONCENTER_API_KEY)
         ton_amount = await ton_service_instance.calculate_ton_amount(config.EXTRA_ACCOUNT_PRICE)
         ton_text = (
-            f"💠 TON — ~{ton_amount} TON (≈ {config.EXTRA_ACCOUNT_PRICE} USDT)"
+            f"💠 GRAM(TON) — ~{ton_amount} GRAM(TON) (≈ {config.EXTRA_ACCOUNT_PRICE} USDT)"
             if ton_amount
-            else f"💠 TON — ≈ {config.EXTRA_ACCOUNT_PRICE} USDT в TON"
+            else f"💠 GRAM(TON) — ≈ {config.EXTRA_ACCOUNT_PRICE} USDT в GRAM(TON)"
         )
         text = pe(
             f"➕ Добавление аккаунта\n\n"
@@ -138,7 +139,7 @@ async def callback_add_account(callback: CallbackQuery, state: FSMContext, db: D
     user = await db.get_user(callback.from_user.id)
     accounts_count = await db.count_user_accounts(user.id)
 
-    has_paid = user.subscription_end and user.subscription_end > datetime.now()
+    has_paid = user.subscription_end and user.subscription_end > now_moscow()
     account_limit = 1 if (user.subscription_type == "free_ad" and not has_paid) else config.FREE_ACCOUNTS_LIMIT
 
     if accounts_count >= account_limit:
@@ -146,9 +147,9 @@ async def callback_add_account(callback: CallbackQuery, state: FSMContext, db: D
             ton_service_instance = TonPaymentService(config.TON_WALLET_ADDRESS, config.TONCENTER_API_KEY)
             ton_amount = await ton_service_instance.calculate_ton_amount(config.EXTRA_ACCOUNT_PRICE)
             if ton_amount:
-                ton_text = f"💠 TON — ~{ton_amount} TON (≈ {config.EXTRA_ACCOUNT_PRICE} USDT)"
+                ton_text = f"💠 GRAM(TON) — ~{ton_amount} GRAM(TON) (≈ {config.EXTRA_ACCOUNT_PRICE} USDT)"
             else:
-                ton_text = f"💠 TON — ≈ {config.EXTRA_ACCOUNT_PRICE} USDT в TON"
+                ton_text = f"💠 GRAM(TON) — ≈ {config.EXTRA_ACCOUNT_PRICE} USDT в GRAM(TON)"
             text = pe(
                 f"➕ Добавление аккаунта\n\n"
                 f"⚠️ Вы достигли лимита в {account_limit} аккаунтов.\n\n"
@@ -200,6 +201,22 @@ async def _create_cryptobot_account_payment(callback: CallbackQuery, db: Databas
         )
         return
 
+    user = await db.get_user(callback.from_user.id)
+    if not user:
+        await callback.message.edit_text(
+            pe("❌ Пользователь не найден. Попробуйте начать заново."),
+            parse_mode="HTML",
+            reply_markup=main_menu_keyboard(),
+        )
+        return
+    await db.create_payment(
+        user_id=user.id,
+        invoice_id=invoice.invoice_id,
+        amount=invoice.amount,
+        currency=invoice.currency,
+        payment_method="cryptobot",
+    )
+
     text = pe(
         f"➕ Добавление аккаунта\n\n"
         f"⚠️ Вы достигли лимита в {account_limit} аккаунтов.\n\n"
@@ -229,12 +246,12 @@ async def callback_pay_account_ton(
     user = await db.get_user(callback.from_user.id)
     comment = f"acc_{user.telegram_id}_{int(time.time())}"
 
-    await callback.message.edit_text(pe("⏳ Получаем курс TON..."), parse_mode="HTML")
+    await callback.message.edit_text(pe("⏳ Получаем курс GRAM(TON)..."), parse_mode="HTML")
 
     amount = await ton_service.calculate_ton_amount(config.EXTRA_ACCOUNT_PRICE)
     if not amount:
         await callback.message.edit_text(
-            pe("❌ Не удалось получить курс TON. Попробуйте позже."),
+            pe("❌ Не удалось получить курс GRAM(TON). Попробуйте позже."),
             parse_mode="HTML",
             reply_markup=account_payment_method_keyboard(),
         )
@@ -252,8 +269,8 @@ async def callback_pay_account_ton(
     pay_url = ton_service.generate_payment_link(amount, comment)
 
     text = pe(
-        f"💠 Оплата дополнительного аккаунта через TON\n\n"
-        f"Сумма: <b>{amount} TON</b> (≈ {config.EXTRA_ACCOUNT_PRICE} USDT)\n\n"
+        f"💠 Оплата дополнительного аккаунта через GRAM(TON)\n\n"
+        f"Сумма: <b>{amount} GRAM(TON)</b> (≈ {config.EXTRA_ACCOUNT_PRICE} USDT)\n\n"
         f"Кошелёк: <code>{config.TON_WALLET_ADDRESS}</code>\n"
         f"Комментарий: <code>{comment}</code>\n\n"
         f"Нажмите кнопку ниже для оплаты через Tonkeeper.\n"
@@ -279,6 +296,11 @@ async def callback_check_ton_account(
         await callback.answer("Платёж не найден", show_alert=True)
         return
 
+    user = await db.get_user(callback.from_user.id)
+    if not user or payment.user_id != user.id:
+        await callback.answer("⛔ Нет доступа к этому платежу", show_alert=True)
+        return
+
     if payment.status == "paid":
         await callback.answer("✅ Этот платёж уже обработан", show_alert=True)
         return
@@ -289,9 +311,11 @@ async def callback_check_ton_account(
         await callback.answer("❌ Оплата ещё не получена. Попробуйте позже.", show_alert=True)
         return
 
-    await db.update_payment_status(comment, "paid")
+    updated = await db.update_payment_status(comment, "paid")
+    if not updated:
+        await callback.answer("✅ Этот платёж уже обработан", show_alert=True)
+        return
 
-    user = await db.get_user(callback.from_user.id)
     accounts_count = await db.count_user_accounts(user.id)
 
     text = pe(
@@ -313,6 +337,14 @@ async def callback_check_ton_account(
 @router.callback_query(F.data.startswith("check_account_payment:"))
 async def callback_check_account_payment(callback: CallbackQuery, state: FSMContext, db: Database):
     invoice_id = callback.data.split(":")[1]
+    payment = await db.get_payment_by_invoice(invoice_id)
+    user = await db.get_user(callback.from_user.id)
+    if not payment or not user or payment.user_id != user.id:
+        await callback.answer("⛔ Платёж не найден", show_alert=True)
+        return
+    if payment.status == "paid":
+        await callback.answer("✅ Этот платёж уже обработан", show_alert=True)
+        return
     crypto_service = CryptoBotService(config.CRYPTOBOT_TOKEN, config.CRYPTOBOT_TESTNET)
     paid = await crypto_service.check_invoice_paid(invoice_id)
 
@@ -320,7 +352,11 @@ async def callback_check_account_payment(callback: CallbackQuery, state: FSMCont
         await callback.answer("❌ Оплата ещё не получена. Попробуйте позже.", show_alert=True)
         return
 
-    user = await db.get_user(callback.from_user.id)
+    updated = await db.update_payment_status(invoice_id, "paid")
+    if not updated:
+        await callback.answer("✅ Этот платёж уже обработан", show_alert=True)
+        return
+
     accounts_count = await db.count_user_accounts(user.id)
     remaining = config.FREE_ACCOUNTS_LIMIT - accounts_count
     if remaining < 0:
@@ -528,7 +564,7 @@ async def _connect_and_send_code(message: Message, state: FSMContext, data: dict
 
         await state.update_data(client=client, entered_code="", phone_code_hash=sent.phone_code_hash)
         await status_msg.delete()
-        await message.answer(
+        code_message = await message.answer(
             pe("📱 Код отправлен!\n\n"
             "📲 Проверьте приложение Telegram на других ваших устройствах или Telegram Web — "
             "код придёт туда.\n\n"
@@ -537,6 +573,7 @@ async def _connect_and_send_code(message: Message, state: FSMContext, data: dict
             parse_mode="HTML",
             reply_markup=code_input_keyboard(),
         )
+        await state.update_data(code_message_id=code_message.message_id)
         await state.set_state(AddAccountStates.waiting_code)
 
     except asyncio.TimeoutError:
@@ -615,17 +652,11 @@ async def process_phone(
 
 @router.message(AddAccountStates.waiting_code)
 async def process_code(message: Message, state: FSMContext, db: Database):
-    data = await state.get_data()
-    current_code = data.get("entered_code", "")
-    display = _format_code_display(current_code)
-
-    await message.answer(
-        pe("⚠️ Используйте кнопки для ввода кода!\n\n"
-        f"🔢 Введите код с помощью кнопок:\n\n"
-        f"Код: {display}"),
-        parse_mode="HTML",
-        reply_markup=code_input_keyboard(),
-    )
+    code = (message.text or "").strip()
+    if not code.isdigit() or len(code) < 5:
+        return
+    await state.update_data(entered_code=code)
+    await _confirm_code(message, state, db)
 
 
 @router.message(AddAccountStates.waiting_password)
@@ -775,12 +806,29 @@ async def callback_code_clear(callback: CallbackQuery, state: FSMContext):
     await callback.answer("Код очищен")
 
 
+async def _edit_code_message(event, state: FSMContext, text: str, **kwargs):
+    if isinstance(event, CallbackQuery):
+        return await event.message.edit_text(text, **kwargs)
+    data = await state.get_data()
+    message_id = data.get("code_message_id")
+    if message_id:
+        return await event.bot.edit_message_text(
+            chat_id=event.chat.id, message_id=message_id, text=text, **kwargs
+        )
+
+
 @router.callback_query(F.data == "code_confirm")
 async def callback_code_confirm(callback: CallbackQuery, state: FSMContext, db: Database):
+    await _confirm_code(callback, state, db)
+
+
+async def _confirm_code(event, state: FSMContext, db: Database):
+    user_id = event.from_user.id
     current_state = await state.get_state()
     valid_states = [AddAccountStates.waiting_code.state]
     if current_state not in valid_states:
-        await callback.answer("Сессия ввода кода истекла", show_alert=True)
+        if isinstance(event, CallbackQuery):
+            await event.answer("Сессия ввода кода истекла", show_alert=True)
         return
 
     data = await state.get_data()
@@ -788,24 +836,25 @@ async def callback_code_confirm(callback: CallbackQuery, state: FSMContext, db: 
     client = data.get("client")
 
     if not code:
-        await callback.answer("Введите код!", show_alert=True)
+        if isinstance(event, CallbackQuery):
+            await event.answer("Введите код!", show_alert=True)
         return
 
     if len(code) < 5:
-        await callback.answer("Код должен содержать 5 цифр!", show_alert=True)
+        if isinstance(event, CallbackQuery):
+            await event.answer("Код должен содержать 5 цифр!", show_alert=True)
         return
 
     if not client:
-        await callback.message.edit_text(
+        await _edit_code_message(event, state,
             pe("❌ Сессия истекла. Начните заново."),
             parse_mode="HTML",
             reply_markup=main_menu_keyboard(),
         )
         await state.clear()
-        await callback.answer()
         return
 
-    await callback.message.edit_text(pe("⏳ Проверяем код..."), parse_mode="HTML")
+    await _edit_code_message(event, state, pe("⏳ Проверяем код..."), parse_mode="HTML")
 
     try:
         await client.sign_in(data["phone"], code)
@@ -813,7 +862,7 @@ async def callback_code_confirm(callback: CallbackQuery, state: FSMContext, db: 
         session_string = client.session.save()
         await client.disconnect()
 
-        user = await db.get_user(callback.from_user.id)
+        user = await db.get_user(user_id)
         account_id = await db.create_account(
             user_id=user.id,
             phone=data["phone"],
@@ -825,9 +874,9 @@ async def callback_code_confirm(callback: CallbackQuery, state: FSMContext, db: 
         if proxy_str and account_id:
             await db.update_account_proxy(account_id, proxy_str)
 
-        user = await db.get_user(callback.from_user.id)
+        user = await db.get_user(user_id)
         accounts = await db.get_user_accounts(user.id)
-        await callback.message.edit_text(
+        await _edit_code_message(event, state,
             pe(f"✅ Аккаунт {data['phone']} успешно добавлен!"),
             parse_mode="HTML",
             reply_markup=accounts_keyboard(accounts),
@@ -838,29 +887,29 @@ async def callback_code_confirm(callback: CallbackQuery, state: FSMContext, db: 
         error_str = str(e).lower()
         if "two-step" in error_str or "password" in error_str:
             await state.set_state(AddAccountStates.waiting_password)
-            await callback.message.edit_text(
+            await _edit_code_message(event, state,
                 pe("🔐 Требуется пароль двухфакторной аутентификации.\n\nВведите пароль:"),
                 parse_mode="HTML",
                 reply_markup=cancel_keyboard(),
             )
         else:
             await client.disconnect()
-            user = await db.get_user(callback.from_user.id)
+            user = await db.get_user(user_id)
             accounts = await db.get_user_accounts(user.id)
-            await callback.message.edit_text(
+            await _edit_code_message(event, state,
                 pe(f"❌ Ошибка авторизации: {e}"),
                 parse_mode="HTML",
                 reply_markup=accounts_keyboard(accounts),
             )
             await state.clear()
 
-    await callback.answer()
-
+    if isinstance(event, CallbackQuery):
+        await event.answer()
 
 @router.callback_query(F.data.startswith("delete_account:"))
 async def callback_delete_account(callback: CallbackQuery, db: Database):
     account_id = int(callback.data.split(":")[1])
-    account = await db.get_account(account_id)
+    account = await db.get_account_for_user(account_id, callback.from_user.id)
 
     if not account:
         await callback.answer("Аккаунт не найден", show_alert=True)
@@ -879,7 +928,7 @@ async def callback_confirm_delete_account(
     callback: CallbackQuery, db: Database, userbot_manager: UserbotManager
 ):
     account_id = int(callback.data.split(":")[1])
-    account = await db.get_account(account_id)
+    account = await db.get_account_for_user(account_id, callback.from_user.id)
     user = await db.get_user(callback.from_user.id)
     if not account or account.user_id != user.id:
         await callback.answer("⛔ Нет доступа", show_alert=True)
@@ -899,8 +948,11 @@ async def callback_confirm_delete_account(
 
 
 @router.callback_query(F.data.startswith("rename_account:"))
-async def callback_rename_account(callback: CallbackQuery, state: FSMContext):
+async def callback_rename_account(callback: CallbackQuery, state: FSMContext, db: Database):
     account_id = int(callback.data.split(":")[1])
+    if not await db.get_account_for_user(account_id, callback.from_user.id):
+        await callback.answer("⛔ Нет доступа", show_alert=True)
+        return
     await state.update_data(account_id=account_id)
     await state.set_state(RenameAccountStates.waiting_name)
     await callback.message.edit_text(
@@ -927,10 +979,14 @@ async def process_rename_account(message: Message, state: FSMContext, db: Databa
         await message.answer(pe("❌ Сессия устарела. Начните заново."), parse_mode="HTML")
         await state.clear()
         return
+    if not await db.get_account_for_user(account_id, message.from_user.id):
+        await state.clear()
+        await message.answer("⛔ Нет доступа", parse_mode="HTML")
+        return
     await db.update_account_name(account_id, name)
     await state.clear()
 
-    account = await db.get_account(account_id)
+    account = await db.get_account_for_user(account_id, message.from_user.id)
     await message.answer(
         pe(f"✅ Аккаунт переименован: <b>{name}</b>"),
         parse_mode="HTML",
@@ -962,7 +1018,7 @@ async def callback_pay_account_card(callback: CallbackQuery):
 @router.callback_query(F.data.startswith("set_proxy:"))
 async def callback_set_proxy(callback: CallbackQuery, state: FSMContext, db: Database):
     account_id = int(callback.data.split(":")[1])
-    account = await db.get_account(account_id)
+    account = await db.get_account_for_user(account_id, callback.from_user.id)
     if not account:
         await callback.answer("Аккаунт не найден", show_alert=True)
         return
@@ -994,11 +1050,15 @@ async def process_set_proxy(message: Message, state: FSMContext, db: Database, u
         await message.answer(pe("❌ Сессия устарела. Начните заново."), parse_mode="HTML")
         await state.clear()
         return
+    if not await db.get_account_for_user(account_id, message.from_user.id):
+        await state.clear()
+        await message.answer("⛔ Нет доступа", parse_mode="HTML")
+        return
 
     if text.lower() in ("удалить", "remove", "delete"):
         await db.update_account_proxy(account_id, None)
         await state.clear()
-        account = await db.get_account(account_id)
+        account = await db.get_account_for_user(account_id, message.from_user.id)
         # Restart client without proxy
         await userbot_manager.stop_client(account_id)
         if account:
@@ -1049,7 +1109,7 @@ async def process_set_proxy(message: Message, state: FSMContext, db: Database, u
     await db.update_account_proxy(account_id, text)
     await state.clear()
 
-    account = await db.get_account(account_id)
+    account = await db.get_account_for_user(account_id, message.from_user.id)
     # Restart client with new proxy
     await userbot_manager.stop_client(account_id)
     if account:
@@ -1065,7 +1125,7 @@ async def process_set_proxy(message: Message, state: FSMContext, db: Database, u
 @router.callback_query(F.data.startswith("toggle_sponsor_sub:"))
 async def callback_toggle_sponsor_sub(callback: CallbackQuery, db: Database):
     account_id = int(callback.data.split(":")[1])
-    account = await db.get_account(account_id)
+    account = await db.get_account_for_user(account_id, callback.from_user.id)
     if not account:
         await callback.answer("Аккаунт не найден", show_alert=True)
         return
@@ -1075,7 +1135,7 @@ async def callback_toggle_sponsor_sub(callback: CallbackQuery, db: Database):
     status = "включена" if new_val else "выключена"
     await callback.answer(f"Автоподписка на спонсоров {status}")
 
-    account = await db.get_account(account_id)
+    account = await db.get_account_for_user(account_id, callback.from_user.id)
     ar_status = "✅ Включён" if account.autoresponder_enabled else "❌ Выключен"
     gr_status = "✅ Включён" if account.group_autoresponder_enabled else "❌ Выключен"
     proxy_status = f"🌐 {account.proxy}" if account.proxy else "🌐 Прокси: не настроен"

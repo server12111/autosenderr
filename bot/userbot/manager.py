@@ -71,7 +71,9 @@ class UserbotManager:
         self._group_reply_handler: Optional[Callable] = None
         self._bot_notify_callback: Optional[Callable] = None
         self._monitor_task: Optional[asyncio.Task] = None
+        self._startup_task: Optional[asyncio.Task] = None
         self._sponsor_check_handler: Optional[Callable] = None
+        self._client_locks: dict[int, asyncio.Lock] = {}
 
     def set_message_handler(self, handler: Callable):
         self._message_handler = handler
@@ -86,6 +88,11 @@ class UserbotManager:
         self._sponsor_check_handler = handler
 
     async def start_client(self, account: Account) -> Optional[TelegramClient]:
+        lock = self._client_locks.setdefault(account.id, asyncio.Lock())
+        async with lock:
+            return await self._start_client_unlocked(account)
+
+    async def _start_client_unlocked(self, account: Account) -> Optional[TelegramClient]:
         if account.id in self._clients:
             client = self._clients[account.id]
             if client.is_connected():
@@ -160,7 +167,9 @@ class UserbotManager:
             return client
 
         except _BAN_ERRORS as e:
-            await self._handle_account_problem(account.id, e)
+            # _start_client_unlocked() is called while the account lock is held.
+            # Do not acquire the same lock again from the failure handler.
+            await self._handle_account_problem(account.id, e, lock_held=True)
             try:
                 if client is not None:
                     await client.disconnect()
@@ -207,12 +216,13 @@ class UserbotManager:
             return None
 
     async def stop_client(self, account_id: int):
-        if account_id in self._clients:
-            client = self._clients[account_id]
-            await client.disconnect()
-            del self._clients[account_id]
-            self._me_ids.pop(account_id, None)
-            logger.info(f"Stopped client for account {account_id}")
+        lock = self._client_locks.setdefault(account_id, asyncio.Lock())
+        async with lock:
+            client = self._clients.pop(account_id, None)
+            if client:
+                await client.disconnect()
+                self._me_ids.pop(account_id, None)
+                logger.info(f"Stopped client for account {account_id}")
 
     async def logout_and_stop(self, account):
         if account.id in self._clients:
@@ -251,6 +261,8 @@ class UserbotManager:
 
     def start_monitor(self):
         """Start background health-check loop for all connected accounts."""
+        if self._monitor_task and not self._monitor_task.done():
+            return
         self._monitor_task = asyncio.create_task(self._monitor_loop())
         logger.info("Account monitor started")
 
@@ -285,7 +297,7 @@ class UserbotManager:
                 logger.error(f"Monitor loop iteration failed: {e}", exc_info=True)
                 await asyncio.sleep(30)
 
-    async def _handle_account_problem(self, account_id: int, error: Exception):
+    async def _handle_account_problem(self, account_id: int, error: Exception, *, lock_held: bool = False):
         """Mark account inactive and notify owner."""
         error_name = type(error).__name__
 
@@ -306,9 +318,27 @@ class UserbotManager:
         except Exception as e:
             logger.error(f"Failed to deactivate account {account_id}: {e}")
 
-        # Remove from active clients
-        self._clients.pop(account_id, None)
-        self._me_ids.pop(account_id, None)
+        # Remove from active clients under the same lock used by start_client.
+        # start_client() already owns it when this method is called from its
+        # exception path, so acquiring it again there would deadlock.
+        lock = self._client_locks.setdefault(account_id, asyncio.Lock())
+        if lock_held:
+            old_client = self._clients.pop(account_id, None)
+            self._me_ids.pop(account_id, None)
+            if old_client:
+                try:
+                    await old_client.disconnect()
+                except Exception:
+                    logger.warning("Failed to disconnect broken client for account %s", account_id)
+        else:
+            async with lock:
+                old_client = self._clients.pop(account_id, None)
+                self._me_ids.pop(account_id, None)
+                if old_client:
+                    try:
+                        await old_client.disconnect()
+                    except Exception:
+                        logger.warning("Failed to disconnect broken client for account %s", account_id)
 
         # Notify owner
         if self._bot_notify_callback:
@@ -348,15 +378,24 @@ class UserbotManager:
 
         if background:
             def _on_startup_done(t: asyncio.Task):
-                if not t.cancelled() and t.exception():
-                    logger.error(f"Account startup task failed: {t.exception()}", exc_info=t.exception())
+                if not t.cancelled():
+                    exc = t.exception()
+                    if exc:
+                        logger.error(
+                            f"Account startup task failed: {exc}",
+                            exc_info=(type(exc), exc, exc.__traceback__),
+                        )
 
-            task = asyncio.create_task(_run_all(), name="startup_clients")
-            task.add_done_callback(_on_startup_done)
+            self._startup_task = asyncio.create_task(_run_all(), name="startup_clients")
+            self._startup_task.add_done_callback(_on_startup_done)
         else:
             await _run_all()
 
     async def stop_all_clients(self):
+        if self._startup_task and not self._startup_task.done():
+            self._startup_task.cancel()
+            await asyncio.gather(self._startup_task, return_exceptions=True)
+        self._startup_task = None
         for account_id in list(self._clients.keys()):
             await self.stop_client(account_id)
 

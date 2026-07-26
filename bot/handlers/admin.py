@@ -1,4 +1,5 @@
 import io
+import asyncio
 import os
 import shutil
 import tempfile
@@ -37,6 +38,7 @@ from ..keyboards.inline import (
 )
 from ..config import config
 from ..utils.premium_emoji import pe
+from ..utils.time_utils import now_moscow
 
 router = Router()
 
@@ -60,6 +62,42 @@ class AdminStates(StatesGroup):
 
 def is_admin(user_id: int) -> bool:
     return user_id in config.ADMIN_IDS
+
+
+_ERROR_LABELS = {
+    "FloodWait": "Telegram временно ограничил отправку (FloodWait)",
+    "ChatWriteForbiddenError": "Telegram запретил отправку сообщений в этот чат",
+    "UserBannedInChannelError": "Аккаунт заблокирован в этом чате",
+    "ChatAdminRequiredError": "Для этого действия нужны права администратора",
+    "PeerFlood": "Аккаунт получил SpamBlock/PeerFlood",
+    "PeerFloodError": "Аккаунт получил SpamBlock/PeerFlood",
+    "UserDeactivatedError": "Аккаунт деактивирован Telegram",
+    "AuthKeyUnregisteredError": "Сессия аккаунта отозвана Telegram",
+    "SessionRevokedError": "Сессия аккаунта отозвана Telegram",
+    "SlowModeWaitError": "В чате включён медленный режим; Telegram требует подождать",
+    "ChatSendMediaForbiddenError": "Telegram запретил отправку медиа в этом чате",
+    "ChatGuestSendForbiddenError": "Гостевому аккаунту запрещена отправка сообщений в этом чате",
+    "RightForbiddenError": "У аккаунта недостаточно прав для этого действия",
+    "UserDeactivatedBanError": "Аккаунт заблокирован Telegram",
+    "AuthKeyDuplicatedError": "Сессия отозвана из-за дублирования ключа авторизации",
+    "UserNotParticipantError": "Аккаунт не состоит в этом чате",
+    "ChatIdInvalidError": "Telegram не распознал указанный чат",
+    "ChannelInvalidError": "Telegram не распознал канал или чат",
+    "ChannelPrivateError": "Чат или канал приватный, и аккаунт не имеет доступа",
+    "PeerIdInvalidError": "Telegram не распознал получателя",
+    "UsernameInvalidError": "Указан некорректный username чата",
+    "UsernameNotOccupiedError": "Чат с таким username не найден",
+    "MessageTooLongError": "Telegram отклонил сообщение: превышена допустимая длина",
+    "UserIsBlockedError": "Получатель заблокировал аккаунт",
+    "InputUserDeactivatedError": "Пользователь деактивирован Telegram",
+}
+
+
+def _error_label(error_type: str) -> str:
+    for key, label in _ERROR_LABELS.items():
+        if key in error_type:
+            return label
+    return error_type
 
 
 @router.message(Command("admin"))
@@ -115,22 +153,22 @@ def _build_chart_image(data: list, title: str) -> io.BytesIO | None:
 
 
 async def _send_stats(callback: CallbackQuery, db: Database, period: str, bot):
-    users = await db.get_all_users()
-    total_users = len(users)
-    now = datetime.now()
-    active_subs = sum(1 for u in users if u.subscription_end and u.subscription_end > now)
-    accounts = await db.get_all_active_accounts()
-    mailings = await db.get_active_mailings()
-    total_mailings = await db.count_all_mailings()
-    revenue = await db.get_revenue_by_currency()
-    paid_subs = await db.count_paid_subscriptions()
+    dashboard = await db.get_dashboard_stats()
+    revenue, chart_data = await asyncio.gather(
+        db.get_revenue_by_currency(), db.get_registrations_by_period(period)
+    )
+    total_users = dashboard["total_users"]
+    active_subs = dashboard["active_subs"]
+    total_mailings = dashboard["total_mailings"]
+    paid_subs = dashboard["paid_subs"]
 
     revenue_parts = [f"{amt:.2f} {cur}" for cur, amt in revenue.items() if amt > 0]
     revenue_line = " | ".join(revenue_parts) if revenue_parts else "0.00 USDT"
 
-    chart_data = await db.get_registrations_by_period(period)
     period_label = _PERIOD_LABELS.get(period, period)
-    chart_buf = _build_chart_image(chart_data, f"Новые пользователи — {period_label}")
+    chart_buf = await asyncio.to_thread(
+        _build_chart_image, chart_data, f"Новые пользователи — {period_label}"
+    )
 
     caption = pe(
         f"📊 <b>Статистика бота</b> — {period_label}\n\n"
@@ -138,8 +176,8 @@ async def _send_stats(callback: CallbackQuery, db: Database, period: str, bot):
         f"✅ Активных подписок: <b>{active_subs}</b>\n"
         f"💰 Продано подписок: <b>{paid_subs}</b>\n"
         f"💵 Доход: <b>{revenue_line}</b>\n\n"
-        f"📱 Аккаунтов: <b>{len(accounts)}</b>\n"
-        f"📋 Активных рассылок: <b>{len(mailings)}</b>\n"
+        f"📱 Аккаунтов: <b>{dashboard['accounts']}</b>\n"
+        f"📋 Активных рассылок: <b>{dashboard['active_mailings']}</b>\n"
         f"📋 Всего рассылок: <b>{total_mailings}</b>"
     )
 
@@ -200,15 +238,15 @@ async def callback_admin_sub_stats(callback: CallbackQuery, db: Database):
         "💳 <b>Статистика подписок</b>\n\n"
         "<b>За неделю:</b>\n"
         f"  💎 CryptoBot: {cb['week_count']} шт. — {cb['week_amount']:.2f} USDT\n"
-        f"  💠 TON:        {ton['week_count']} шт. — {ton['week_amount']:.2f} TON\n"
+        f"  💠 GRAM(TON):  {ton['week_count']} шт. — {ton['week_amount']:.2f} GRAM(TON)\n"
         f"  🇷🇺 Platega:  {plat['week_count']} шт. — {plat['week_amount']:.0f} ₽\n\n"
         "<b>За месяц:</b>\n"
         f"  💎 CryptoBot: {cb['month_count']} шт. — {cb['month_amount']:.2f} USDT\n"
-        f"  💠 TON:        {ton['month_count']} шт. — {ton['month_amount']:.2f} TON\n"
+        f"  💠 GRAM(TON):  {ton['month_count']} шт. — {ton['month_amount']:.2f} GRAM(TON)\n"
         f"  🇷🇺 Platega:  {plat['month_count']} шт. — {plat['month_amount']:.0f} ₽\n\n"
         "<b>Всего:</b>\n"
         f"  💎 CryptoBot: {cb['total_count']} шт. — {cb['total_amount']:.2f} USDT\n"
-        f"  💠 TON:        {ton['total_count']} шт. — {ton['total_amount']:.2f} TON\n"
+        f"  💠 GRAM(TON):  {ton['total_count']} шт. — {ton['total_amount']:.2f} GRAM(TON)\n"
         f"  🇷🇺 Platega:  {plat['total_count']} шт. — {plat['total_amount']:.0f} ₽"
     )
 
@@ -218,7 +256,7 @@ async def callback_admin_sub_stats(callback: CallbackQuery, db: Database):
 
 _METHOD_LABELS = {
     "cryptobot": ("💎 CryptoBot", "USDT", ".2f"),
-    "ton":       ("💠 TON",       "TON",  ".2f"),
+    "ton":       ("💠 GRAM(TON)", "GRAM(TON)", ".2f"),
     "platega":   ("🇷🇺 Platega (СБП)", "₽", ".0f"),
 }
 
@@ -961,7 +999,7 @@ async def callback_admin_export_db(callback: CallbackQuery, db: Database):
             await src.execute(f"VACUUM INTO '{tmp}'")
         await callback.message.answer_document(
             FSInputFile(tmp, filename="bot_backup.db"),
-            caption=f"📦 Резервная копия БД\n🕐 {datetime.now().strftime('%d.%m.%Y %H:%M')}",
+            caption=f"📦 Резервная копия БД\n🕐 {now_moscow().strftime('%d.%m.%Y %H:%M')}",
         )
     finally:
         if os.path.exists(tmp):
@@ -1145,7 +1183,7 @@ async def _build_diag_text(telegram_id: int, db) -> Optional[tuple]:
         return None
 
     user = diag["user"]
-    now = datetime.now()
+    now = now_moscow()
 
     if user.subscription_end:
         is_active_sub = user.subscription_end > now
@@ -1257,7 +1295,7 @@ async def callback_admin_user_errors(callback: CallbackQuery, db: Database):
         text = pe(f"📋 <b>История ошибок</b> (последние {len(errors)})\n\nID: <code>{telegram_id}</code>\n\n")
         for err in errors:
             time_str = err.created_at.strftime("%d.%m %H:%M") if err.created_at else "?"
-            parts = [f"❌ <b>{err.error_type}</b>"]
+            parts = [f"❌ <b>{_error_label(err.error_type)}</b>"]
             if err.error_text:
                 parts.append(f"  {err.error_text[:80]}")
             if err.account_display:
@@ -1306,7 +1344,7 @@ async def callback_admin_subscriptions(callback: CallbackQuery, db: Database, bo
         except Exception:
             pass
 
-    now = datetime.now()
+    now = now_moscow()
     text = pe(f"💳 <b>Подписки ({total} пользователей)</b>\n\n")
 
     for row in chunk:

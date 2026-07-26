@@ -43,6 +43,7 @@ CREATE TABLE IF NOT EXISTS mailings (
     active_hours_json TEXT,
     last_sent_at DATETIME,
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    hidden_tag_enabled INTEGER DEFAULT 0,
     FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
     FOREIGN KEY (account_id) REFERENCES accounts(id) ON DELETE CASCADE
 );
