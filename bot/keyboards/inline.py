@@ -314,6 +314,8 @@ def delete_mailing_confirm_keyboard(mailing_id: int) -> InlineKeyboardMarkup:
 def _msg_button_preview(msg: MailingMessage) -> str:
     if msg.is_forward:
         return f"[Переслано] {msg.forward_peer} #{msg.forward_msg_id}"
+    if msg.is_dice:
+        return f"[Эмодзи] {msg.text}"
     if msg.video_path:
         text = _strip_html(msg.text or "")
         preview = text[:25] + "..." if len(text) > 25 else text
@@ -332,7 +334,7 @@ def mailing_messages_keyboard(mailing_id: int, messages: list[MailingMessage]) -
         preview = _msg_button_preview(msg)
         builder.row(_btn(f"🗑️ {preview}", callback_data=f"delete_msg:{msg.id}", style="danger"))
     builder.row(
-        _btn("➕ Текст/фото/видео", callback_data=f"add_mailing_message:{mailing_id}", style="primary"),
+        _btn("➕ Текст/фото/видео/эмодзи", callback_data=f"add_mailing_message:{mailing_id}", style="primary"),
         _btn("📨 Переслать", callback_data=f"add_mailing_forward:{mailing_id}", style="primary"),
     )
     builder.row(_btn("◀️ Назад", callback_data=f"mailing:{mailing_id}", style="primary"))
@@ -364,7 +366,7 @@ def photo_collection_keyboard(mailing_id: int, photo_count: int, is_create: bool
 def _format_target_interval(target: MailingTarget) -> str:
     secs = target.interval_seconds
     if secs is None:
-        return "⏱️ Умолч."
+        return "⏱️ —"
     if secs >= 3600:
         return f"⏱️ {secs // 3600}ч"
     elif secs >= 60:
@@ -443,7 +445,7 @@ def mailing_creation_messages_keyboard(mailing_id: int, messages: list[MailingMe
         preview = _msg_button_preview(msg)
         builder.row(_btn(f"🗑️ {preview}", callback_data=f"create_delete_msg:{msg.id}", style="danger"))
     builder.row(
-        _btn("➕ Текст/фото", callback_data=f"create_add_message:{mailing_id}", style="primary"),
+        _btn("➕ Текст/фото/видео/эмодзи", callback_data=f"create_add_message:{mailing_id}", style="primary"),
         _btn("📨 Переслать", callback_data=f"create_add_forward:{mailing_id}", style="primary"),
     )
     if messages:
@@ -663,16 +665,40 @@ def admin_keyboard() -> InlineKeyboardMarkup:
         _btn("💸 Запросы вывода", callback_data="admin_withdrawals", style="primary"),
     )
     builder.row(
-        _btn("💳 Подписки", callback_data="admin_subscriptions", style="primary"),
+        _btn("🆓 Бесплатный тариф", callback_data="admin_free_tier", style="primary"),
     )
     builder.row(
         _btn("🔍 Диагностика", callback_data="admin_diagnostics", style="primary"),
     )
     builder.row(
         _btn("📤 Экспорт БД", callback_data="admin_export_db", style="primary"),
+        _btn("📥 Импорт БД", callback_data="admin_import_db", style="primary"),
     )
-    builder.row(_btn("📥 Импорт БД", callback_data="admin_import_db", style="primary"))
     builder.row(_btn("◀️ Главное меню", callback_data="main_menu", style="primary"))
+    return builder.as_markup()
+
+
+def admin_free_tier_keyboard() -> InlineKeyboardMarkup:
+    builder = InlineKeyboardBuilder()
+    builder.row(_btn("💬 Чаты", callback_data="admin_free_chats:0", style="primary"))
+    builder.row(_btn("◀️ Назад", callback_data="admin_back", style="primary"))
+    return builder.as_markup()
+
+
+def admin_free_chats_keyboard(page: int, has_next: bool) -> InlineKeyboardMarkup:
+    builder = InlineKeyboardBuilder()
+    navigation = []
+    if page > 0:
+        navigation.append(
+            _btn("⬅️ Назад", callback_data=f"admin_free_chats:{page - 1}", style="primary")
+        )
+    if has_next:
+        navigation.append(
+            _btn("➡️ Далее", callback_data=f"admin_free_chats:{page + 1}", style="primary")
+        )
+    if navigation:
+        builder.row(*navigation)
+    builder.row(_btn("◀️ К статистике", callback_data="admin_free_tier", style="primary"))
     return builder.as_markup()
 
 

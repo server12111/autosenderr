@@ -1,3 +1,4 @@
+import html
 import os
 
 from aiogram import Router, F
@@ -26,7 +27,10 @@ async def check_channels_subscription(bot, user_id: int, channels) -> list:
     for ch in channels:
         try:
             member = await bot.get_chat_member(ch.channel_id, user_id)
-            if member.status in ("left", "kicked", "restricted"):
+            if member.status in ("left", "kicked") or (
+                member.status == "restricted"
+                and not getattr(member, "is_member", False)
+            ):
                 not_subscribed.append(ch)
         except Exception:
             not_subscribed.append(ch)
@@ -84,7 +88,7 @@ async def cmd_start(message: Message, db: Database, state: FSMContext):
             return
 
     text = pe(
-        f"👋 Привет, <b>{message.from_user.first_name}</b>!\n\n"
+        f"👋 Привет, <b>{html.escape(message.from_user.first_name)}</b>!\n\n"
         "Добро пожаловать в <b>AutoSender</b> — инструмент для автоматических рассылок через Telegram-аккаунты.\n\n"
         "⚡️ <b>Что умеет бот:</b>\n"
         "• Рассылка сообщений по чатам и группам\n"
@@ -185,7 +189,7 @@ async def callback_help(callback: CallbackQuery, db: Database):
         "<b>📋 Рассылки</b> — рассылай сообщения по чатам и группам\n"
         "• Текст, фото, пересылка сообщений\n"
         "• Расписание по времени и интервалам\n"
-        "• Несколько аккаунтов на одну рассылку\n\n"
+        "• Выбор аккаунта для каждой рассылки\n\n"
         "<b>👤 Аккаунты</b> — добавляй Telegram-аккаунты\n"
         "• Поддержка прокси SOCKS5\n"
         "• Автоответчик в ЛС и группах\n\n"
@@ -265,7 +269,7 @@ async def callback_cancel(callback: CallbackQuery, state: FSMContext, db: Databa
         account = await db.get_account(account_id) if account_id else None
         if account:
             await _edit(
-                pe(f"📱 Аккаунт: {account.display_name}\n\nВыберите действие:"),
+                pe(f"📱 Аккаунт: {html.escape(account.display_name)}\n\nВыберите действие:"),
                 account_menu_keyboard(account_id, account.auto_subscribe_sponsors),
             )
         else:
@@ -284,16 +288,16 @@ async def callback_cancel(callback: CallbackQuery, state: FSMContext, db: Databa
         if mailing:
             if any(x in current_state for x in ("waiting_message_text", "waiting_forward_message")):
                 messages = await db.get_mailing_messages(mailing_id)
-                await _edit(pe(f"📝 Сообщения рассылки «{mailing.name}»:"), mailing_messages_keyboard(mailing_id, messages))
+                await _edit(pe(f"📝 Сообщения рассылки «{html.escape(mailing.name)}»:"), mailing_messages_keyboard(mailing_id, messages))
             elif any(x in current_state for x in ("waiting_target", "waiting_folder", "waiting_txt_file",
                                                    "waiting_thread_id_for_target", "waiting_target_interval",
                                                    "waiting_thread_id")):
                 targets = await db.get_mailing_targets(mailing_id)
-                await _edit(pe(f"🎯 Целевые чаты рассылки «{mailing.name}»:"), mailing_targets_keyboard(mailing_id, targets))
+                await _edit(pe(f"🎯 Целевые чаты рассылки «{html.escape(mailing.name)}»:"), mailing_targets_keyboard(mailing_id, targets))
             elif "waiting_reply_range" in current_state:
                 await _edit(pe("↩️ Режим ответной рассылки:"), reply_mode_select_keyboard(mailing_id))
             else:  # waiting_hours або інший
-                await _edit(pe(f"📊 Рассылка: {mailing.name}\n\nВыберите действие:"), mailing_menu_keyboard(mailing))
+                await _edit(pe(f"📊 Рассылка: {html.escape(mailing.name)}\n\nВыберите действие:"), mailing_menu_keyboard(mailing))
         else:
             mailings = await db.get_user_mailings((await db.get_user(callback.from_user.id)).id)
             await _edit(pe("📋 <b>Рассылки</b>\n\nВыберите рассылку или создайте новую:"), mailings_keyboard(mailings))
@@ -306,12 +310,12 @@ async def callback_cancel(callback: CallbackQuery, state: FSMContext, db: Databa
             if mailing:
                 if any(x in current_state for x in ("waiting_message_text", "waiting_forward_message", "adding_messages")):
                     messages = await db.get_mailing_messages(mailing_id)
-                    await _edit(pe(f"📝 Добавьте сообщения для «{mailing.name}»:"), mailing_creation_messages_keyboard(mailing_id, messages))
+                    await _edit(pe(f"📝 Добавьте сообщения для «{html.escape(mailing.name)}»:"), mailing_creation_messages_keyboard(mailing_id, messages))
                 elif any(x in current_state for x in ("waiting_target", "waiting_folder", "waiting_txt_file", "adding_targets")):
                     targets = await db.get_mailing_targets(mailing_id)
-                    await _edit(pe(f"🎯 Добавьте чаты для «{mailing.name}»:"), mailing_creation_targets_keyboard(mailing_id, targets))
+                    await _edit(pe(f"🎯 Добавьте чаты для «{html.escape(mailing.name)}»:"), mailing_creation_targets_keyboard(mailing_id, targets))
                 elif "waiting_hours" in current_state:
-                    await _edit(pe(f"⏰ Настройка времени для «{mailing.name}»:"), active_hours_keyboard(mailing_id))
+                    await _edit(pe(f"⏰ Настройка времени для «{html.escape(mailing.name)}»:"), active_hours_keyboard(mailing_id))
                 else:
                     mailings = await db.get_user_mailings((await db.get_user(callback.from_user.id)).id)
                     await _edit(pe("📋 <b>Рассылки</b>\n\nВыберите рассылку или создайте новую:"), mailings_keyboard(mailings))

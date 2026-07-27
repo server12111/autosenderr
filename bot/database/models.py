@@ -9,7 +9,7 @@ CREATE TABLE IF NOT EXISTS users (
     ref_code TEXT UNIQUE,
     referred_by INTEGER,
     ref_balance REAL DEFAULT 0,
-    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    created_at DATETIME DEFAULT (datetime('now', '+3 hours')),
     FOREIGN KEY (referred_by) REFERENCES users(id) ON DELETE SET NULL
 );
 
@@ -28,7 +28,7 @@ CREATE TABLE IF NOT EXISTS accounts (
     group_autoresponder_enabled BOOLEAN DEFAULT FALSE,
     group_autoresponder_text TEXT,
     is_active BOOLEAN DEFAULT TRUE,
-    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    created_at DATETIME DEFAULT (datetime('now', '+3 hours')),
     FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
 );
 
@@ -42,7 +42,7 @@ CREATE TABLE IF NOT EXISTS mailings (
     interval_seconds INTEGER NOT NULL DEFAULT 300,
     active_hours_json TEXT,
     last_sent_at DATETIME,
-    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    created_at DATETIME DEFAULT (datetime('now', '+3 hours')),
     hidden_tag_enabled INTEGER DEFAULT 0,
     FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
     FOREIGN KEY (account_id) REFERENCES accounts(id) ON DELETE CASCADE
@@ -74,7 +74,7 @@ CREATE TABLE IF NOT EXISTS autoresponder_history (
     account_id INTEGER NOT NULL,
     sender_telegram_id INTEGER NOT NULL,
     message_text TEXT,
-    responded_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    responded_at DATETIME DEFAULT (datetime('now', '+3 hours')),
     FOREIGN KEY (account_id) REFERENCES accounts(id) ON DELETE CASCADE,
     UNIQUE(account_id, sender_telegram_id)
 );
@@ -89,7 +89,7 @@ CREATE TABLE IF NOT EXISTS payments (
     payment_method TEXT DEFAULT 'cryptobot',
     plan_days INTEGER DEFAULT 30,
     status TEXT DEFAULT 'pending',
-    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    created_at DATETIME DEFAULT (datetime('now', '+3 hours')),
     paid_at DATETIME,
     FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
 );
@@ -110,7 +110,7 @@ CREATE TABLE IF NOT EXISTS promocodes (
     is_used BOOLEAN DEFAULT FALSE,
     used_by INTEGER,
     used_at DATETIME,
-    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    created_at DATETIME DEFAULT (datetime('now', '+3 hours')),
     FOREIGN KEY (used_by) REFERENCES users(id) ON DELETE SET NULL
 );
 
@@ -119,7 +119,7 @@ CREATE TABLE IF NOT EXISTS promocode_uses (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     promocode_id INTEGER NOT NULL,
     user_id INTEGER NOT NULL,
-    used_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    used_at DATETIME DEFAULT (datetime('now', '+3 hours')),
     FOREIGN KEY (promocode_id) REFERENCES promocodes(id) ON DELETE CASCADE,
     FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
     UNIQUE(promocode_id, user_id)
@@ -132,7 +132,7 @@ CREATE TABLE IF NOT EXISTS withdrawal_requests (
     amount REAL NOT NULL,
     wallet TEXT,
     status TEXT DEFAULT 'pending',
-    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    created_at DATETIME DEFAULT (datetime('now', '+3 hours')),
     FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
 );
 
@@ -142,6 +142,6 @@ CREATE TABLE IF NOT EXISTS required_channels (
     channel_id INTEGER NOT NULL UNIQUE,
     channel_username TEXT,
     channel_title TEXT NOT NULL,
-    added_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    added_at DATETIME DEFAULT (datetime('now', '+3 hours'))
 );
 """

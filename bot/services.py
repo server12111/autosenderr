@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import html
 import json
 import os
 import random
@@ -57,7 +58,7 @@ import aiohttp
 import certifi
 
 from .config import config
-from .database.db import Database
+from .database.db import Database, is_safe_media_path
 from .keyboards.inline import subscription_expired_keyboard
 from .utils.time_utils import is_within_active_hours, now_moscow
 from .utils.premium_emoji import pe
@@ -495,7 +496,11 @@ async def _resolve_redirect_urls(urls: list) -> list:
                                 final = redirected
                         if final not in result:
                             result.append(final)
-                        body = await resp.text(errors="replace")
+                        body_bytes = await resp.content.read(1024 * 1024 + 1)
+                        if len(body_bytes) > 1024 * 1024:
+                            logger.warning("Sponsor URL response is too large: %s", url)
+                            continue
+                        body = body_bytes.decode(resp.charset or "utf-8", errors="replace")
                         for link in _extract_tme(body):
                             if link not in result:
                                 result.append(link)
@@ -532,6 +537,16 @@ class AutoresponderService:
                 now - self._notification_events.get(event_key, 0) < 3600
             )
             if not duplicate:
+                if event_id is not None:
+                    self._notification_events[event_key] = now
+                    if len(self._notification_events) > 10000:
+                        cutoff = now - 3600
+                        self._notification_events = {
+                            key: timestamp
+                            for key, timestamp in self._notification_events.items()
+                            if timestamp >= cutoff
+                        }
+                notification_sent = False
                 sender_name = (f"{getattr(sender,'first_name','') or ''} {getattr(sender,'last_name','') or ''}").strip() or "Без имени"
                 sender_username = f"@{sender.username}" if getattr(sender, 'username', None) else "не указан"
                 msg_text = event.text or "(медиа/стикер)"
@@ -539,27 +554,28 @@ class AutoresponderService:
                     msg_text = msg_text[:200] + "..."
                 notification = pe(
                     f"📥 Сообщение от:\n"
-                    f"👤 {sender_name}\n"
-                    f"🔗 {sender_username}\n"
+                    f"👤 {html.escape(sender_name)}\n"
+                    f"🔗 {html.escape(sender_username)}\n"
                     f"🆔 {sender_id}\n\n"
-                    f"💬 {msg_text}\n\n"
-                    f"📱 Аккаунт: {account.display_name}"
+                    f"💬 {html.escape(msg_text)}\n\n"
+                    f"📱 Аккаунт: {html.escape(account.display_name)}"
                 )
                 try:
                     user = await self.db.get_user_by_id(account.user_id)
                     if user:
                         await notify_callback(user.telegram_id, notification)
-                        if event_id is not None:
-                            self._notification_events[event_key] = now
-                            if len(self._notification_events) > 10000:
-                                cutoff = now - 3600
-                                self._notification_events = {
-                                    key: timestamp
-                                    for key, timestamp in self._notification_events.items()
-                                    if timestamp >= cutoff
-                                }
+                        notification_sent = True
+                except asyncio.CancelledError:
+                    raise
                 except Exception as e:
                     logger.error(f"Notification error: {e}")
+                finally:
+                    if (
+                        event_id is not None
+                        and not notification_sent
+                        and self._notification_events.get(event_key) == now
+                    ):
+                        self._notification_events.pop(event_key, None)
 
         if not account.autoresponder_enabled or not account.autoresponder_text:
             return
@@ -572,7 +588,11 @@ class AutoresponderService:
             ar_user = await self.db.get_user_by_id(account.user_id)
             sig = _FREE_TIER_SIGNATURE if (ar_user and Database.is_free_ad_active(ar_user)) else ""
             ar_text = ((account.autoresponder_text or "") + sig) or None
-            if account.autoresponder_photo and os.path.exists(account.autoresponder_photo):
+            if (
+                account.autoresponder_photo
+                and is_safe_media_path(account.autoresponder_photo)
+                and os.path.exists(account.autoresponder_photo)
+            ):
                 await event.client.send_file(
                     sender_id, account.autoresponder_photo,
                     caption=ar_text
@@ -616,7 +636,11 @@ class AutoresponderService:
             gr_user = await self.db.get_user_by_id(account.user_id)
             sig = _FREE_TIER_SIGNATURE if (gr_user and Database.is_free_ad_active(gr_user)) else ""
             gr_text = ((account.group_autoresponder_text or "") + sig) or None
-            if account.group_autoresponder_photo and os.path.exists(account.group_autoresponder_photo):
+            if (
+                account.group_autoresponder_photo
+                and is_safe_media_path(account.group_autoresponder_photo)
+                and os.path.exists(account.group_autoresponder_photo)
+            ):
                 await event.client.send_file(
                     event.chat_id, account.group_autoresponder_photo,
                     caption=gr_text,
@@ -698,30 +722,34 @@ class AutoresponderService:
 
         logger.info(f"Account {account.phone}: sponsor gate detected (reply={original is not None}, mention={is_mention}), public={channel_usernames} invites={invite_hashes}")
 
-        joined_any = False
+        joined_any = True
 
         for username in channel_usernames:
             try:
                 await event.client(JoinChannelRequest(f"@{username}"))
                 logger.info(f"Account {account.phone} auto-joined sponsor @{username}")
-                joined_any = True
                 await asyncio.sleep(1)
+            except UserAlreadyParticipantError:
+                logger.info(f"Account {account.phone} is already subscribed to sponsor @{username}")
             except InviteRequestSentError:
                 logger.info(f"Account {account.phone} sent join request for @{username} — pending approval")
-                joined_any = True
+                joined_any = False
             except Exception as e:
+                joined_any = False
                 logger.warning(f"Account {account.phone} failed to join @{username}: {e}")
 
         for h in invite_hashes:
             try:
                 await event.client(ImportChatInviteRequest(h))
                 logger.info(f"Account {account.phone} auto-joined sponsor via invite hash {h}")
-                joined_any = True
                 await asyncio.sleep(1)
+            except UserAlreadyParticipantError:
+                logger.info(f"Account {account.phone} is already subscribed via invite {h}")
             except InviteRequestSentError:
                 logger.info(f"Account {account.phone} sent join request for invite {h} — pending approval")
-                joined_any = True
+                joined_any = False
             except Exception as e:
+                joined_any = False
                 logger.warning(f"Account {account.phone} failed to join invite {h}: {e}")
 
         # Після підписки — повторно надсилаємо наше оригінальне повідомлення
@@ -732,19 +760,21 @@ class AutoresponderService:
                 text = getattr(original, 'text', None) or getattr(original, 'message', None)
                 entities = getattr(original, 'entities', None)
                 media = getattr(original, 'media', None)
-                if text:
+                if media:
+                    await event.client.send_file(
+                        event.chat_id,
+                        media,
+                        caption=text or None,
+                        formatting_entities=entities if entities else None,
+                    )
+                    logger.info(f"Account {account.phone}: re-sent mailing media after sponsor join in {event.chat_id}")
+                elif text:
                     await event.client.send_message(
                         event.chat_id,
                         text,
                         formatting_entities=entities if entities else None,
                     )
                     logger.info(f"Account {account.phone}: re-sent mailing message after sponsor join in {event.chat_id}")
-                elif media:
-                    await event.client.send_file(
-                        event.chat_id,
-                        media,
-                        caption=text or None,
-                    )
             except Exception as e:
                 logger.warning(f"Account {account.phone}: failed to re-send after sponsor join: {e}")
 
@@ -797,6 +827,16 @@ def _build_telethon_entities(entities_json: str) -> list:
     return result
 
 
+def _utf16_length(text: str) -> int:
+    return len(text.encode("utf-16-le")) // 2
+
+
+def _truncate_utf16(text: str, max_units: int) -> str:
+    if _utf16_length(text) <= max_units:
+        return text
+    return text.encode("utf-16-le")[:max_units * 2].decode("utf-16-le", errors="ignore")
+
+
 _FREE_TIER_SIGNATURE = "\n━━━━━━━━━━\n🤖 Отправлено через @feAutoSenderBot"
 
 
@@ -809,6 +849,7 @@ class MailingService:
         self._stagger_until: dict[int, dict[int, datetime]] = {}  # mailing_id -> {target_id -> first_send_allowed_at}
         self._me_cache: dict[int, object] = {}  # account_id -> me object, avoids get_me() every loop
         self._mailing_locks: dict[int, asyncio.Lock] = {}
+        self._working_targets: dict[int, set[int]] = {}
 
     async def start(self):
         self._running = True
@@ -825,6 +866,7 @@ class MailingService:
         if tasks:
             await asyncio.gather(*tasks, return_exceptions=True)
         self._tasks.clear()
+        self._working_targets.clear()
 
     async def start_mailing(self, mailing_id: int) -> bool:
         mailing = await self.db.get_mailing(mailing_id)
@@ -847,6 +889,7 @@ class MailingService:
             task.cancel()
             await asyncio.gather(task, return_exceptions=True)
         self._stagger_until.pop(mailing_id, None)
+        self._working_targets.pop(mailing_id, None)
 
     async def stop_user_mailings(self, user_id: int):
         """Stop all active mailings for a user (called when subscription expires)."""
@@ -854,6 +897,68 @@ class MailingService:
         for m in mailings:
             await self.stop_mailing(m.id)
         return len(mailings)
+
+    def _mark_target_working(self, mailing_id: int, target_id: int):
+        self._working_targets.setdefault(mailing_id, set()).add(target_id)
+
+    def _mark_target_not_working(self, mailing_id: int, target_id: int):
+        targets = self._working_targets.get(mailing_id)
+        if targets is not None:
+            targets.discard(target_id)
+
+    def _clear_working_targets(self, mailing_id: int):
+        self._working_targets.pop(mailing_id, None)
+
+    async def get_free_tier_runtime_stats(self) -> dict:
+        working_target_ids = {
+            target_id
+            for mailing_id, target_ids in self._working_targets.items()
+            if (
+                self._running
+                and (task := self._tasks.get(mailing_id)) is not None
+                and not task.done()
+            )
+            for target_id in target_ids
+        }
+
+        total_users = await self.db.count_free_tier_users()
+        rows = await self.db.get_free_tier_target_rows()
+        active_rows = [row for row in rows if row["target_id"] in working_target_ids]
+
+        active_user_ids = {row["user_id"] for row in active_rows}
+        active_mailing_ids = {row["mailing_id"] for row in active_rows}
+        chat_users: dict[str, dict] = {}
+
+        for row in active_rows:
+            chat = row["chat_identifier"]
+            chat_data = chat_users.setdefault(
+                chat.casefold(),
+                {"chat_identifier": chat, "users": {}},
+            )
+            user_delays = chat_data["users"]
+            user_delays.setdefault(row["user_id"], []).append(int(row["delay_seconds"]))
+
+        chats = []
+        for chat_data in chat_users.values():
+            user_delays = chat_data["users"]
+            average_by_user = [
+                sum(delays) / len(delays)
+                for delays in user_delays.values()
+            ]
+            chats.append({
+                "chat_identifier": chat_data["chat_identifier"],
+                "user_count": len(user_delays),
+                "average_delay": round(sum(average_by_user) / len(average_by_user)),
+            })
+        chats.sort(key=lambda row: (-row["user_count"], row["chat_identifier"].lower()))
+
+        return {
+            "total_users": total_users,
+            "active_users": len(active_user_ids),
+            "active_mailings": len(active_mailing_ids),
+            "unique_chats": len(chats),
+            "chats": chats,
+        }
 
     async def send_hidden_tag(self, mailing_id: int) -> int:
         mailing = await self.db.get_mailing(mailing_id)
@@ -904,7 +1009,7 @@ class MailingService:
                 user.telegram_id,
                 pe(
                     "⚠️ <b>FloodWait</b>\n\n"
-                    f"Аккаунт: <b>{account_obj.display_name if account_obj else account_id}</b>\n"
+                    f"Аккаунт: <b>{html.escape(str(account_obj.display_name if account_obj else account_id))}</b>\n"
                     f"Длительность: <b>{seconds} сек.</b>\n"
                     f"Окончание (МСК): <b>{finish_at.strftime('%d.%m.%Y %H:%M:%S')}</b>\n\n"
                     "Рекомендуется сменить аккаунт."
@@ -932,9 +1037,11 @@ class MailingService:
     async def _has_new_activity_after_account_message(self, client, target: str, my_id: int) -> bool:
         """Check whether another participant sent the latest message."""
         try:
-            messages = await client.get_messages(target, limit=20)
+            messages = await client.get_messages(target, limit=1)
             for message in messages:
-                return message.sender_id != my_id
+                return not bool(
+                    getattr(message, "out", getattr(message, "sender_id", None) == my_id)
+                )
             return True
         except Exception:
             return True
@@ -985,43 +1092,80 @@ class MailingService:
             )
             return
 
+        dice_emoji = msg.text if msg.is_dice else None
         sig = _FREE_TIER_SIGNATURE if add_signature else ""
         entities = _build_telethon_entities(msg.entities_json) if msg.entities_json else None
-        photos = [p for p in msg.photo_paths if os.path.exists(p)]
-        video = msg.video_path if msg.video_path and os.path.exists(msg.video_path) else None
+        photos = [
+            p for p in msg.photo_paths
+            if is_safe_media_path(p) and os.path.exists(p)
+        ]
+        video = (
+            msg.video_path
+            if msg.video_path
+            and is_safe_media_path(msg.video_path)
+            and os.path.exists(msg.video_path)
+            else None
+        )
 
-        raw_text = msg.text or ""
+        raw_text = "" if dice_emoji else (msg.text or "")
         max_len = 1024 if (photos or video) else 4096
         if raw_text or sig:
-            if sig and len(raw_text) + len(sig) > max_len:
-                raw_text = raw_text[:max_len - len(sig)]
+            if sig and _utf16_length(raw_text) + _utf16_length(sig) > max_len:
+                raw_text = _truncate_utf16(
+                    raw_text,
+                    max_len - _utf16_length(sig),
+                )
+                if entities:
+                    raw_length = _utf16_length(raw_text)
+                    entities = [
+                        entity
+                        for entity in entities
+                        if entity.offset + entity.length <= raw_length
+                    ]
             text = raw_text + sig
         else:
             text = None
-        if hidden_tag_user_ids and (text is not None or photos or video):
+        if hidden_tag_user_ids and (text is not None or photos or video or dice_emoji):
             from telethon.tl.types import InputMessageEntityMentionName
 
             base_text = text or ""
-            available = max_len - len(base_text.encode("utf-16-le")) // 2
-            count = max(0, min(len(hidden_tag_user_ids), available))
+            input_users = []
+            for user in hidden_tag_user_ids:
+                try:
+                    input_users.append(await client.get_input_entity(user))
+                except Exception:
+                    continue
+
+            if input_users and not entities and base_text and pm and not dice_emoji:
+                base_text, entities = await client._parse_message_text(base_text, pm)
+
+            available = max_len - _utf16_length(base_text)
+            count = max(0, min(len(input_users), available))
             if count:
-                offset = len(base_text.encode("utf-16-le")) // 2
-                hidden_entities = []
-                for user in hidden_tag_user_ids[:count]:
-                    try:
-                        input_user = await client.get_input_entity(user)
-                    except Exception:
-                        continue
-                    hidden_entities.append(InputMessageEntityMentionName(
-                        offset=offset + len(hidden_entities),
+                offset = _utf16_length(base_text)
+                hidden_entities = [
+                    InputMessageEntityMentionName(
+                        offset=offset + index,
                         length=1,
                         user_id=input_user,
-                    ))
-                if hidden_entities:
-                    text = base_text + ("\u2063" * len(hidden_entities))
-                    entities = (entities or []) + hidden_entities
-        eff_pm = None if entities else pm  # use entities directly — skip parse_mode
-        if video:
+                    )
+                    for index, input_user in enumerate(input_users[:count])
+                ]
+                text = base_text + ("\u2063" * len(hidden_entities))
+                entities = (entities or []) + hidden_entities
+        eff_pm = None if entities else ("html" if dice_emoji else pm)
+        if dice_emoji:
+            from telethon.tl.types import InputMediaDice
+
+            await client.send_file(
+                target,
+                InputMediaDice(dice_emoji),
+                caption=text,
+                parse_mode=eff_pm,
+                formatting_entities=entities,
+                reply_to=reply_to,
+            )
+        elif video:
             await client.send_file(target, video, caption=text, parse_mode=eff_pm,
                                    formatting_entities=entities, reply_to=reply_to)
         elif len(photos) > 1:
@@ -1041,6 +1185,7 @@ class MailingService:
         async with lock:
             if mailing_id in self._tasks and not self._tasks[mailing_id].done():
                 return
+            self._clear_working_targets(mailing_id)
             mailing = await self.db.get_mailing(mailing_id)
             if mailing:
                 targets = await self.db.get_mailing_targets(mailing_id)
@@ -1062,6 +1207,7 @@ class MailingService:
                 try:
                     mailing = await self.db.get_mailing(mailing_id)
                     if not mailing or not mailing.is_active:
+                        self._clear_working_targets(mailing_id)
                         logger.info(
                             f"Mailing {mailing_id}: loop exiting — "
                             f"{'not found in DB' if not mailing else 'is_active set to False'}"
@@ -1069,6 +1215,7 @@ class MailingService:
                         break
 
                     if not self._is_active_hours(mailing.active_hours_json):
+                        self._clear_working_targets(mailing_id)
                         await asyncio.sleep(60)
                         continue
 
@@ -1076,6 +1223,7 @@ class MailingService:
                     targets = await self.db.get_mailing_targets(mailing_id)
 
                     if not messages or not targets:
+                        self._clear_working_targets(mailing_id)
                         logger.debug(
                             f"Mailing {mailing_id}: no messages ({len(messages)}) or "
                             f"targets ({len(targets)}), waiting 60s"
@@ -1092,6 +1240,7 @@ class MailingService:
                     # Resolve main client
                     client = await self.userbot_manager.get_client(mailing.account_id)
                     if not client:
+                        self._clear_working_targets(mailing_id)
                         await asyncio.sleep(60)
                         continue
 
@@ -1099,9 +1248,11 @@ class MailingService:
                         try:
                             await client.connect()
                         except _BAN_ERRORS as e:
+                            self._clear_working_targets(mailing_id)
                             await self._handle_mailing_ban(mailing_id, mailing.account_id, e)
                             return
                         except Exception as e:
+                            self._clear_working_targets(mailing_id)
                             logger.error(f"Reconnect failed for mailing {mailing_id}: {e}")
                             await asyncio.sleep(60)
                             continue
@@ -1121,6 +1272,14 @@ class MailingService:
                     # Free tier: check once per cycle
                     mailing_user = await self.db.get_user_by_id(mailing.user_id)
                     add_sig = Database.is_free_ad_active(mailing_user) if mailing_user else False
+                    if add_sig and not any(not message.is_forward for message in messages):
+                        self._clear_working_targets(mailing_id)
+                        logger.debug(
+                            f"Mailing {mailing_id}: all messages are forwards, "
+                            "waiting for a sendable free-tier message"
+                        )
+                        await asyncio.sleep(60)
+                        continue
 
                     for target_idx, target_obj in enumerate(targets):
                         # Interval check per target
@@ -1128,6 +1287,8 @@ class MailingService:
                         if target_obj.last_sent_at is not None:
                             elapsed = (now - target_obj.last_sent_at).total_seconds()
                             if elapsed < target_interval:
+                                if target_obj.last_account_id in (None, mailing.account_id):
+                                    self._mark_target_working(mailing_id, target_obj.id)
                                 logger.debug(f"Mailing {mailing_id}: {target_obj.chat_identifier} — interval not elapsed ({elapsed:.0f}/{target_interval}s), skip")
                                 continue
 
@@ -1152,6 +1313,7 @@ class MailingService:
                         if target_obj.last_sent_at is not None and not await self._has_new_activity_after_account_message(
                             target_client, target, target_me.id
                         ):
+                            self._mark_target_not_working(mailing_id, target_obj.id)
                             continue
 
                         hidden_tag_user_ids = []
@@ -1209,6 +1371,7 @@ class MailingService:
                             else:
                                 logger.debug(f"Mailing {mailing_id}: ✓ sent to {target} via account {current_account_id}")
                             await self.db.update_target_last_sent(target_obj.id, current_account_id)
+                            self._mark_target_working(mailing_id, target_obj.id)
                             sent_any = True
                             cycle_sent += 1
                         except _BAN_ERRORS as e:
@@ -1250,12 +1413,13 @@ class MailingService:
                                         u = await self.db.get_user_by_id(acc_obj.user_id)
                                         if u:
                                             await notify(u.telegram_id, pe(
-                                                f"⚠️ Дополнительный аккаунт <b>{acc_obj.display_name}</b> заблокирован и удалён из пула рассылки."
+                                                f"⚠️ Дополнительный аккаунт <b>{html.escape(acc_obj.display_name)}</b> заблокирован и удалён из пула рассылки."
                                             ))
                             except Exception:
                                 pass
                             continue
                         except _CHAT_BAN_ERRORS as e:
+                            self._mark_target_not_working(mailing_id, target_obj.id)
                             cycle_errors += 1
                             try:
                                 await self.db.add_error_log(
@@ -1287,11 +1451,24 @@ class MailingService:
                                 hidden_tag_user_ids=hidden_tag_user_ids,
                             )
                             if joined:
+                                self._mark_target_working(mailing_id, target_obj.id)
                                 sent_any = True
+                            else:
+                                self._mark_target_not_working(mailing_id, target_obj.id)
                         except SlowModeWaitError as e:
+                            self._mark_target_not_working(mailing_id, target_obj.id)
+                            await self.db.add_error_log(
+                                user_id=mailing.user_id,
+                                error_type=type(e).__name__,
+                                error_text=f"{e.seconds}s",
+                                account_id=current_account_id,
+                                mailing_id=mailing_id,
+                                chat_identifier=target,
+                            )
                             logger.warning(f"Mailing {mailing_id}: slow mode in '{target}', wait {e.seconds}s")
                             await asyncio.sleep(min(e.seconds, 60))
                         except FloodWaitError as e:
+                            self._clear_working_targets(mailing_id)
                             await self._notify_flood_wait(mailing_user, current_account_id, e.seconds)
                             fallback_sent = False
                             if pool_clients and len(pool_clients) > 1:
@@ -1307,6 +1484,7 @@ class MailingService:
                                         )
                                         logger.info(f"Mailing {mailing_id}: FloodWait fallback → account {fb_id} → {target}")
                                         await self.db.update_target_last_sent(target_obj.id, fb_id)
+                                        self._mark_target_working(mailing_id, target_obj.id)
                                         sent_any = True
                                         fallback_sent = True
                                         break
@@ -1349,6 +1527,7 @@ class MailingService:
                                         pass
                                 await asyncio.sleep(wait)
                         except (ChatSendMediaForbiddenError, ChatGuestSendForbiddenError, RightForbiddenError, ChatAdminRequiredError) as e:
+                            self._mark_target_not_working(mailing_id, target_obj.id)
                             await self.db.add_error_log(
                                 user_id=mailing.user_id,
                                 error_type=type(e).__name__,
@@ -1361,8 +1540,19 @@ class MailingService:
                         except Exception as e:
                             err_str = str(e)
                             if "PLAIN_FORBIDDEN" in err_str or "SEND_PLAIN" in err_str:
+                                self._mark_target_not_working(mailing_id, target_obj.id)
+                                cycle_errors += 1
+                                await self.db.add_error_log(
+                                    user_id=mailing.user_id,
+                                    error_type="PlainForbidden",
+                                    error_text=err_str[:300],
+                                    account_id=current_account_id,
+                                    mailing_id=mailing_id,
+                                    chat_identifier=target,
+                                )
                                 logger.warning(f"Mailing {mailing_id}: '{target}' — чат разрешает только медиа (PLAIN_FORBIDDEN), skipping")
                             elif "PEER_FLOOD" in err_str or isinstance(e, PeerFloodError):
+                                self._clear_working_targets(mailing_id)
                                 fallback_sent = False
                                 if pool_clients and len(pool_clients) > 1:
                                     for fb_id, fb_client, _ in pool_clients:
@@ -1377,6 +1567,7 @@ class MailingService:
                                             )
                                             logger.info(f"Mailing {mailing_id}: PEER_FLOOD fallback → account {fb_id} → {target}")
                                             await self.db.update_target_last_sent(target_obj.id, fb_id)
+                                            self._mark_target_working(mailing_id, target_obj.id)
                                             sent_any = True
                                             fallback_sent = True
                                             break
@@ -1398,6 +1589,7 @@ class MailingService:
                                     logger.warning(f"Mailing {mailing_id}: PEER_FLOOD на аккаунте, пауза 60с")
                                     await asyncio.sleep(60)
                             else:
+                                self._mark_target_not_working(mailing_id, target_obj.id)
                                 cycle_errors += 1
                                 try:
                                     await self.db.add_error_log(
@@ -1438,6 +1630,7 @@ class MailingService:
         except asyncio.CancelledError:
             logger.info(f"Mailing {mailing_id} task cancelled")
         except Exception as e:
+            self._clear_working_targets(mailing_id)
             logger.error(f"Mailing {mailing_id} loop fatal error: {e}", exc_info=True)
             self._tasks.pop(mailing_id, None)
             if self._running:
@@ -1451,6 +1644,10 @@ class MailingService:
                         await self._start_mailing_task(mailing_id)
                 except Exception as restart_err:
                     logger.error(f"Mailing {mailing_id} auto-restart failed: {restart_err}")
+        finally:
+            current_task = self._tasks.get(mailing_id)
+            if current_task is asyncio.current_task():
+                self._clear_working_targets(mailing_id)
 
     async def _handle_mailing_ban(self, mailing_id: int, account_id: int, error: Exception):
         """Stop mailing, deactivate account, notify owner."""
@@ -1478,7 +1675,7 @@ class MailingService:
                             user.telegram_id,
                             pe(
                                 f"⚠️ <b>Проблема с аккаунтом!</b>\n\n"
-                                f"📱 Аккаунт: <b>{account.display_name}</b>\n"
+                                f"📱 Аккаунт: <b>{html.escape(account.display_name)}</b>\n"
                                 f"❗️ Причина: {reason}\n\n"
                                 f"Рассылка остановлена. Аккаунт отключён.\n"
                                 f"Добавьте аккаунт заново в разделе «Аккаунты»."
@@ -1510,6 +1707,7 @@ class MailingService:
         hidden_tag_user_ids: Optional[list[int]] = None,
     ) -> bool:
         """Try to join target channel/group, then retry sending. Returns True if message was sent."""
+        mailing = await self.db.get_mailing(mailing_id)
         try:
             if "t.me/+" in target:
                 joined = await client(ImportChatInviteRequest(target.rsplit("+", 1)[1]))
@@ -1521,9 +1719,54 @@ class MailingService:
             await asyncio.sleep(2)
         except UserAlreadyParticipantError:
             logger.info(f"Mailing {mailing_id}: already participant in '{target}' — trying to send")
-        except InviteRequestSentError:
-            logger.info(f"Mailing {mailing_id}: join request sent/pending for '{target}' — trying to send anyway")
+        except InviteRequestSentError as e:
+            if mailing:
+                await self.db.add_error_log(
+                    user_id=mailing.user_id,
+                    error_type=type(e).__name__,
+                    error_text=str(e)[:300],
+                    account_id=account_id,
+                    mailing_id=mailing_id,
+                    chat_identifier=str(target),
+                )
+            logger.info(f"Mailing {mailing_id}: join request sent/pending for '{target}'")
+            return False
+        except _BAN_ERRORS as e:
+            if mailing:
+                await self.db.add_error_log(
+                    user_id=mailing.user_id,
+                    error_type=type(e).__name__,
+                    error_text=str(e)[:300],
+                    account_id=account_id,
+                    mailing_id=mailing_id,
+                    chat_identifier=str(target),
+                )
+            await self._handle_mailing_ban(mailing_id, account_id, e)
+            return False
+        except FloodWaitError as e:
+            if mailing:
+                await self.db.add_error_log(
+                    user_id=mailing.user_id,
+                    error_type="FloodWait",
+                    error_text=f"{e.seconds}s",
+                    account_id=account_id,
+                    mailing_id=mailing_id,
+                    chat_identifier=str(target),
+                )
+                user = await self.db.get_user_by_id(mailing.user_id)
+                await self._notify_flood_wait(user, account_id, e.seconds)
+            await asyncio.sleep(min(e.seconds, 3600))
+            return False
         except Exception as e:
+            if mailing:
+                await self.db.add_error_log(
+                    user_id=mailing.user_id,
+                    error_type=type(e).__name__,
+                    error_text=str(e)[:300],
+                    account_id=account_id,
+                    mailing_id=mailing_id,
+                    chat_identifier=str(target),
+                )
             logger.warning(f"Mailing {mailing_id}: failed to join '{target}': {e}")
             return False
 
@@ -1537,10 +1780,54 @@ class MailingService:
             await self.db.update_target_last_sent(target_obj.id, account_id)
             logger.info(f"Mailing {mailing_id}: sent to '{target}' after auto-join")
             return True
-        except ChatWriteForbiddenError:
+        except _BAN_ERRORS as e:
+            if mailing:
+                await self.db.add_error_log(
+                    user_id=mailing.user_id,
+                    error_type=type(e).__name__,
+                    error_text=str(e)[:300],
+                    account_id=account_id,
+                    mailing_id=mailing_id,
+                    chat_identifier=str(target),
+                )
+            await self._handle_mailing_ban(mailing_id, account_id, e)
+            return False
+        except FloodWaitError as e:
+            if mailing:
+                await self.db.add_error_log(
+                    user_id=mailing.user_id,
+                    error_type="FloodWait",
+                    error_text=f"{e.seconds}s",
+                    account_id=account_id,
+                    mailing_id=mailing_id,
+                    chat_identifier=str(target),
+                )
+                user = await self.db.get_user_by_id(mailing.user_id)
+                await self._notify_flood_wait(user, account_id, e.seconds)
+            await asyncio.sleep(min(e.seconds, 3600))
+            return False
+        except ChatWriteForbiddenError as e:
+            if mailing:
+                await self.db.add_error_log(
+                    user_id=mailing.user_id,
+                    error_type=type(e).__name__,
+                    error_text=str(e)[:300],
+                    account_id=account_id,
+                    mailing_id=mailing_id,
+                    chat_identifier=str(target),
+                )
             logger.warning(f"Mailing {mailing_id}: can't write to '{target}' after join — slow mode or temporary restriction, skipping")
             return False
         except Exception as e:
+            if mailing:
+                await self.db.add_error_log(
+                    user_id=mailing.user_id,
+                    error_type=type(e).__name__,
+                    error_text=str(e)[:300],
+                    account_id=account_id,
+                    mailing_id=mailing_id,
+                    chat_identifier=str(target),
+                )
             logger.error(f"Mailing {mailing_id}: retry send to '{target}' failed after join: {e}")
             return False
 

@@ -1,4 +1,5 @@
 import json
+import html
 import re
 import os
 import uuid
@@ -107,6 +108,8 @@ def message_preview(msg) -> str:
     """Generate preview text for a mailing message."""
     if msg.is_forward:
         return f"[Переслано] из {msg.forward_peer} #{msg.forward_msg_id}"
+    if msg.is_dice:
+        return f"[Эмодзи] {msg.text}"
     photo_count = len(msg.photo_paths)
     if photo_count > 1:
         prefix = f"[{photo_count} Фото] "
@@ -201,13 +204,13 @@ async def callback_account_mailings(callback: CallbackQuery, db: Database):
     mailings = [m for m in all_mailings if m.account_id == account_id]
 
     account = await db.get_account_for_user(account_id, callback.from_user.id)
-    name = account.display_name if account else "аккаунт"
+    name = html.escape(account.display_name) if account else "аккаунт"
 
     text = f"📋 Рассылки аккаунта {name}:\n\n"
     if mailings:
         for m in mailings:
             status = "🟢 Активна" if m.is_active else "🔴 Остановлена"
-            text += f"• {m.name} - {status}\n"
+            text += f"• {html.escape(m.name)} - {status}\n"
     else:
         text += "Рассылок для этого аккаунта нет.\n"
 
@@ -225,7 +228,7 @@ async def callback_mailings(callback: CallbackQuery, db: Database):
     if mailings:
         for m in mailings:
             status = "🟢 Активна" if m.is_active else "🔴 Остановлена"
-            text += f"• {m.name} - {status}\n"
+            text += f"• {html.escape(m.name)} - {status}\n"
     else:
         text += "У вас пока нет рассылок.\n"
 
@@ -254,9 +257,9 @@ async def callback_mailing_menu(callback: CallbackQuery, db: Database, state: FS
     active_hours = format_active_hours(mailing.active_hours_json)
 
     text = pe(
-        f"📋 Рассылка: {mailing.name}\n\n"
+        f"📋 Рассылка: {html.escape(mailing.name)}\n\n"
         f"Статус: {status}\n"
-        f"Аккаунт: {account.phone if account else 'не найден'}\n"
+        f"Аккаунт: {html.escape(account.phone) if account else 'не найден'}\n"
         f"Интервал: {mailing.interval_seconds} сек\n"
         f"Время активности: {active_hours}\n"
         f"Сообщений: {len(messages)}\n"
@@ -317,9 +320,9 @@ async def callback_toggle_mailing(
     active_hours = format_active_hours(mailing.active_hours_json)
 
     text = pe(
-        f"📋 Рассылка: {mailing.name}\n\n"
+        f"📋 Рассылка: {html.escape(mailing.name)}\n\n"
         f"Статус: {status}\n"
-        f"Аккаунт: {account.phone if account else 'не найден'}\n"
+        f"Аккаунт: {html.escape(account.phone) if account else 'не найден'}\n"
         f"Интервал: {mailing.interval_seconds} сек\n"
         f"Время активности: {active_hours}\n"
         f"Сообщений: {len(messages)}\n"
@@ -388,7 +391,7 @@ async def callback_mailing_messages(callback: CallbackQuery, db: Database):
     text = f"📝 Сообщения рассылки ({len(messages)} шт.):\n\n"
     if messages:
         for i, msg in enumerate(messages, 1):
-            text += f"{i}. {message_preview(msg)}\n"
+            text += f"{i}. {html.escape(message_preview(msg))}\n"
     else:
         text += "Сообщений пока нет.\n"
 
@@ -411,7 +414,7 @@ async def callback_add_mailing_message(callback: CallbackQuery, state: FSMContex
     await state.set_state(EditMailingStates.waiting_message_text)
 
     await callback.message.edit_text(
-        pe("✏️ Отправьте текст или фото для рассылки.\n"
+        pe("✏️ Отправьте текст, фото, видео или игровое эмодзи для рассылки.\n"
         "Можно отправить несколько фото (до 10) — они будут отправлены альбомом.\n\n"
         "💡 <b>Форматирование</b> (жирный, курсив и т.д.) — выделите текст прямо в Telegram, оно сохранится автоматически."),
         parse_mode="HTML",
@@ -488,13 +491,17 @@ async def process_edit_forward_message(message: Message, state: FSMContext, db: 
     elif isinstance(origin, MessageOriginUser):
         text = message.text or message.caption or ""
         photo_path = await save_photo_from_message(message) if message.photo else None
-        if not text and not photo_path:
+        dice_emoji = message.dice.emoji if message.dice else None
+        if not text and not photo_path and not dice_emoji:
             await message.answer(
-                "❌ Поддерживаются только текст и фото. Видео, голосовые и стикеры не поддерживаются."
+                "❌ Поддерживаются только текст, фото и игровые эмодзи. Видео, голосовые и стикеры не поддерживаются."
             )
             return
-        entities_json = serialize_entities(message.entities or message.caption_entities)
-        await db.add_mailing_message(mailing_id, text, photo_path=photo_path, entities_json=entities_json)
+        if dice_emoji:
+            await db.add_mailing_message(mailing_id, dice_emoji, parse_mode="dice")
+        else:
+            entities_json = serialize_entities(message.entities or message.caption_entities)
+            await db.add_mailing_message(mailing_id, text, photo_path=photo_path, entities_json=entities_json)
         await state.clear()
         messages = await db.get_mailing_messages(mailing_id)
         await message.answer(
@@ -589,10 +596,7 @@ async def process_edit_message_video(message: Message, state: FSMContext, db: Da
 @router.message(EditMailingStates.waiting_message_text)
 async def process_edit_message_text(message: Message, state: FSMContext, db: Database):
     text = (message.text or "").strip()
-    if not text:
-        await message.answer(pe("❌ Отправьте текст, фото или видео."), parse_mode="HTML")
-        return
-    entities_json = serialize_entities(message.entities)
+    dice_emoji = message.dice.emoji if message.dice else None
     data = await state.get_data()
     mailing_id = data.get("mailing_id")
     if not mailing_id:
@@ -607,6 +611,28 @@ async def process_edit_message_text(message: Message, state: FSMContext, db: Dat
     pending_caption = data.get("pending_caption")
     pending_caption_entities = data.get("pending_caption_entities")
 
+    if dice_emoji:
+        if pending_photos:
+            await message.answer(
+                pe("❌ Сначала сохраните добавленные фотографии."),
+                parse_mode="HTML",
+            )
+            return
+        await db.add_mailing_message(mailing_id, dice_emoji, parse_mode="dice")
+        await state.clear()
+        messages = await db.get_mailing_messages(mailing_id)
+        await message.answer(
+            pe(f"✅ Эмодзи добавлено! Всего сообщений: {len(messages)}"),
+            parse_mode="HTML",
+            reply_markup=mailing_messages_keyboard(mailing_id, messages),
+        )
+        return
+
+    if not text:
+        await message.answer(pe("❌ Отправьте текст, фото, видео или игровое эмодзи."), parse_mode="HTML")
+        return
+
+    entities_json = serialize_entities(message.entities)
     if pending_photos:
         if pending_caption is not None:
             save_text = pending_caption
@@ -689,7 +715,7 @@ async def callback_delete_message(callback: CallbackQuery, db: Database):
     text = f"📝 Сообщения рассылки ({len(messages)} шт.):\n\n"
     if messages:
         for i, msg in enumerate(messages, 1):
-            text += f"{i}. {message_preview(msg)}\n"
+            text += f"{i}. {html.escape(message_preview(msg))}\n"
     else:
         text += "Сообщений пока нет.\n"
 
@@ -715,7 +741,7 @@ async def callback_mailing_targets(callback: CallbackQuery, db: Database):
     if targets:
         for i, target in enumerate(targets, 1):
             thread_info = f" [тема #{target.thread_id}]" if target.thread_id else ""
-            text += f"{i}. {target.chat_identifier}{thread_info}\n"
+            text += f"{i}. {html.escape(target.chat_identifier)}{thread_info}\n"
     else:
         text += "Целевых чатов пока нет.\n"
 
@@ -783,7 +809,7 @@ async def process_edit_target(message: Message, state: FSMContext, db: Database,
         await state.update_data(target_id=target_id, mailing_id=mailing_id)
         await state.set_state(EditMailingStates.waiting_thread_id_for_target)
         await message.answer(
-            pe(f"💬 Чат <b>{target}</b> использует темы (Topics).\n\n"
+            pe(f"💬 Чат <b>{html.escape(target)}</b> использует темы (Topics).\n\n"
                "Отправьте ссылку на тему или её ID.\n"
                "Примеры: <code>https://t.me/chatname/123</code> или <code>123</code>\n\n"
                "Нажмите «Пропустить» для отправки в General."),
@@ -828,7 +854,7 @@ async def callback_delete_target(callback: CallbackQuery, db: Database):
     text = f"🎯 Целевые чаты ({len(targets)} шт.):\n\n"
     if targets:
         for i, target in enumerate(targets, 1):
-            text += f"{i}. {target.chat_identifier}\n"
+            text += f"{i}. {html.escape(target.chat_identifier)}\n"
     else:
         text += "Целевых чатов пока нет.\n"
 
@@ -844,7 +870,8 @@ async def callback_edit_target_interval(callback: CallbackQuery, state: FSMConte
     parts = callback.data.split(":")
     target_id = int(parts[1])
     mailing_id = int(parts[2])
-    if not await db.get_mailing_for_user(mailing_id, callback.from_user.id):
+    mailing = await db.get_mailing_for_user(mailing_id, callback.from_user.id)
+    if not mailing:
         await callback.answer("⛔ Нет доступа", show_alert=True)
         return
 
@@ -853,17 +880,19 @@ async def callback_edit_target_interval(callback: CallbackQuery, state: FSMConte
     if not target:
         await callback.answer("Чат не найден", show_alert=True)
         return
-    current = target.interval_seconds if target else None
-    current_str = f"{current} сек" if current else "по умолчанию (общий интервал рассылки)"
+    current = target.interval_seconds if target.interval_seconds is not None else mailing.interval_seconds
 
-    await state.update_data(target_id=target_id, mailing_id=mailing_id)
+    await state.update_data(
+        target_id=target_id,
+        mailing_id=mailing_id,
+        all_target_intervals=False,
+    )
     await state.set_state(EditMailingStates.waiting_target_interval)
 
     await callback.message.edit_text(
-        pe(f"⏱️ Интервал для чата: {target.chat_identifier if target else ''}\n\n"
-        f"Текущий: {current_str}\n\n"
-        "Введите интервал в секундах (минимум 30).\n"
-        "Отправьте 0 — использовать общий интервал рассылки."),
+        pe(f"⏱️ Интервал для чата: {html.escape(target.chat_identifier) if target else ''}\n\n"
+        f"Текущий: {current} сек\n\n"
+        "Введите интервал в секундах (минимум 30)."),
         parse_mode="HTML",
         reply_markup=cancel_keyboard(),
     )
@@ -876,7 +905,11 @@ async def callback_change_all_target_interval(callback: CallbackQuery, state: FS
     if not await db.get_mailing_for_user(mailing_id, callback.from_user.id):
         await callback.answer("⛔ Нет доступа", show_alert=True)
         return
-    await state.update_data(mailing_id=mailing_id, all_target_intervals=True)
+    await state.update_data(
+        target_id=None,
+        mailing_id=mailing_id,
+        all_target_intervals=True,
+    )
     await state.set_state(EditMailingStates.waiting_target_interval)
     await callback.message.edit_text(
         pe("Введите новое КД в секундах (минимум 30):"),
@@ -890,11 +923,11 @@ async def callback_change_all_target_interval(callback: CallbackQuery, state: FS
 async def process_target_interval(message: Message, state: FSMContext, db: Database):
     try:
         interval = int((message.text or "").strip())
-        if interval != 0 and interval < 30:
-            await message.answer(pe("❌ Минимальный интервал — 30 секунд (или 0 для использования общего интервала)"), parse_mode="HTML")
+        if interval < 30:
+            await message.answer(pe("❌ Минимальный интервал — 30 секунд."), parse_mode="HTML")
             return
     except ValueError:
-        await message.answer(pe("❌ Введите число (секунды) или 0"), parse_mode="HTML")
+        await message.answer(pe("❌ Введите число в секундах."), parse_mode="HTML")
         return
 
     data = await state.get_data()
@@ -922,14 +955,14 @@ async def process_target_interval(message: Message, state: FSMContext, db: Datab
         await state.clear()
         return
 
-    await db.update_target_interval(target_id, interval if interval > 0 else None)
+    await db.update_target_interval(target_id, interval)
     await state.clear()
 
     targets = await db.get_mailing_targets(mailing_id)
     text = f"✅ Интервал обновлён!\n\n🎯 Целевые чаты ({len(targets)} шт.):\n\n"
     for i, t in enumerate(targets, 1):
         iv = f" [{t.interval_seconds}с]" if t.interval_seconds else " [умолч.]"
-        text += f"{i}. {t.chat_identifier}{iv}\n"
+        text += f"{i}. {html.escape(t.chat_identifier)}{iv}\n"
 
     await message.answer(pe(text), parse_mode="HTML", reply_markup=mailing_targets_keyboard(mailing_id, targets))
 
@@ -1043,7 +1076,7 @@ async def process_edit_folder(
         logger.error(f"Error resolving folder {slug}: {e}")
         await loading_msg.delete()
         await message.answer(
-            pe(f"❌ Ошибка при получении чатов из папки: {e}"),
+            pe(f"❌ Ошибка при получении чатов из папки: {html.escape(str(e))}"),
             parse_mode="HTML",
         )
 
@@ -1240,7 +1273,7 @@ async def callback_delete_mailing(callback: CallbackQuery, db: Database):
         return
 
     await callback.message.edit_text(
-        pe(f"❓ Вы уверены, что хотите удалить рассылку «{mailing.name}»?"),
+        pe(f"❓ Вы уверены, что хотите удалить рассылку «{html.escape(mailing.name)}»?"),
         parse_mode="HTML",
         reply_markup=delete_mailing_confirm_keyboard(mailing_id),
     )
@@ -1385,7 +1418,7 @@ async def callback_create_add_message(callback: CallbackQuery, state: FSMContext
     await state.set_state(CreateMailingStates.waiting_message_text)
 
     await callback.message.edit_text(
-        pe("✏️ Отправьте текст или фото для рассылки.\n"
+        pe("✏️ Отправьте текст, фото, видео или игровое эмодзи для рассылки.\n"
         "Можно отправить несколько фото (до 10) — они будут отправлены альбомом.\n\n"
         "💡 <b>Форматирование</b> (жирный, курсив и т.д.) — выделите текст прямо в Telegram, оно сохранится автоматически."),
         parse_mode="HTML",
@@ -1463,13 +1496,17 @@ async def process_create_forward_message(message: Message, state: FSMContext, db
     elif isinstance(origin, MessageOriginUser):
         text = message.text or message.caption or ""
         photo_path = await save_photo_from_message(message) if message.photo else None
-        if not text and not photo_path:
+        dice_emoji = message.dice.emoji if message.dice else None
+        if not text and not photo_path and not dice_emoji:
             await message.answer(
-                "❌ Поддерживаются только текст и фото. Видео, голосовые и стикеры не поддерживаются."
+                "❌ Поддерживаются только текст, фото и игровые эмодзи. Видео, голосовые и стикеры не поддерживаются."
             )
             return
-        entities_json = serialize_entities(message.entities or message.caption_entities)
-        await db.add_mailing_message(mailing_id, text, photo_path=photo_path, entities_json=entities_json)
+        if dice_emoji:
+            await db.add_mailing_message(mailing_id, dice_emoji, parse_mode="dice")
+        else:
+            entities_json = serialize_entities(message.entities or message.caption_entities)
+            await db.add_mailing_message(mailing_id, text, photo_path=photo_path, entities_json=entities_json)
         await state.set_state(CreateMailingStates.adding_messages)
         messages = await db.get_mailing_messages(mailing_id)
         await message.answer(
@@ -1564,10 +1601,7 @@ async def process_create_message_video(message: Message, state: FSMContext, db: 
 @router.message(CreateMailingStates.waiting_message_text)
 async def process_create_message_text(message: Message, state: FSMContext, db: Database):
     text = (message.text or "").strip()
-    if not text:
-        await message.answer(pe("❌ Отправьте текст, фото или видео."), parse_mode="HTML")
-        return
-    entities_json = serialize_entities(message.entities)
+    dice_emoji = message.dice.emoji if message.dice else None
     data = await state.get_data()
     mailing_id = data.get("mailing_id")
     if not mailing_id:
@@ -1582,6 +1616,29 @@ async def process_create_message_text(message: Message, state: FSMContext, db: D
     pending_caption = data.get("pending_caption")
     pending_caption_entities = data.get("pending_caption_entities")
 
+    if dice_emoji:
+        if pending_photos:
+            await message.answer(
+                pe("❌ Сначала сохраните добавленные фотографии."),
+                parse_mode="HTML",
+            )
+            return
+        await db.add_mailing_message(mailing_id, dice_emoji, parse_mode="dice")
+        await state.set_state(CreateMailingStates.adding_messages)
+        messages = await db.get_mailing_messages(mailing_id)
+        await message.answer(
+            pe(f"✅ Эмодзи добавлено! Всего сообщений: {len(messages)}\n\n"
+               "Добавьте ещё или нажмите «Готово»:"),
+            parse_mode="HTML",
+            reply_markup=mailing_creation_messages_keyboard(mailing_id, messages),
+        )
+        return
+
+    if not text:
+        await message.answer(pe("❌ Отправьте текст, фото, видео или игровое эмодзи."), parse_mode="HTML")
+        return
+
+    entities_json = serialize_entities(message.entities)
     if pending_photos:
         if pending_caption is not None:
             save_text = pending_caption
@@ -1756,7 +1813,7 @@ async def process_create_target(message: Message, state: FSMContext, db: Databas
         await state.update_data(target_id=target_id, mailing_id=mailing_id)
         await state.set_state(EditMailingStates.waiting_thread_id_for_target)
         await message.answer(
-            pe(f"💬 Чат <b>{target}</b> использует темы (Topics).\n\n"
+            pe(f"💬 Чат <b>{html.escape(target)}</b> использует темы (Topics).\n\n"
                "Отправьте ссылку на тему или её ID.\n"
                "Примеры: <code>https://t.me/chatname/123</code> или <code>123</code>\n\n"
                "Нажмите «Пропустить» для отправки в General."),
@@ -1908,7 +1965,7 @@ async def process_create_folder(
         logger.error(f"Error resolving folder {slug}: {e}")
         await loading_msg.delete()
         await message.answer(
-            pe(f"❌ Ошибка при получении чатов из папки: {e}"),
+            pe(f"❌ Ошибка при получении чатов из папки: {html.escape(str(e))}"),
             parse_mode="HTML",
         )
 
@@ -2194,9 +2251,9 @@ async def callback_set_mailing_account(callback: CallbackQuery, db: Database):
     active_hours = format_active_hours(mailing.active_hours_json)
 
     text = pe(
-        f"📋 Рассылка: {mailing.name}\n\n"
+        f"📋 Рассылка: {html.escape(mailing.name)}\n\n"
         f"Статус: {status}\n"
-        f"Аккаунт: {account.display_name if account else 'не найден'}\n"
+        f"Аккаунт: {html.escape(account.display_name) if account else 'не найден'}\n"
         f"Интервал: {mailing.interval_seconds} сек\n"
         f"Время активности: {active_hours}\n"
         f"Сообщений: {len(messages)}\n"
@@ -2257,7 +2314,7 @@ async def callback_set_parse_mode(callback: CallbackQuery, db: Database):
     if messages:
         for i, msg in enumerate(messages, 1):
             fmt = f"[{msg.parse_mode or 'html'}]"
-            text += f"{i}. {fmt} {message_preview(msg)}\n"
+            text += f"{i}. {fmt} {html.escape(message_preview(msg))}\n"
     else:
         text += "Сообщений пока нет.\n"
 
@@ -2351,7 +2408,7 @@ async def callback_toggle_keep_targets(callback: CallbackQuery, db: Database):
     if targets:
         for i, target in enumerate(targets, 1):
             thread_info = f" [тема #{target.thread_id}]" if target.thread_id else ""
-            text += f"{i}. {target.chat_identifier}{thread_info}\n"
+            text += f"{i}. {html.escape(target.chat_identifier)}{thread_info}\n"
     else:
         text += "Целевых чатов пока нет.\n"
     text += "\nНажмите на чат, чтобы удалить его:"
@@ -2502,9 +2559,9 @@ async def callback_mailing_reply_mode(callback: CallbackQuery, db: Database):
         last_sent = _fmt_dt(mailing.last_sent_at)
         active_hours = format_active_hours(mailing.active_hours_json)
         text = pe(
-            f"📋 Рассылка: {mailing.name}\n\n"
+            f"📋 Рассылка: {html.escape(mailing.name)}\n\n"
             f"Статус: {status}\n"
-            f"Аккаунт: {account.phone if account else 'не найден'}\n"
+            f"Аккаунт: {html.escape(account.phone) if account else 'не найден'}\n"
             f"Интервал: {mailing.interval_seconds} сек\n"
             f"Время активности: {active_hours}\n"
             f"Сообщений: {len(messages)}\n"
@@ -2535,9 +2592,9 @@ async def callback_reply_mode_last(callback: CallbackQuery, db: Database):
     last_sent = _fmt_dt(mailing.last_sent_at)
     active_hours = format_active_hours(mailing.active_hours_json)
     text = pe(
-        f"📋 Рассылка: {mailing.name}\n\n"
+        f"📋 Рассылка: {html.escape(mailing.name)}\n\n"
         f"Статус: {status}\n"
-        f"Аккаунт: {account.phone if account else 'не найден'}\n"
+        f"Аккаунт: {html.escape(account.phone) if account else 'не найден'}\n"
         f"Интервал: {mailing.interval_seconds} сек\n"
         f"Время активности: {active_hours}\n"
         f"Сообщений: {len(messages)}\n"
@@ -2583,9 +2640,9 @@ async def callback_reply_mode_fixed_pos(callback: CallbackQuery, db: Database):
     last_sent = _fmt_dt(mailing.last_sent_at)
     active_hours = format_active_hours(mailing.active_hours_json)
     text = pe(
-        f"📋 Рассылка: {mailing.name}\n\n"
+        f"📋 Рассылка: {html.escape(mailing.name)}\n\n"
         f"Статус: {status}\n"
-        f"Аккаунт: {account.phone if account else 'не найден'}\n"
+        f"Аккаунт: {html.escape(account.phone) if account else 'не найден'}\n"
         f"Интервал: {mailing.interval_seconds} сек\n"
         f"Время активности: {active_hours}\n"
         f"Сообщений: {len(messages)}\n"
@@ -2664,9 +2721,9 @@ async def process_reply_range(message: Message, state: FSMContext, db: Database)
     last_sent = _fmt_dt(mailing.last_sent_at)
     active_hours = format_active_hours(mailing.active_hours_json)
     text_out = pe(
-        f"📋 Рассылка: {mailing.name}\n\n"
+        f"📋 Рассылка: {html.escape(mailing.name)}\n\n"
         f"Статус: {status}\n"
-        f"Аккаунт: {account.phone if account else 'не найден'}\n"
+        f"Аккаунт: {html.escape(account.phone) if account else 'не найден'}\n"
         f"Интервал: {mailing.interval_seconds} сек\n"
         f"Время активности: {active_hours}\n"
         f"Сообщений: {len(messages_list)}\n"

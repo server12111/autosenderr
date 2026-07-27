@@ -1,3 +1,5 @@
+import html
+
 from aiogram import Router, F
 from aiogram.types import Message, CallbackQuery
 from aiogram.fsm.context import FSMContext
@@ -85,17 +87,16 @@ async def process_wallet(message: Message, state: FSMContext, db: Database):
     user = await db.get_user(message.from_user.id)
     amount = user.ref_balance
 
-    if not await db.deduct_ref_balance(user.id, amount):
+    if not await db.create_withdrawal_from_balance(user.id, amount, wallet):
         await state.clear()
         await message.answer("❌ Баланс уже был изменён. Повторите запрос.", parse_mode="HTML")
         return
-    await db.create_withdrawal_request(user.id, amount, wallet)
     await state.clear()
 
     await message.answer(
         pe(f"✅ Заявка на вывод создана!\n\n"
         f"Сумма: <b>{amount:.2f} USDT</b>\n"
-        f"Кошелёк: <code>{wallet}</code>\n\n"
+        f"Кошелёк: <code>{html.escape(wallet)}</code>\n\n"
         "Администратор обработает заявку в ближайшее время."),
         parse_mode="HTML",
         reply_markup=main_menu_keyboard(),

@@ -1,3 +1,6 @@
+import re
+
+
 EMOJI_MAP: dict[str, str] = {
     # Checkmarks / crosses
     "✅": "5206607081334906820",
@@ -159,10 +162,19 @@ EMOJI_MAP: dict[str, str] = {
     "🛒": "5312361253610475399",
 }
 
+_EMOJI_PATTERN = re.compile(
+    "|".join(re.escape(emoji) for emoji in sorted(EMOJI_MAP, key=len, reverse=True))
+)
+
 
 def pe(text: str) -> str:
-    for char, eid in EMOJI_MAP.items():
-        text = text.replace(char, f'<tg-emoji emoji-id="{eid}">{char}</tg-emoji>')
+    text = _EMOJI_PATTERN.sub(
+        lambda match: (
+            f'<tg-emoji emoji-id="{EMOJI_MAP[match.group(0)]}">'
+            f'{match.group(0)}</tg-emoji>'
+        ),
+        text,
+    )
     # Bullet point → animated red circle (fallback must match emoji, not "•")
     text = text.replace("•", '<tg-emoji emoji-id="5398038979217989221">🔴</tg-emoji>')
     return text

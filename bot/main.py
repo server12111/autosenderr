@@ -57,6 +57,54 @@ logging.basicConfig(
 logging.Formatter.converter = staticmethod(moscow_logging_converter)
 logging.getLogger("telethon").setLevel(logging.WARNING)
 logger = logging.getLogger(__name__)
+_instance_lock_file = None
+
+
+def acquire_instance_lock() -> bool:
+    """Prevent two bot processes from handling the same updates."""
+    global _instance_lock_file
+    if _instance_lock_file is not None:
+        return True
+
+    lock_path = os.path.abspath(f"{config.DATABASE_PATH}.lock")
+    os.makedirs(os.path.dirname(lock_path), exist_ok=True)
+    lock_file = open(lock_path, "a+b")
+    lock_file.seek(0)
+    try:
+        if os.name == "nt":
+            import msvcrt
+            if os.path.getsize(lock_path) == 0:
+                lock_file.write(b"\0")
+                lock_file.flush()
+                lock_file.seek(0)
+            msvcrt.locking(lock_file.fileno(), msvcrt.LK_NBLCK, 1)
+        else:
+            import fcntl
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        lock_file.close()
+        return False
+
+    _instance_lock_file = lock_file
+    return True
+
+
+def release_instance_lock():
+    global _instance_lock_file
+    lock_file = _instance_lock_file
+    if lock_file is None:
+        return
+    try:
+        if os.name == "nt":
+            import msvcrt
+            lock_file.seek(0)
+            msvcrt.locking(lock_file.fileno(), msvcrt.LK_UNLCK, 1)
+        else:
+            import fcntl
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+    finally:
+        lock_file.close()
+        _instance_lock_file = None
 
 
 async def main():
@@ -102,6 +150,7 @@ async def main():
             logger.info(f"Successfully sent notification to user {user_id}")
         except Exception as e:
             logger.error(f"Failed to notify user {user_id}: {e}", exc_info=True)
+            raise
 
     userbot_manager.set_message_handler(autoresponder_service.handle_message)
     userbot_manager.set_group_reply_handler(autoresponder_service.handle_group_reply)
@@ -184,21 +233,27 @@ async def main():
 
 
 if __name__ == "__main__":
+    if not acquire_instance_lock():
+        logger.error("Another bot instance is already running")
+        sys.exit(1)
     attempt = 0
     consecutive_failures = 0
-    while True:
-        attempt += 1
-        logger.info(f"=== Bot starting (attempt #{attempt}) ===")
-        try:
-            asyncio.run(main())
-            logger.info("Bot exited cleanly — not restarting")
-            break
-        except (KeyboardInterrupt, SystemExit):
-            logger.info("Bot stopped by user")
-            break
-        except Exception as e:
-            consecutive_failures += 1
-            logger.critical(f"Bot crashed: {e}", exc_info=True)
-            backoff = min(5 * (2 ** (consecutive_failures - 1)), 300)
-            logger.info(f"Restarting in {backoff}s (crash #{consecutive_failures})...")
-            time.sleep(backoff)
+    try:
+        while True:
+            attempt += 1
+            logger.info(f"=== Bot starting (attempt #{attempt}) ===")
+            try:
+                asyncio.run(main())
+                logger.info("Bot exited cleanly — not restarting")
+                break
+            except (KeyboardInterrupt, SystemExit):
+                logger.info("Bot stopped by user")
+                break
+            except Exception as e:
+                consecutive_failures += 1
+                logger.critical(f"Bot crashed: {e}", exc_info=True)
+                backoff = min(5 * (2 ** (consecutive_failures - 1)), 300)
+                logger.info(f"Restarting in {backoff}s (crash #{consecutive_failures})...")
+                time.sleep(backoff)
+    finally:
+        release_instance_lock()

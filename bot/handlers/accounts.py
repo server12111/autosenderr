@@ -1,4 +1,5 @@
 import asyncio
+import html
 import time
 from datetime import datetime
 from aiogram import Router, F
@@ -23,7 +24,7 @@ from ..keyboards.inline import (
 )
 from ..userbot.manager import UserbotManager, _parse_proxy, _DEVICE_POOL
 from ..config import config
-from ..services import CryptoBotService, TonPaymentService
+from ..services import CryptoBotService, TonPaymentService, MailingService
 from ..utils.time_utils import now_moscow
 
 
@@ -68,7 +69,7 @@ async def callback_accounts(callback: CallbackQuery, db: Database):
             status = "🟢" if acc.is_active else "🔴"
             ar = "✅" if acc.autoresponder_enabled else "❌"
             gr = "✅" if acc.group_autoresponder_enabled else "❌"
-            text += f"{status} {acc.display_name}\n  └ Личный автоответ: {ar}  Групповой: {gr}\n"
+            text += f"{status} {html.escape(acc.display_name)}\n  └ Личный автоответ: {ar}  Групповой: {gr}\n"
     else:
         text += "У вас пока нет добавленных аккаунтов.\n"
 
@@ -89,12 +90,12 @@ async def callback_account_menu(callback: CallbackQuery, db: Database):
 
     ar_status = "✅ Включён" if account.autoresponder_enabled else "❌ Выключен"
     gr_status = "✅ Включён" if account.group_autoresponder_enabled else "❌ Выключен"
-    proxy_status = f"🌐 {account.proxy}" if account.proxy else "🌐 Прокси: не настроен"
+    proxy_status = f"🌐 {html.escape(account.proxy)}" if account.proxy else "🌐 Прокси: не настроен"
     sponsor_status = "✅ Включена" if account.auto_subscribe_sponsors else "❌ Выключена"
 
     text = pe(
-        f"📱 Аккаунт: {account.display_name}\n"
-        f"📞 Номер: {account.phone}\n\n"
+        f"📱 Аккаунт: {html.escape(account.display_name)}\n"
+        f"📞 Номер: {html.escape(account.phone)}\n\n"
         f"🤖 Личный автоответчик: {ar_status}\n"
         f"💬 Групповой автоответчик: {gr_status}\n"
         f"🤖 Автоподписка на спонсоров: {sponsor_status}\n"
@@ -178,6 +179,7 @@ async def callback_add_account(callback: CallbackQuery, state: FSMContext, db: D
     )
 
     await state.clear()
+    await state.update_data(account_setup_allowed=True)
     await callback.message.edit_text(text, parse_mode="HTML", reply_markup=add_account_proxy_keyboard())
     await callback.answer()
 
@@ -195,7 +197,7 @@ async def _create_cryptobot_account_payment(callback: CallbackQuery, db: Databas
     if not invoice:
         error_msg = crypto_service.last_error.message if crypto_service.last_error else "Неизвестная ошибка"
         await callback.message.edit_text(
-            pe(f"❌ Не удалось создать счёт: {error_msg}"),
+            pe(f"❌ Не удалось создать счёт: {html.escape(error_msg)}"),
             parse_mode="HTML",
             reply_markup=main_menu_keyboard(),
         )
@@ -244,7 +246,7 @@ async def callback_pay_account_ton(
     callback: CallbackQuery, db: Database, ton_service: TonPaymentService
 ):
     user = await db.get_user(callback.from_user.id)
-    comment = f"acc_{user.telegram_id}_{int(time.time())}"
+    comment = f"acc_{user.telegram_id}_{time.time_ns()}"
 
     await callback.message.edit_text(pe("⏳ Получаем курс GRAM(TON)..."), parse_mode="HTML")
 
@@ -330,6 +332,7 @@ async def callback_check_ton_account(
     )
 
     await state.clear()
+    await state.update_data(account_setup_allowed=True)
     await callback.message.edit_text(text, parse_mode="HTML", reply_markup=add_account_proxy_keyboard())
     await callback.answer()
 
@@ -374,12 +377,16 @@ async def callback_check_account_payment(callback: CallbackQuery, state: FSMCont
     )
 
     await state.clear()
+    await state.update_data(account_setup_allowed=True)
     await callback.message.edit_text(text, parse_mode="HTML", reply_markup=add_account_proxy_keyboard())
     await callback.answer()
 
 
 @router.callback_query(F.data == "add_account_set_proxy")
 async def callback_add_account_set_proxy(callback: CallbackQuery, state: FSMContext):
+    if not (await state.get_data()).get("account_setup_allowed"):
+        await callback.answer("Сессия добавления аккаунта истекла", show_alert=True)
+        return
     await callback.message.edit_text(
         "🌐 Введите прокси в формате:\n"
         "<code>socks5://host:port</code>\n"
@@ -393,6 +400,9 @@ async def callback_add_account_set_proxy(callback: CallbackQuery, state: FSMCont
 
 @router.callback_query(F.data == "add_account_skip_proxy")
 async def callback_add_account_skip_proxy(callback: CallbackQuery, state: FSMContext):
+    if not (await state.get_data()).get("account_setup_allowed"):
+        await callback.answer("Сессия добавления аккаунта истекла", show_alert=True)
+        return
     await state.update_data(proxy=None)
     await _ask_api_step(callback.message, can_edit=True)
     await callback.answer()
@@ -424,7 +434,7 @@ async def process_proxy(message: Message, state: FSMContext):
     if not await _test_proxy_connection(parsed.hostname, parsed.port):
         await message.answer(
             pe(f"❌ <b>Прокси не подходит!</b>\n\n"
-            f"Не удалось подключиться к <code>{parsed.hostname}:{parsed.port}</code>.\n\n"
+            f"Не удалось подключиться к <code>{html.escape(parsed.hostname)}:{parsed.port}</code>.\n\n"
             f"Проверьте:\n"
             f"• Правильность адреса и порта\n"
             f"• Логин и пароль (если есть)\n"
@@ -456,6 +466,9 @@ async def _ask_api_step(target, can_edit: bool = False):
 
 @router.callback_query(F.data == "add_account_set_api")
 async def callback_add_account_set_api(callback: CallbackQuery, state: FSMContext):
+    if not (await state.get_data()).get("account_setup_allowed"):
+        await callback.answer("Сессия добавления аккаунта истекла", show_alert=True)
+        return
     await callback.message.edit_text(
         pe("🔑 Введите API ID (число):\n\n"
         "Получить: https://my.telegram.org"),
@@ -468,6 +481,9 @@ async def callback_add_account_set_api(callback: CallbackQuery, state: FSMContex
 
 @router.callback_query(F.data == "add_account_skip_api")
 async def callback_add_account_skip_api(callback: CallbackQuery, state: FSMContext):
+    if not (await state.get_data()).get("account_setup_allowed"):
+        await callback.answer("Сессия добавления аккаунта истекла", show_alert=True)
+        return
     await state.update_data(
         api_id=config.DEFAULT_API_ID,
         api_hash=config.DEFAULT_API_HASH,
@@ -625,7 +641,7 @@ async def _connect_and_send_code(message: Message, state: FSMContext, data: dict
             await state.clear()
         else:
             await message.answer(
-                pe(f"❌ Ошибка при отправке кода: {e}\n\nПопробуйте снова."),
+                pe(f"❌ Ошибка при отправке кода: {html.escape(str(e))}\n\nПопробуйте снова."),
                 parse_mode="HTML",
                 reply_markup=main_menu_keyboard(),
             )
@@ -666,6 +682,9 @@ async def process_password(message: Message, state: FSMContext, db: Database):
         return
     password = message.text.strip()
     data = await state.get_data()
+    if not data.get("account_setup_allowed"):
+        await state.clear()
+        return
     client = data.get("client")
 
     if not client:
@@ -692,13 +711,13 @@ async def process_password(message: Message, state: FSMContext, db: Database):
             session_string=session_string,
         )
         proxy_str = data.get("proxy")
-        if proxy_str and account_id:
+        if account_id:
             await db.update_account_proxy(account_id, proxy_str)
 
         user = await db.get_user(message.from_user.id)
         accounts = await db.get_user_accounts(user.id)
         await message.answer(
-            pe(f"✅ Аккаунт {data['phone']} успешно добавлен!"),
+            pe(f"✅ Аккаунт {html.escape(data['phone'])} успешно добавлен!"),
             parse_mode="HTML",
             reply_markup=accounts_keyboard(accounts),
         )
@@ -709,7 +728,7 @@ async def process_password(message: Message, state: FSMContext, db: Database):
         user = await db.get_user(message.from_user.id)
         accounts = await db.get_user_accounts(user.id)
         await message.answer(
-            pe(f"❌ Ошибка авторизации: {e}"),
+            pe(f"❌ Ошибка авторизации: {html.escape(str(e))}"),
             parse_mode="HTML",
             reply_markup=accounts_keyboard(accounts),
         )
@@ -832,6 +851,9 @@ async def _confirm_code(event, state: FSMContext, db: Database):
         return
 
     data = await state.get_data()
+    if not data.get("account_setup_allowed"):
+        await state.clear()
+        return
     code = data.get("entered_code", "")
     client = data.get("client")
 
@@ -871,13 +893,13 @@ async def _confirm_code(event, state: FSMContext, db: Database):
             session_string=session_string,
         )
         proxy_str = data.get("proxy")
-        if proxy_str and account_id:
+        if account_id:
             await db.update_account_proxy(account_id, proxy_str)
 
         user = await db.get_user(user_id)
         accounts = await db.get_user_accounts(user.id)
         await _edit_code_message(event, state,
-            pe(f"✅ Аккаунт {data['phone']} успешно добавлен!"),
+            pe(f"✅ Аккаунт {html.escape(data['phone'])} успешно добавлен!"),
             parse_mode="HTML",
             reply_markup=accounts_keyboard(accounts),
         )
@@ -897,7 +919,7 @@ async def _confirm_code(event, state: FSMContext, db: Database):
             user = await db.get_user(user_id)
             accounts = await db.get_user_accounts(user.id)
             await _edit_code_message(event, state,
-                pe(f"❌ Ошибка авторизации: {e}"),
+                pe(f"❌ Ошибка авторизации: {html.escape(str(e))}"),
                 parse_mode="HTML",
                 reply_markup=accounts_keyboard(accounts),
             )
@@ -915,7 +937,7 @@ async def callback_delete_account(callback: CallbackQuery, db: Database):
         await callback.answer("Аккаунт не найден", show_alert=True)
         return
 
-    text = pe(f"❓ Вы уверены, что хотите удалить аккаунт {account.phone}?\n\n⚠️ Все рассылки этого аккаунта будут остановлены.")
+    text = pe(f"❓ Вы уверены, что хотите удалить аккаунт {html.escape(account.phone)}?\n\n⚠️ Все рассылки этого аккаунта будут остановлены.")
 
     await callback.message.edit_text(
         text, parse_mode="HTML", reply_markup=delete_account_confirm_keyboard(account_id)
@@ -925,7 +947,10 @@ async def callback_delete_account(callback: CallbackQuery, db: Database):
 
 @router.callback_query(F.data.startswith("confirm_delete_account:"))
 async def callback_confirm_delete_account(
-    callback: CallbackQuery, db: Database, userbot_manager: UserbotManager
+    callback: CallbackQuery,
+    db: Database,
+    userbot_manager: UserbotManager,
+    mailing_service: MailingService,
 ):
     account_id = int(callback.data.split(":")[1])
     account = await db.get_account_for_user(account_id, callback.from_user.id)
@@ -933,6 +958,11 @@ async def callback_confirm_delete_account(
     if not account or account.user_id != user.id:
         await callback.answer("⛔ Нет доступа", show_alert=True)
         return
+
+    mailings = await db.get_user_mailings(user.id)
+    for mailing in mailings:
+        if mailing.account_id == account_id and mailing.is_active:
+            await mailing_service.stop_mailing(mailing.id)
 
     await userbot_manager.logout_and_stop(account)
     await db.delete_account(account_id)
@@ -988,7 +1018,7 @@ async def process_rename_account(message: Message, state: FSMContext, db: Databa
 
     account = await db.get_account_for_user(account_id, message.from_user.id)
     await message.answer(
-        pe(f"✅ Аккаунт переименован: <b>{name}</b>"),
+        pe(f"✅ Аккаунт переименован: <b>{html.escape(name)}</b>"),
         parse_mode="HTML",
         reply_markup=account_menu_keyboard(account_id, account.auto_subscribe_sponsors if account else False),
     )
@@ -1026,7 +1056,7 @@ async def callback_set_proxy(callback: CallbackQuery, state: FSMContext, db: Dat
     await state.update_data(account_id=account_id)
     await state.set_state(SetProxyStates.waiting_proxy)
 
-    current = f"<code>{account.proxy}</code>" if account.proxy else "не настроен"
+    current = f"<code>{html.escape(account.proxy)}</code>" if account.proxy else "не настроен"
     await callback.message.edit_text(
         pe(f"🌐 <b>Настройка прокси SOCKS5</b>\n\n"
         f"Текущий прокси: {current}\n\n"
@@ -1095,7 +1125,7 @@ async def process_set_proxy(message: Message, state: FSMContext, db: Database, u
     if not await _test_proxy_connection(parsed.hostname, parsed.port):
         await message.answer(
             pe(f"❌ <b>Прокси не подходит!</b>\n\n"
-            f"Не удалось подключиться к <code>{parsed.hostname}:{parsed.port}</code>.\n\n"
+            f"Не удалось подключиться к <code>{html.escape(parsed.hostname)}:{parsed.port}</code>.\n\n"
             f"Проверьте:\n"
             f"• Правильность адреса и порта\n"
             f"• Логин и пароль (если есть)\n"
@@ -1116,7 +1146,7 @@ async def process_set_proxy(message: Message, state: FSMContext, db: Database, u
         await userbot_manager.start_client(account)
 
     await message.answer(
-        pe(f"✅ Прокси сохранён: <code>{text}</code>\nАккаунт переподключён."),
+        pe(f"✅ Прокси сохранён: <code>{html.escape(text)}</code>\nАккаунт переподключён."),
         parse_mode="HTML",
         reply_markup=account_menu_keyboard(account_id, account.auto_subscribe_sponsors if account else False),
     )
@@ -1138,12 +1168,12 @@ async def callback_toggle_sponsor_sub(callback: CallbackQuery, db: Database):
     account = await db.get_account_for_user(account_id, callback.from_user.id)
     ar_status = "✅ Включён" if account.autoresponder_enabled else "❌ Выключен"
     gr_status = "✅ Включён" if account.group_autoresponder_enabled else "❌ Выключен"
-    proxy_status = f"🌐 {account.proxy}" if account.proxy else "🌐 Прокси: не настроен"
+    proxy_status = f"🌐 {html.escape(account.proxy)}" if account.proxy else "🌐 Прокси: не настроен"
     sponsor_status = "✅ Включена" if account.auto_subscribe_sponsors else "❌ Выключена"
 
     text = pe(
-        f"📱 Аккаунт: {account.display_name}\n"
-        f"📞 Номер: {account.phone}\n\n"
+        f"📱 Аккаунт: {html.escape(account.display_name)}\n"
+        f"📞 Номер: {html.escape(account.phone)}\n\n"
         f"🤖 Личный автоответчик: {ar_status}\n"
         f"💬 Групповой автоответчик: {gr_status}\n"
         f"🤖 Автоподписка на спонсоров: {sponsor_status}\n"

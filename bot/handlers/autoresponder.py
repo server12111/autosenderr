@@ -1,4 +1,5 @@
 import asyncio
+import html
 import logging
 import os
 
@@ -48,9 +49,10 @@ async def callback_autoresponder(callback: CallbackQuery, db: Database):
     text_preview = account.autoresponder_text or "(не задан)"
     if len(text_preview) > 100:
         text_preview = text_preview[:100] + "..."
+    text_preview = html.escape(text_preview)
 
     text = (
-        f"🤖 Автоответчик для {account.phone}\n\n"
+        f"🤖 Автоответчик для {html.escape(account.phone)}\n\n"
         f"Статус: {status}\n"
         f"Уведомления о сообщениях: {notify_status}\n\n"
         f"Текст автоответа:\n{text_preview}\n\n"
@@ -110,10 +112,11 @@ async def callback_toggle_autoresponder(callback: CallbackQuery, db: Database, u
     text_preview = account.autoresponder_text or "(не задан)"
     if len(text_preview) > 100:
         text_preview = text_preview[:100] + "..."
+    text_preview = html.escape(text_preview)
 
     ad_note = "\n⚠️ Бесплатный тариф: к каждому автоответу добавляется реклама бота." if (account.autoresponder_enabled and free_ad_notice) else ""
     text = (
-        f"🤖 Автоответчик для {account.phone}\n\n"
+        f"🤖 Автоответчик для {html.escape(account.phone)}\n\n"
         f"Статус: {status}\n"
         f"Уведомления о сообщениях: {notify_status}\n\n"
         f"Текст автоответа:\n{text_preview}\n\n"
@@ -149,9 +152,10 @@ async def callback_toggle_notify(callback: CallbackQuery, db: Database, userbot_
     text_preview = account.autoresponder_text or "(не задан)"
     if len(text_preview) > 100:
         text_preview = text_preview[:100] + "..."
+    text_preview = html.escape(text_preview)
 
     text = (
-        f"🤖 Автоответчик для {account.phone}\n\n"
+        f"🤖 Автоответчик для {html.escape(account.phone)}\n\n"
         f"Статус: {status}\n"
         f"Уведомления о сообщениях: {notify_status}\n\n"
         f"Текст автоответа:\n{text_preview}\n\n"
@@ -242,9 +246,10 @@ async def callback_group_autoresponder(callback: CallbackQuery, db: Database):
     text_preview = account.group_autoresponder_text or "(не задан)"
     if len(text_preview) > 100:
         text_preview = text_preview[:100] + "..."
+    text_preview = html.escape(text_preview)
 
     text = (
-        f"💬 Автоответчик (группы) для {account.display_name}\n\n"
+        f"💬 Автоответчик (группы) для {html.escape(account.display_name)}\n\n"
         f"Статус: {status}\n\n"
         f"Текст автоответа:\n{text_preview}\n\n"
         "ℹ️ Автоответчик отвечает, когда кто-то отвечает на сообщение этого аккаунта в группе.\n"
@@ -299,11 +304,12 @@ async def callback_toggle_group_autoresponder(callback: CallbackQuery, db: Datab
     text_preview = account.group_autoresponder_text or "(не задан)"
     if len(text_preview) > 100:
         text_preview = text_preview[:100] + "..."
+    text_preview = html.escape(text_preview)
 
     ad_note = "\n⚠️ Бесплатный тариф: к каждому автоответу добавляется реклама бота." if (account.group_autoresponder_enabled and free_ad_notice) else ""
     await safe_edit(
         callback.message,
-        pe(f"💬 Автоответчик (группы) для {account.display_name}\n\n"
+        pe(f"💬 Автоответчик (группы) для {html.escape(account.display_name)}\n\n"
         f"Статус: {status}\n\n"
         f"Текст автоответа:\n{text_preview}\n\n"
         "ℹ️ Автоответчик отвечает, когда кто-то отвечает на сообщение этого аккаунта в группе.\n"

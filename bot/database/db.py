@@ -4,7 +4,7 @@ import os
 import secrets
 import time
 import aiosqlite
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Optional
 from dataclasses import dataclass, field
 
@@ -13,6 +13,15 @@ from ..utils.time_utils import now_moscow
 
 _SETTINGS_TTL = 60      # seconds — settings/prices
 _CHANNELS_TTL = 300     # seconds — required channels list
+
+
+def is_safe_media_path(path: str) -> bool:
+    try:
+        media_root = os.path.realpath("data")
+        resolved = os.path.realpath(path)
+        return resolved != media_root and os.path.commonpath((media_root, resolved)) == media_root
+    except (OSError, TypeError, ValueError):
+        return False
 
 
 @dataclass
@@ -113,6 +122,10 @@ class MailingMessage:
     @property
     def is_forward(self) -> bool:
         return bool(self.forward_peer and self.forward_msg_id)
+
+    @property
+    def is_dice(self) -> bool:
+        return self.parse_mode == "dice"
 
 
 @dataclass
@@ -274,6 +287,16 @@ class Database:
         await _add_col("mailing_targets", "thread_id",       "INTEGER DEFAULT NULL")
         await _add_col("mailing_targets", "is_forum",        "INTEGER DEFAULT 0")
         await _add_col("mailing_targets", "last_account_id", "INTEGER DEFAULT NULL")
+        await self._conn.execute(
+            """UPDATE mailing_targets
+               SET interval_seconds = (
+                   SELECT interval_seconds
+                   FROM mailings
+                   WHERE mailings.id = mailing_targets.mailing_id
+               )
+               WHERE interval_seconds IS NULL"""
+        )
+        await self._conn.commit()
         # mailings — keep targets on ban
         await _add_col("mailings", "keep_targets_on_ban", "INTEGER DEFAULT 0")
         # mailings — account rotation mode for multi-account mailings
@@ -412,9 +435,11 @@ class Database:
 
     async def create_user(self, telegram_id: int, username: Optional[str] = None, is_admin: bool = False) -> User:
         ref_code = secrets.token_urlsafe(6)
+        created_at = now_moscow().isoformat()
         await self._conn.execute(
-            "INSERT OR IGNORE INTO users (telegram_id, username, is_admin, ref_code) VALUES (?, ?, ?, ?)",
-            (telegram_id, username, is_admin, ref_code),
+            "INSERT OR IGNORE INTO users "
+            "(telegram_id, username, is_admin, ref_code, created_at) VALUES (?, ?, ?, ?, ?)",
+            (telegram_id, username, is_admin, ref_code, created_at),
         )
         await self._conn.commit()
         return await self.get_user(telegram_id)
@@ -594,24 +619,36 @@ class Database:
             return row["cnt"] if row else 0
 
     async def create_account(self, user_id: int, phone: str, api_id: int, api_hash: str, session_string: str) -> int:
-        async with self._conn.execute(
-            "SELECT id FROM accounts WHERE user_id = ? AND phone = ? AND is_active = 0 LIMIT 1",
-            (user_id, phone),
-        ) as cur:
-            existing = await cur.fetchone()
-        if existing:
-            await self._conn.execute(
-                "UPDATE accounts SET api_id=?, api_hash=?, session_string=?, is_active=1 WHERE id=?",
-                (api_id, api_hash, session_string, existing["id"]),
-            )
-            await self._conn.commit()
-            return existing["id"]
-        cursor = await self._conn.execute(
-            "INSERT INTO accounts (user_id, phone, api_id, api_hash, session_string) VALUES (?, ?, ?, ?, ?)",
-            (user_id, phone, api_id, api_hash, session_string),
-        )
-        await self._conn.commit()
-        return cursor.lastrowid
+        async with self._transaction_lock:
+            async with aiosqlite.connect(self.db_path) as conn:
+                conn.row_factory = aiosqlite.Row
+                await conn.execute("PRAGMA foreign_keys = ON")
+                await conn.execute("BEGIN IMMEDIATE")
+                try:
+                    async with conn.execute(
+                        "SELECT id FROM accounts WHERE user_id = ? AND phone = ? "
+                        "ORDER BY is_active ASC, id ASC LIMIT 1",
+                        (user_id, phone),
+                    ) as cur:
+                        existing = await cur.fetchone()
+                    if existing:
+                        await conn.execute(
+                            "UPDATE accounts SET api_id=?, api_hash=?, session_string=?, is_active=1 WHERE id=?",
+                            (api_id, api_hash, session_string, existing["id"]),
+                        )
+                        await conn.commit()
+                        return existing["id"]
+                    cursor = await conn.execute(
+                        "INSERT INTO accounts "
+                        "(user_id, phone, api_id, api_hash, session_string, created_at) "
+                        "VALUES (?, ?, ?, ?, ?, ?)",
+                        (user_id, phone, api_id, api_hash, session_string, now_moscow().isoformat()),
+                    )
+                    await conn.commit()
+                    return cursor.lastrowid
+                except BaseException:
+                    await conn.rollback()
+                    raise
 
     async def update_account_session(self, account_id: int, session_string: str):
         await self._conn.execute(
@@ -642,7 +679,7 @@ class Database:
                 (enabled, account_id),
             )
         await self._conn.commit()
-        if old_photo and old_photo != photo:
+        if old_photo and old_photo != photo and is_safe_media_path(old_photo):
             try:
                 os.remove(old_photo)
             except OSError:
@@ -666,7 +703,7 @@ class Database:
                 (enabled, account_id),
             )
         await self._conn.commit()
-        if old_photo and old_photo != photo:
+        if old_photo and old_photo != photo and is_safe_media_path(old_photo):
             try:
                 os.remove(old_photo)
             except OSError:
@@ -776,7 +813,7 @@ class Database:
                 if await cur.fetchone():
                     continue
             for path in (row["autoresponder_photo"], row["group_autoresponder_photo"]):
-                if path:
+                if path and is_safe_media_path(path):
                     try:
                         os.remove(path)
                     except OSError:
@@ -840,8 +877,10 @@ class Database:
     async def create_mailing(self, user_id: int, account_id: int, name: str,
                               interval_seconds: int, active_hours_json: Optional[str] = None) -> int:
         cursor = await self._conn.execute(
-            "INSERT INTO mailings (user_id, account_id, name, interval_seconds, active_hours_json) VALUES (?, ?, ?, ?, ?)",
-            (user_id, account_id, name, interval_seconds, active_hours_json),
+            "INSERT INTO mailings "
+            "(user_id, account_id, name, interval_seconds, active_hours_json, created_at) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
+            (user_id, account_id, name, interval_seconds, active_hours_json, now_moscow().isoformat()),
         )
         await self._conn.commit()
         return cursor.lastrowid
@@ -912,6 +951,8 @@ class Database:
             if row["video_path"]:
                 paths.append(row["video_path"])
             for path in paths:
+                if not is_safe_media_path(path):
+                    continue
                 try:
                     os.remove(path)
                 except OSError:
@@ -984,11 +1025,13 @@ class Database:
                     except (json.JSONDecodeError, TypeError):
                         paths = [row["photo_path"]]
                     for path in paths:
+                        if not is_safe_media_path(path):
+                            continue
                         try:
                             os.remove(path)
                         except OSError:
                             pass
-                if row["video_path"]:
+                if row["video_path"] and is_safe_media_path(row["video_path"]):
                     try:
                         os.remove(row["video_path"])
                     except OSError:
@@ -1023,8 +1066,12 @@ class Database:
             if not normalized.startswith('@'):
                 normalized = f"@{normalized}"
         cursor = await self._conn.execute(
-            "INSERT INTO mailing_targets (mailing_id, chat_identifier, is_forum) VALUES (?, ?, ?)",
-            (mailing_id, normalized, 1 if is_forum else 0),
+            """INSERT INTO mailing_targets
+               (mailing_id, chat_identifier, is_forum, interval_seconds)
+               SELECT ?, ?, ?, interval_seconds
+               FROM mailings
+               WHERE id = ?""",
+            (mailing_id, normalized, 1 if is_forum else 0, mailing_id),
         )
         await self._conn.commit()
         return cursor.lastrowid
@@ -1066,6 +1113,41 @@ class Database:
             "total_mailings", "paid_subs"
         )}
 
+    async def count_free_tier_users(self) -> int:
+        now = now_moscow().isoformat()
+        async with self._conn.execute(
+            """SELECT COUNT(*) AS cnt
+               FROM users
+               WHERE subscription_type = 'free_ad'
+                 AND (subscription_end IS NULL
+                      OR replace(subscription_end, 'T', ' ') <= replace(?, 'T', ' '))""",
+            (now,),
+        ) as cur:
+            row = await cur.fetchone()
+            return int(row["cnt"] or 0)
+
+    async def get_free_tier_target_rows(self) -> list[dict]:
+        now = now_moscow().isoformat()
+        async with self._conn.execute(
+            """SELECT
+                   mt.id AS target_id,
+                   mt.chat_identifier,
+                   COALESCE(mt.interval_seconds, m.interval_seconds) AS delay_seconds,
+                   m.id AS mailing_id,
+                   m.user_id
+               FROM mailing_targets mt
+               JOIN mailings m ON m.id = mt.mailing_id
+               JOIN users u ON u.id = m.user_id
+               JOIN accounts a ON a.id = m.account_id
+               WHERE m.is_active = 1
+                 AND a.is_active = 1
+                 AND u.subscription_type = 'free_ad'
+                 AND (u.subscription_end IS NULL
+                      OR replace(u.subscription_end, 'T', ' ') <= replace(?, 'T', ' '))""",
+            (now,),
+        ) as cur:
+            return [dict(row) for row in await cur.fetchall()]
+
     async def update_target_last_sent(self, target_id: int, account_id: Optional[int] = None):
         await self._conn.execute(
             "UPDATE mailing_targets SET last_sent_at = ?, last_account_id = ? WHERE id = ?",
@@ -1103,8 +1185,8 @@ class Database:
                                           message_text: Optional[str]) -> bool:
         async with self._conn.execute(
             "INSERT OR IGNORE INTO autoresponder_history "
-            "(account_id, sender_telegram_id, message_text) VALUES (?, ?, ?)",
-            (account_id, sender_telegram_id, message_text),
+            "(account_id, sender_telegram_id, message_text, responded_at) VALUES (?, ?, ?, ?)",
+            (account_id, sender_telegram_id, message_text, now_moscow().isoformat()),
         ) as cur:
             claimed = cur.rowcount > 0
         await self._conn.commit()
@@ -1112,8 +1194,9 @@ class Database:
 
     async def add_autoresponder_history(self, account_id: int, sender_telegram_id: int, message_text: Optional[str]):
         await self._conn.execute(
-            "INSERT OR IGNORE INTO autoresponder_history (account_id, sender_telegram_id, message_text) VALUES (?, ?, ?)",
-            (account_id, sender_telegram_id, message_text),
+            "INSERT OR IGNORE INTO autoresponder_history "
+            "(account_id, sender_telegram_id, message_text, responded_at) VALUES (?, ?, ?, ?)",
+            (account_id, sender_telegram_id, message_text, now_moscow().isoformat()),
         )
         await self._conn.commit()
 
@@ -1133,8 +1216,10 @@ class Database:
                               currency: str, plan_days: int = 30,
                               payment_method: str = "cryptobot") -> int:
         cursor = await self._conn.execute(
-            "INSERT INTO payments (user_id, invoice_id, amount, currency, plan_days, payment_method) VALUES (?, ?, ?, ?, ?, ?)",
-            (user_id, invoice_id, amount, currency, plan_days, payment_method),
+            "INSERT INTO payments "
+            "(user_id, invoice_id, amount, currency, plan_days, payment_method, created_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (user_id, invoice_id, amount, currency, plan_days, payment_method, now_moscow().isoformat()),
         )
         await self._conn.commit()
         return cursor.lastrowid
@@ -1163,6 +1248,79 @@ class Database:
             updated = cur.rowcount > 0
         await self._conn.commit()
         return updated
+
+    async def complete_subscription_payment(
+        self,
+        invoice_id: str,
+        referral_amount: float,
+    ) -> Optional[datetime]:
+        """Atomically mark a payment paid and extend the related subscription."""
+        async with self._transaction_lock:
+            async with aiosqlite.connect(self.db_path) as conn:
+                conn.row_factory = aiosqlite.Row
+                await conn.execute("PRAGMA foreign_keys = ON")
+                await conn.execute("BEGIN IMMEDIATE")
+                try:
+                    async with conn.execute(
+                        """SELECT p.user_id, p.plan_days, p.status,
+                                  u.subscription_end, u.referred_by
+                           FROM payments p
+                           JOIN users u ON u.id = p.user_id
+                           WHERE p.invoice_id = ?""",
+                        (invoice_id,),
+                    ) as cur:
+                        row = await cur.fetchone()
+                    if not row or row["status"] == "paid":
+                        await conn.rollback()
+                        return None
+
+                    current_end = self._parse_datetime(row["subscription_end"])
+                    now = now_moscow()
+                    plan_days = int(row["plan_days"] or 30)
+                    new_end = (
+                        current_end + timedelta(days=plan_days)
+                        if current_end and current_end > now
+                        else now + timedelta(days=plan_days)
+                    )
+
+                    await conn.execute(
+                        """UPDATE payments
+                           SET status = 'paid', paid_at = ?
+                           WHERE invoice_id = ? AND status != 'paid'""",
+                        (now.isoformat(), invoice_id),
+                    )
+                    await conn.execute(
+                        """UPDATE users
+                           SET subscription_end = ?,
+                               subscription_type = CASE
+                                   WHEN subscription_type = 'free_ad' THEN NULL
+                                   ELSE subscription_type
+                               END,
+                               subscription_expired_notified_at = NULL,
+                               reminder_3d_sent_at = NULL,
+                               reminder_1d_sent_at = NULL
+                           WHERE id = ?""",
+                        (new_end.isoformat(), row["user_id"]),
+                    )
+
+                    if row["referred_by"] and referral_amount > 0:
+                        async with conn.execute(
+                            "SELECT value FROM settings WHERE key = 'ref_percent'"
+                        ) as cur:
+                            setting = await cur.fetchone()
+                        ref_percent = float(setting["value"]) if setting else 10.0
+                        reward = round(referral_amount * ref_percent / 100, 4)
+                        if reward > 0:
+                            await conn.execute(
+                                "UPDATE users SET ref_balance = ref_balance + ? WHERE id = ?",
+                                (reward, row["referred_by"]),
+                            )
+
+                    await conn.commit()
+                    return new_end
+                except BaseException:
+                    await conn.rollback()
+                    raise
 
     async def get_pending_payments(self) -> list[Payment]:
         async with self._conn.execute("SELECT * FROM payments WHERE status = 'pending'") as cur:
@@ -1308,15 +1466,30 @@ class Database:
     async def get_subscription_stats(self) -> list[dict]:
         """Return subscription info for users who have at least one paid payment."""
         async with self._conn.execute("""
+            WITH ranked_payments AS (
+                SELECT p.*,
+                       ROW_NUMBER() OVER (
+                           PARTITION BY p.user_id
+                           ORDER BY COALESCE(p.paid_at, p.created_at) DESC, p.id DESC
+                       ) AS payment_rank
+                FROM payments p
+                WHERE p.status = 'paid'
+            ),
+            payment_counts AS (
+                SELECT user_id, COUNT(*) AS purchase_count
+                FROM ranked_payments
+                GROUP BY user_id
+            )
             SELECT u.id, u.telegram_id, u.username, u.subscription_end,
-                   COUNT(p.id) as purchase_count,
-                   MAX(p.paid_at) as last_paid_at,
-                   MAX(p.plan_days) as last_plan_days,
-                   MAX(p.amount) as last_amount,
-                   MAX(p.payment_method) as last_method
+                   pc.purchase_count,
+                   p.paid_at AS last_paid_at,
+                   p.plan_days AS last_plan_days,
+                   p.amount AS last_amount,
+                   p.payment_method AS last_method
             FROM users u
-            INNER JOIN payments p ON p.user_id = u.id AND p.status = 'paid'
-            GROUP BY u.id
+            INNER JOIN payment_counts pc ON pc.user_id = u.id
+            INNER JOIN ranked_payments p
+                    ON p.user_id = u.id AND p.payment_rank = 1
             ORDER BY u.subscription_end IS NULL, u.subscription_end DESC
         """) as cur:
             rows = await cur.fetchall()
@@ -1369,8 +1542,9 @@ class Database:
     # === Promocodes ===
     async def create_promocode(self, code: str, duration_days: int = 30, max_uses: int = 1, is_subscription: bool = False) -> int:
         cursor = await self._conn.execute(
-            "INSERT INTO promocodes (code, duration_days, max_uses, is_subscription) VALUES (?, ?, ?, ?)",
-            (code, duration_days, max_uses, 1 if is_subscription else 0),
+            "INSERT INTO promocodes "
+            "(code, duration_days, max_uses, is_subscription, created_at) VALUES (?, ?, ?, ?, ?)",
+            (code, duration_days, max_uses, 1 if is_subscription else 0, now_moscow().isoformat()),
         )
         await self._conn.commit()
         return cursor.lastrowid
@@ -1378,9 +1552,16 @@ class Database:
     async def create_paid_promo_payment(self, user_id: int, invoice_id: str, plan_days: int):
         await self._conn.execute(
             "INSERT OR IGNORE INTO payments "
-            "(user_id, invoice_id, amount, currency, payment_method, plan_days, status, paid_at) "
-            "VALUES (?, ?, 0, 'USDT', 'promocode', ?, 'paid', ?)",
-            (user_id, invoice_id, plan_days, now_moscow().isoformat())
+            "(user_id, invoice_id, amount, currency, payment_method, plan_days, status, "
+            "created_at, paid_at) "
+            "VALUES (?, ?, 0, 'USDT', 'promocode', ?, 'paid', ?, ?)",
+            (
+                user_id,
+                invoice_id,
+                plan_days,
+                now_moscow().isoformat(),
+                now_moscow().isoformat(),
+            )
         )
         await self._conn.commit()
 
@@ -1408,31 +1589,84 @@ class Database:
 
     async def use_promocode(self, code: str, user_id: int, promocode_id: int) -> bool:
         async with self._transaction_lock:
-            await self._conn.execute("BEGIN IMMEDIATE")
-            try:
-                async with self._conn.execute(
-                    "INSERT OR IGNORE INTO promocode_uses (promocode_id, user_id) VALUES (?, ?)",
-                    (promocode_id, user_id),
-                ) as cur:
-                    inserted = cur.rowcount > 0
-                if not inserted:
-                    await self._conn.rollback()
-                    return False
-                async with self._conn.execute(
-                    "UPDATE promocodes SET uses_count = uses_count + 1, "
-                    "is_used = CASE WHEN uses_count + 1 >= max_uses THEN 1 ELSE 0 END, "
-                    "used_by = ?, used_at = ? WHERE code = ? AND uses_count < max_uses",
-                    (user_id, now_moscow().isoformat(), code),
-                ) as cur:
-                    updated = cur.rowcount > 0
-                if not updated:
-                    await self._conn.rollback()
-                    return False
-                await self._conn.commit()
-                return True
-            except BaseException:
-                await self._conn.rollback()
-                raise
+            async with aiosqlite.connect(self.db_path) as conn:
+                conn.row_factory = aiosqlite.Row
+                await conn.execute("PRAGMA foreign_keys = ON")
+                await conn.execute("BEGIN IMMEDIATE")
+                try:
+                    async with conn.execute(
+                        "INSERT OR IGNORE INTO promocode_uses "
+                        "(promocode_id, user_id, used_at) VALUES (?, ?, ?)",
+                        (promocode_id, user_id, now_moscow().isoformat()),
+                    ) as cur:
+                        inserted = cur.rowcount > 0
+                    if not inserted:
+                        await conn.rollback()
+                        return False
+                    used_at = now_moscow()
+                    async with conn.execute(
+                        "UPDATE promocodes SET uses_count = uses_count + 1, "
+                        "is_used = CASE WHEN uses_count + 1 >= max_uses THEN 1 ELSE 0 END, "
+                        "used_by = ?, used_at = ? WHERE code = ? AND uses_count < max_uses",
+                        (user_id, used_at.isoformat(), code),
+                    ) as cur:
+                        updated = cur.rowcount > 0
+                    if not updated:
+                        await conn.rollback()
+                        return False
+
+                    async with conn.execute(
+                        "SELECT duration_days, is_subscription FROM promocodes WHERE id = ?",
+                        (promocode_id,),
+                    ) as cur:
+                        promo = await cur.fetchone()
+                    async with conn.execute(
+                        "SELECT subscription_end FROM users WHERE id = ?",
+                        (user_id,),
+                    ) as cur:
+                        user = await cur.fetchone()
+                    if not promo or not user:
+                        await conn.rollback()
+                        return False
+
+                    current_end = self._parse_datetime(user["subscription_end"])
+                    new_end = (
+                        current_end + timedelta(days=promo["duration_days"])
+                        if current_end and current_end > used_at
+                        else used_at + timedelta(days=promo["duration_days"])
+                    )
+                    await conn.execute(
+                        """UPDATE users
+                           SET subscription_end = ?,
+                               subscription_type = CASE
+                                   WHEN subscription_type = 'free_ad' THEN NULL
+                                   ELSE subscription_type
+                               END,
+                               subscription_expired_notified_at = NULL,
+                               reminder_3d_sent_at = NULL,
+                               reminder_1d_sent_at = NULL
+                           WHERE id = ?""",
+                        (new_end.isoformat(), user_id),
+                    )
+                    if promo["is_subscription"]:
+                        await conn.execute(
+                            "INSERT OR IGNORE INTO payments "
+                            "(user_id, invoice_id, amount, currency, payment_method, plan_days, "
+                            "status, created_at, paid_at) "
+                            "VALUES (?, ?, 0, 'USDT', 'promocode', ?, 'paid', ?, ?)",
+                            (
+                                user_id,
+                                f"promo_{code}_{user_id}",
+                                promo["duration_days"],
+                                used_at.isoformat(),
+                                used_at.isoformat(),
+                            ),
+                        )
+                    await conn.commit()
+                    return True
+                except BaseException:
+                    await conn.rollback()
+                    raise
 
     async def get_all_promocodes(self) -> list[Promocode]:
         async with self._conn.execute("SELECT * FROM promocodes ORDER BY created_at DESC") as cur:
@@ -1465,11 +1699,42 @@ class Database:
     # === Withdrawal Requests ===
     async def create_withdrawal_request(self, user_id: int, amount: float, wallet: Optional[str] = None) -> int:
         cursor = await self._conn.execute(
-            "INSERT INTO withdrawal_requests (user_id, amount, wallet) VALUES (?, ?, ?)",
-            (user_id, amount, wallet),
+            "INSERT INTO withdrawal_requests "
+            "(user_id, amount, wallet, created_at) VALUES (?, ?, ?, ?)",
+            (user_id, amount, wallet, now_moscow().isoformat()),
         )
         await self._conn.commit()
         return cursor.lastrowid
+
+    async def create_withdrawal_from_balance(
+        self,
+        user_id: int,
+        amount: float,
+        wallet: Optional[str] = None,
+    ) -> bool:
+        async with self._transaction_lock:
+            async with aiosqlite.connect(self.db_path) as conn:
+                await conn.execute("PRAGMA foreign_keys = ON")
+                await conn.execute("BEGIN IMMEDIATE")
+                try:
+                    async with conn.execute(
+                        "UPDATE users SET ref_balance = ref_balance - ? "
+                        "WHERE id = ? AND ref_balance >= ?",
+                        (amount, user_id, amount),
+                    ) as cur:
+                        if cur.rowcount <= 0:
+                            await conn.rollback()
+                            return False
+                    await conn.execute(
+                        "INSERT INTO withdrawal_requests "
+                        "(user_id, amount, wallet, created_at) VALUES (?, ?, ?, ?)",
+                        (user_id, amount, wallet, now_moscow().isoformat()),
+                    )
+                    await conn.commit()
+                    return True
+                except BaseException:
+                    await conn.rollback()
+                    raise
 
     async def get_withdrawal_requests(self, status: Optional[str] = None) -> list[WithdrawalRequest]:
         if status:
@@ -1486,11 +1751,46 @@ class Database:
                 created_at=self._parse_datetime(r["created_at"]),
             ) for r in rows]
 
-    async def update_withdrawal_status(self, request_id: int, status: str):
-        await self._conn.execute(
-            "UPDATE withdrawal_requests SET status = ? WHERE id = ?", (status, request_id)
-        )
+    async def update_withdrawal_status(self, request_id: int, status: str) -> bool:
+        async with self._conn.execute(
+            "UPDATE withdrawal_requests SET status = ? "
+            "WHERE id = ? AND status = 'pending'",
+            (status, request_id),
+        ) as cur:
+            updated = cur.rowcount > 0
         await self._conn.commit()
+        return updated
+
+    async def decline_withdrawal_request(self, request_id: int) -> bool:
+        async with self._transaction_lock:
+            async with aiosqlite.connect(self.db_path) as conn:
+                conn.row_factory = aiosqlite.Row
+                await conn.execute("PRAGMA foreign_keys = ON")
+                await conn.execute("BEGIN IMMEDIATE")
+                try:
+                    async with conn.execute(
+                        "SELECT user_id, amount FROM withdrawal_requests "
+                        "WHERE id = ? AND status = 'pending'",
+                        (request_id,),
+                    ) as cur:
+                        row = await cur.fetchone()
+                    if not row:
+                        await conn.rollback()
+                        return False
+                    await conn.execute(
+                        "UPDATE withdrawal_requests SET status = 'declined' "
+                        "WHERE id = ? AND status = 'pending'",
+                        (request_id,),
+                    )
+                    await conn.execute(
+                        "UPDATE users SET ref_balance = ref_balance + ? WHERE id = ?",
+                        (row["amount"], row["user_id"]),
+                    )
+                    await conn.commit()
+                    return True
+                except BaseException:
+                    await conn.rollback()
+                    raise
 
     # === Required Channels ===
     async def get_required_channels(self) -> list[RequiredChannel]:
@@ -1508,8 +1808,9 @@ class Database:
 
     async def add_required_channel(self, channel_id: int, channel_username: Optional[str], channel_title: str):
         await self._conn.execute(
-            "INSERT OR REPLACE INTO required_channels (channel_id, channel_username, channel_title) VALUES (?, ?, ?)",
-            (channel_id, channel_username, channel_title),
+            "INSERT OR REPLACE INTO required_channels "
+            "(channel_id, channel_username, channel_title, added_at) VALUES (?, ?, ?, ?)",
+            (channel_id, channel_username, channel_title, now_moscow().isoformat()),
         )
         await self._conn.commit()
         self._cache_invalidate("required_channels")

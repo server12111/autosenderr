@@ -1,7 +1,7 @@
 import io
 import asyncio
+import html
 import os
-import shutil
 import tempfile
 from datetime import datetime, timedelta
 from typing import Optional
@@ -31,12 +31,15 @@ from ..keyboards.inline import (
     admin_sub_method_keyboard,
     admin_diagnostics_keyboard,
     admin_errors_keyboard,
+    admin_free_tier_keyboard,
+    admin_free_chats_keyboard,
     cancel_keyboard,
     main_menu_keyboard,
     promo_subscription_keyboard,
     _btn,
 )
 from ..config import config
+from ..services import MailingService
 from ..utils.premium_emoji import pe
 from ..utils.time_utils import now_moscow
 
@@ -81,6 +84,7 @@ _ERROR_LABELS = {
     "UserDeactivatedBanError": "Аккаунт заблокирован Telegram",
     "AuthKeyDuplicatedError": "Сессия отозвана из-за дублирования ключа авторизации",
     "UserNotParticipantError": "Аккаунт не состоит в этом чате",
+    "InviteRequestSentError": "Заявка на вступление отправлена и ожидает одобрения",
     "ChatIdInvalidError": "Telegram не распознал указанный чат",
     "ChannelInvalidError": "Telegram не распознал канал или чат",
     "ChannelPrivateError": "Чат или канал приватный, и аккаунт не имеет доступа",
@@ -90,6 +94,7 @@ _ERROR_LABELS = {
     "MessageTooLongError": "Telegram отклонил сообщение: превышена допустимая длина",
     "UserIsBlockedError": "Получатель заблокировал аккаунт",
     "InputUserDeactivatedError": "Пользователь деактивирован Telegram",
+    "PlainForbidden": "В этом чате разрешена отправка только медиа",
 }
 
 
@@ -377,7 +382,7 @@ async def process_promo_code(message: Message, state: FSMContext):
     await state.update_data(promo_code=code)
     await state.set_state(AdminStates.waiting_promo_days)
     await message.answer(
-        f"Промокод: <b>{code}</b>\n\nВведите количество дней подписки:",
+        f"Промокод: <b>{html.escape(code)}</b>\n\nВведите количество дней подписки:",
         reply_markup=cancel_keyboard(),
     )
 
@@ -399,7 +404,7 @@ async def process_promo_days(message: Message, state: FSMContext, db: Database):
     await state.set_state(AdminStates.waiting_promo_max_uses)
     data = await state.get_data()
     await message.answer(
-        f"Промокод: <b>{data['promo_code']}</b>\n"
+        f"Промокод: <b>{html.escape(data['promo_code'])}</b>\n"
         f"Дней подписки: {days}\n\n"
         "Введите количество использований:",
         reply_markup=cancel_keyboard(),
@@ -450,13 +455,23 @@ async def process_promo_is_subscription(callback: CallbackQuery, state: FSMConte
         await state.clear()
         return
 
-    await db.create_promocode(code, days, max_uses, is_subscription=is_sub)
+    try:
+        await db.create_promocode(code, days, max_uses, is_subscription=is_sub)
+    except aiosqlite.IntegrityError:
+        await state.clear()
+        await callback.message.edit_text(
+            pe("❌ Промокод с таким названием уже существует."),
+            parse_mode="HTML",
+            reply_markup=admin_promocodes_keyboard(),
+        )
+        await callback.answer()
+        return
     await state.clear()
 
     uses_text = f"{max_uses}x" if max_uses > 1 else "одноразовый"
     sub_label = "💳 платная подписка" if is_sub else "🎟 обычный промокод"
     await callback.message.edit_text(
-        pe(f"✅ Промокод создан!\n\nКод: <b>{code}</b>\nДней подписки: {days}\nИспользований: {uses_text}\nТип: {sub_label}"),
+        pe(f"✅ Промокод создан!\n\nКод: <b>{html.escape(code)}</b>\nДней подписки: {days}\nИспользований: {uses_text}\nТип: {sub_label}"),
         parse_mode="HTML",
         reply_markup=admin_promocodes_keyboard(),
     )
@@ -480,7 +495,7 @@ async def callback_admin_list_promos(callback: CallbackQuery, db: Database):
     text = "🎟 Список промокодов:\n\n"
     for promo in promocodes:
         status = "✅ Исчерпан" if promo.uses_count >= promo.max_uses else f"🟢 {promo.uses_count}/{promo.max_uses}"
-        text += f"<b>{promo.code}</b> — {promo.duration_days} дн. — {status}\n"
+        text += f"<b>{html.escape(promo.code)}</b> — {promo.duration_days} дн. — {status}\n"
 
     await callback.message.edit_text(text, reply_markup=admin_promo_list_keyboard(promocodes))
     await callback.answer()
@@ -506,7 +521,7 @@ async def callback_admin_delete_promo(callback: CallbackQuery, db: Database):
     text = "🎟 Список промокодов:\n\n"
     for promo in promocodes:
         status = "✅ Исчерпан" if promo.uses_count >= promo.max_uses else f"🟢 {promo.uses_count}/{promo.max_uses}"
-        text += f"<b>{promo.code}</b> — {promo.duration_days} дн. — {status}\n"
+        text += f"<b>{html.escape(promo.code)}</b> — {promo.duration_days} дн. — {status}\n"
     await callback.message.edit_text(text, reply_markup=admin_promo_list_keyboard(promocodes))
 
 
@@ -527,7 +542,7 @@ async def callback_admin_edit_promo_uses(callback: CallbackQuery, state: FSMCont
     await state.set_state(AdminStates.waiting_promo_edit_uses)
     await state.update_data(promo_id=promo_id)
     await callback.message.edit_text(
-        pe(f"✏️ Изменение лимита промокода <b>{promo.code}</b>\n\n"
+        pe(f"✏️ Изменение лимита промокода <b>{html.escape(promo.code)}</b>\n\n"
            f"Текущий лимит: <b>{promo.max_uses}</b> (использовано: {promo.uses_count})\n\n"
            "Введите новое максимальное количество использований:"),
         parse_mode="HTML",
@@ -563,7 +578,7 @@ async def process_promo_edit_uses(message: Message, state: FSMContext, db: Datab
     text = "🎟 Список промокодов:\n\n"
     for promo in promocodes:
         status = "✅ Исчерпан" if promo.uses_count >= promo.max_uses else f"🟢 {promo.uses_count}/{promo.max_uses}"
-        text += f"<b>{promo.code}</b> — {promo.duration_days} дн. — {status}\n"
+        text += f"<b>{html.escape(promo.code)}</b> — {promo.duration_days} дн. — {status}\n"
     await message.answer(
         pe(f"✅ Лимит обновлён: <b>{new_max}</b> использований.\n\n") + text,
         parse_mode="HTML",
@@ -584,7 +599,7 @@ async def callback_admin_promo_info(callback: CallbackQuery, db: Database):
     status = "✅ Исчерпан" if promo.uses_count >= promo.max_uses else f"🟢 Активен ({promo.uses_count}/{promo.max_uses})"
     sub_label = "💳 Платная подписка" if promo.is_subscription else "🎟 Обычный"
     text = pe(
-        f"🎟 <b>Промокод: {promo.code}</b>\n\n"
+        f"🎟 <b>Промокод: {html.escape(promo.code)}</b>\n\n"
         f"📅 Дней подписки: <b>{promo.duration_days}</b>\n"
         f"📊 Использований: <b>{promo.uses_count}/{promo.max_uses}</b>\n"
         f"🔖 Тип: {sub_label}\n"
@@ -748,7 +763,7 @@ async def callback_admin_set_card_manager(callback: CallbackQuery, state: FSMCon
     current = await db.get_setting("card_manager_username") or "autosenderkarta"
     await state.set_state(AdminStates.waiting_card_manager)
     await callback.message.edit_text(
-        f"💳 Текущий менеджер для оплаты картой: @{current}\n\n"
+        f"💳 Текущий менеджер для оплаты картой: @{html.escape(current)}\n\n"
         "Введите новый юзернейм (без @):",
         reply_markup=cancel_keyboard(),
     )
@@ -767,7 +782,7 @@ async def process_card_manager(message: Message, state: FSMContext, db: Database
     await db.set_setting("card_manager_username", username)
     await state.clear()
     await message.answer(
-        pe(f"✅ Менеджер обновлён: @{username}"),
+        pe(f"✅ Менеджер обновлён: @{html.escape(username)}"),
         parse_mode="HTML",
         reply_markup=admin_settings_keyboard(),
     )
@@ -784,7 +799,7 @@ async def callback_admin_channels(callback: CallbackQuery, db: Database):
     text = "📡 Обязательные каналы\n\n"
     if channels:
         for ch in channels:
-            text += f"• {ch.channel_title} (@{ch.channel_username or ch.channel_id})\n"
+            text += f"• {html.escape(ch.channel_title)} (@{html.escape(str(ch.channel_username or ch.channel_id))})\n"
     else:
         text += "Обязательных каналов нет.\n"
     text += "\nДобавьте каналы, на которые пользователи должны подписаться."
@@ -827,7 +842,7 @@ async def process_channel_id(message: Message, state: FSMContext, db: Database):
         await state.clear()
         channels = await db.get_required_channels()
         await message.answer(
-            f"✅ Канал добавлен: {channel_title}",
+            f"✅ Канал добавлен: {html.escape(channel_title)}",
             reply_markup=admin_channels_keyboard(channels),
         )
         return
@@ -847,7 +862,7 @@ async def process_channel_id(message: Message, state: FSMContext, db: Database):
             await state.clear()
             channels = await db.get_required_channels()
             await message.answer(
-                f"✅ Канал добавлен: {channel_title}",
+                f"✅ Канал добавлен: {html.escape(channel_title)}",
                 reply_markup=admin_channels_keyboard(channels),
             )
             return
@@ -868,7 +883,7 @@ async def process_channel_id(message: Message, state: FSMContext, db: Database):
         await state.clear()
         channels = await db.get_required_channels()
         await message.answer(
-            f"✅ Канал добавлен: {channel_title}",
+            f"✅ Канал добавлен: {html.escape(channel_title)}",
             reply_markup=admin_channels_keyboard(channels),
         )
     except ValueError:
@@ -890,7 +905,7 @@ async def callback_admin_del_channel(callback: CallbackQuery, db: Database):
     text = "📡 Обязательные каналы\n\n"
     if channels:
         for ch in channels:
-            text += f"• {ch.channel_title} (@{ch.channel_username or ch.channel_id})\n"
+            text += f"• {html.escape(ch.channel_title)} (@{html.escape(str(ch.channel_username or ch.channel_id))})\n"
     else:
         text += "Обязательных каналов нет.\n"
     await callback.message.edit_text(text, reply_markup=admin_channels_keyboard(channels))
@@ -908,8 +923,8 @@ async def callback_admin_withdrawals(callback: CallbackQuery, db: Database):
     if requests:
         for req in requests:
             user = await db.get_user_by_id(req.user_id)
-            username = f"@{user.username}" if user and user.username else str(req.user_id)
-            text += f"• {username} — {req.amount:.2f} USDT\n  Кошелёк: <code>{req.wallet}</code>\n\n"
+            username = f"@{html.escape(user.username)}" if user and user.username else str(req.user_id)
+            text += f"• {username} — {req.amount:.2f} USDT\n  Кошелёк: <code>{html.escape(req.wallet or '')}</code>\n\n"
     else:
         text += "Активных запросов нет."
     await callback.message.edit_text(pe(text), parse_mode="HTML", reply_markup=admin_withdrawals_keyboard(requests))
@@ -922,16 +937,18 @@ async def callback_approve_withdraw(callback: CallbackQuery, db: Database):
         await callback.answer("Нет доступа", show_alert=True)
         return
     req_id = int(callback.data.split(":")[1])
-    await db.update_withdrawal_status(req_id, "approved")
-    await callback.answer("✅ Заявка одобрена")
+    if await db.update_withdrawal_status(req_id, "approved"):
+        await callback.answer("✅ Заявка одобрена")
+    else:
+        await callback.answer("Заявка уже обработана", show_alert=True)
 
     requests = await db.get_withdrawal_requests("pending")
     text = "💸 Запросы на вывод\n\n"
     if requests:
         for req in requests:
             user = await db.get_user_by_id(req.user_id)
-            username = f"@{user.username}" if user and user.username else str(req.user_id)
-            text += f"• {username} — {req.amount:.2f} USDT\n  Кошелёк: <code>{req.wallet}</code>\n\n"
+            username = f"@{html.escape(user.username)}" if user and user.username else str(req.user_id)
+            text += f"• {username} — {req.amount:.2f} USDT\n  Кошелёк: <code>{html.escape(req.wallet or '')}</code>\n\n"
     else:
         text += "Активных запросов нет."
     await callback.message.edit_text(pe(text), parse_mode="HTML", reply_markup=admin_withdrawals_keyboard(requests))
@@ -944,29 +961,20 @@ async def callback_decline_withdraw(callback: CallbackQuery, db: Database):
         return
     req_id = int(callback.data.split(":")[1])
 
-    # Get request details to refund balance
-    req = None
-    all_requests = await db.get_withdrawal_requests("pending")
-    for r in all_requests:
-        if r.id == req_id:
-            req = r
-            break
+    declined = await db.decline_withdrawal_request(req_id)
 
-    await db.update_withdrawal_status(req_id, "declined")
-
-    if req:
-        await db.add_ref_balance(req.user_id, req.amount)
+    if declined:
         await callback.answer("❌ Заявка отклонена, баланс возвращён")
     else:
-        await callback.answer("❌ Заявка отклонена")
+        await callback.answer("Заявка уже обработана", show_alert=True)
 
     requests = await db.get_withdrawal_requests("pending")
     text = "💸 Запросы на вывод\n\n"
     if requests:
         for r in requests:
             user = await db.get_user_by_id(r.user_id)
-            username = f"@{user.username}" if user and user.username else str(r.user_id)
-            text += f"• {username} — {r.amount:.2f} USDT\n  Кошелёк: <code>{r.wallet}</code>\n\n"
+            username = f"@{html.escape(user.username)}" if user and user.username else str(r.user_id)
+            text += f"• {username} — {r.amount:.2f} USDT\n  Кошелёк: <code>{html.escape(r.wallet or '')}</code>\n\n"
     else:
         text += "Активных запросов нет."
     await callback.message.edit_text(pe(text), parse_mode="HTML", reply_markup=admin_withdrawals_keyboard(requests))
@@ -993,10 +1001,11 @@ async def callback_admin_export_db(callback: CallbackQuery, db: Database):
         return
     await callback.answer()
     await callback.message.answer("⏳ Создаю резервную копию БД...")
-    tmp = tempfile.mktemp(suffix=".db")
+    fd, tmp = tempfile.mkstemp(suffix=".db")
+    os.close(fd)
     try:
-        async with aiosqlite.connect(db.db_path) as src:
-            await src.execute(f"VACUUM INTO '{tmp}'")
+        async with aiosqlite.connect(tmp) as destination:
+            await db._conn.backup(destination)
         await callback.message.answer_document(
             FSInputFile(tmp, filename="bot_backup.db"),
             caption=f"📦 Резервная копия БД\n🕐 {now_moscow().strftime('%d.%m.%Y %H:%M')}",
@@ -1021,20 +1030,26 @@ async def callback_admin_import_db(callback: CallbackQuery, state: FSMContext):
 
 
 @router.message(AdminStates.waiting_db_file, F.document)
-async def process_import_db(message: Message, state: FSMContext, db: Database):
+async def process_import_db(
+    message: Message,
+    state: FSMContext,
+    db: Database,
+    mailing_service: MailingService,
+    userbot_manager,
+):
     doc = message.document
     if not doc.file_name or not doc.file_name.endswith(".db"):
         await message.answer(pe("❌ Файл должен иметь расширение .db"), parse_mode="HTML")
         return
 
-    tmp = tempfile.mktemp(suffix=".db")
+    fd, tmp = tempfile.mkstemp(suffix=".db")
+    os.close(fd)
+    backup_fd, backup_tmp = tempfile.mkstemp(suffix=".db")
+    os.close(backup_fd)
+    runtime_stopped = False
     try:
-        from io import BytesIO
         file_info = await message.bot.get_file(doc.file_id)
-        buf = BytesIO()
-        await message.bot.download_file(file_info.file_path, destination=buf)
-        with open(tmp, "wb") as f:
-            f.write(buf.getvalue())
+        await message.bot.download_file(file_info.file_path, destination=tmp)
 
         # Проверяем magic bytes SQLite
         with open(tmp, "rb") as f:
@@ -1043,19 +1058,57 @@ async def process_import_db(message: Message, state: FSMContext, db: Database):
             await message.answer(pe(f"❌ Файл не является базой данных SQLite.\nПолучено: {header[:16]}"), parse_mode="HTML")
             return
 
-        await state.clear()
-        await message.answer("⏳ Заменяю базу данных...")
+        async with aiosqlite.connect(tmp) as incoming:
+            incoming.row_factory = aiosqlite.Row
+            async with incoming.execute("PRAGMA integrity_check") as cur:
+                integrity = await cur.fetchone()
+            if not integrity or integrity[0] != "ok":
+                await message.answer(
+                    pe("❌ База данных повреждена: проверка целостности не пройдена."),
+                    parse_mode="HTML",
+                )
+                return
 
-        await db.close()
+            required_tables = {
+                "users",
+                "accounts",
+                "mailings",
+                "mailing_messages",
+                "mailing_targets",
+                "payments",
+                "settings",
+            }
+            async with incoming.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'table'"
+            ) as cur:
+                tables = {row["name"] for row in await cur.fetchall()}
+            missing_tables = required_tables - tables
+            if missing_tables:
+                await message.answer(
+                    pe("❌ Файл не является резервной копией этого бота."),
+                    parse_mode="HTML",
+                )
+                return
 
-        # Удаляем WAL файлы если есть
-        for ext in ("", "-shm", "-wal"):
-            path = db.db_path + ext
-            if os.path.exists(path):
-                os.remove(path)
+            await state.clear()
+            await message.answer("⏳ Заменяю базу данных...")
 
-        shutil.copy2(tmp, db.db_path)
-        await db.connect()
+            await mailing_service.stop()
+            await userbot_manager.stop_all_clients()
+            runtime_stopped = True
+
+            async with aiosqlite.connect(backup_tmp) as backup:
+                await db._conn.backup(backup)
+                try:
+                    await incoming.backup(db._conn)
+                    db._cache.clear()
+                    db._cache_ts.clear()
+                    await db._run_migrations()
+                except BaseException:
+                    await backup.backup(db._conn)
+                    db._cache.clear()
+                    db._cache_ts.clear()
+                    raise
 
         await message.answer(
             pe("✅ База данных успешно заменена!\n"
@@ -1064,15 +1117,21 @@ async def process_import_db(message: Message, state: FSMContext, db: Database):
             reply_markup=admin_keyboard(),
         )
     except Exception as e:
-        # Если что-то пошло не так — пробуем переподключиться к старой/новой БД
-        try:
-            await db.connect()
-        except Exception:
-            pass
-        await message.answer(pe(f"❌ Ошибка при импорте: {e}"), parse_mode="HTML")
+        await message.answer(pe(f"❌ Ошибка при импорте: {html.escape(str(e))}"), parse_mode="HTML")
     finally:
+        if runtime_stopped:
+            try:
+                await userbot_manager.start_all_clients(background=True)
+                await mailing_service.start()
+            except Exception as e:
+                await message.answer(
+                    pe(f"❌ База загружена, но фоновые задачи не запустились: {html.escape(str(e))}"),
+                    parse_mode="HTML",
+                )
         if os.path.exists(tmp):
             os.remove(tmp)
+        if os.path.exists(backup_tmp):
+            os.remove(backup_tmp)
 
 
 @router.callback_query(F.data == "admin_cleanup_accounts")
@@ -1155,7 +1214,7 @@ async def callback_admin_platega(callback: CallbackQuery, db: Database):
     if recent:
         text += "📋 <b>Последние платежи:</b>\n"
         for r in recent[:15]:
-            uname = f"@{r['username']} " if r.get("username") else ""
+            uname = f"@{html.escape(r['username'])} " if r.get("username") else ""
             paid_dt = r.get("paid_at") or ""
             if paid_dt:
                 try:
@@ -1196,7 +1255,7 @@ async def _build_diag_text(telegram_id: int, db) -> Optional[tuple]:
 
     last_activity = user.last_activity.strftime("%d.%m.%Y %H:%M") if user.last_activity else "—"
     reg_date = user.created_at.strftime("%d.%m.%Y %H:%M")
-    username = f"@{user.username}" if user.username else "—"
+    username = f"@{html.escape(user.username)}" if user.username else "—"
 
     text = pe(
         f"🔍 <b>Диагностика пользователя</b>\n\n"
@@ -1295,15 +1354,15 @@ async def callback_admin_user_errors(callback: CallbackQuery, db: Database):
         text = pe(f"📋 <b>История ошибок</b> (последние {len(errors)})\n\nID: <code>{telegram_id}</code>\n\n")
         for err in errors:
             time_str = err.created_at.strftime("%d.%m %H:%M") if err.created_at else "?"
-            parts = [f"❌ <b>{_error_label(err.error_type)}</b>"]
+            parts = [f"❌ <b>{html.escape(_error_label(err.error_type))}</b>"]
             if err.error_text:
-                parts.append(f"  {err.error_text[:80]}")
+                parts.append(f"  {html.escape(err.error_text[:80])}")
             if err.account_display:
-                parts.append(f"  Акк: {err.account_display}")
+                parts.append(f"  Акк: {html.escape(err.account_display)}")
             if err.chat_identifier:
-                parts.append(f"  Чат: {err.chat_identifier}")
+                parts.append(f"  Чат: {html.escape(err.chat_identifier)}")
             if err.mailing_name:
-                parts.append(f"  Рассылка: {err.mailing_name}")
+                parts.append(f"  Рассылка: {html.escape(err.mailing_name)}")
             parts.append(f"  🕐 {time_str}")
             text += "\n".join(parts) + "\n\n"
 
@@ -1314,6 +1373,97 @@ async def callback_admin_user_errors(callback: CallbackQuery, db: Database):
     except Exception:
         await callback.message.answer(
             text, parse_mode="HTML", reply_markup=admin_errors_keyboard(telegram_id)
+        )
+    await callback.answer()
+
+
+# === Free Tier Stats ===
+@router.callback_query(F.data == "admin_free_tier")
+async def callback_admin_free_tier(
+    callback: CallbackQuery,
+    mailing_service: MailingService,
+):
+    if not is_admin(callback.from_user.id):
+        await callback.answer("Нет доступа", show_alert=True)
+        return
+
+    stats = await mailing_service.get_free_tier_runtime_stats()
+    text = pe(
+        "🆓 <b>Бесплатный тариф</b>\n\n"
+        f"👥 Всего пользователей: <b>{stats['total_users']}</b>\n"
+        f"✅ Активные пользователи: <b>{stats['active_users']}</b>\n"
+        f"📨 Активные рассылки: <b>{stats['active_mailings']}</b>\n"
+        f"💬 Уникальные чаты: <b>{stats['unique_chats']}</b>"
+    )
+
+    try:
+        await callback.message.edit_text(
+            text,
+            parse_mode="HTML",
+            reply_markup=admin_free_tier_keyboard(),
+        )
+    except Exception:
+        await callback.message.delete()
+        await callback.message.answer(
+            text,
+            parse_mode="HTML",
+            reply_markup=admin_free_tier_keyboard(),
+        )
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("admin_free_chats:"))
+async def callback_admin_free_chats(
+    callback: CallbackQuery,
+    mailing_service: MailingService,
+):
+    if not is_admin(callback.from_user.id):
+        await callback.answer("Нет доступа", show_alert=True)
+        return
+
+    try:
+        page = max(0, int(callback.data.rsplit(":", 1)[1]))
+    except (ValueError, IndexError):
+        page = 0
+
+    stats = await mailing_service.get_free_tier_runtime_stats()
+    chats = stats["chats"]
+    per_page = 25
+    max_page = max(0, (len(chats) - 1) // per_page)
+    page = min(page, max_page)
+    start = page * per_page
+    chunk = chats[start:start + per_page]
+
+    text = pe(
+        f"💬 <b>Чаты бесплатного тарифа</b>\n\n"
+        f"Уникальных активных чатов: <b>{len(chats)}</b>\n"
+        f"Страница: <b>{page + 1}/{max_page + 1}</b>\n\n"
+    )
+    if chunk:
+        text += "\n".join(
+            f"<code>{html.escape(row['chat_identifier'])} "
+            f"{row['user_count']}|{row['average_delay']}с</code>"
+            for row in chunk
+        )
+    else:
+        text += "Сейчас нет чатов с фактически работающей рассылкой."
+
+    keyboard = admin_free_chats_keyboard(
+        page,
+        has_next=(start + per_page) < len(chats),
+    )
+    try:
+        await callback.message.edit_text(
+            text,
+            parse_mode="HTML",
+            reply_markup=keyboard,
+        )
+    except Exception:
+        await callback.message.delete()
+        await callback.message.answer(
+            text,
+            parse_mode="HTML",
+            reply_markup=keyboard,
         )
     await callback.answer()
 
@@ -1369,9 +1519,9 @@ async def callback_admin_subscriptions(callback: CallbackQuery, db: Database, bo
         else:
             paid_str = "—"
 
-        last_method = row.get("last_method") or ("промокод" if not purchase_count else "—")
+        last_method = html.escape(str(row.get("last_method") or ("промокод" if not purchase_count else "—")))
         last_days = row.get("last_plan_days") or "—"
-        uname = f"@{row['username']} " if row.get("username") else ""
+        uname = f"@{html.escape(row['username'])} " if row.get("username") else ""
         sub_type = "оплата" if purchase_count else "промокод"
 
         text += (

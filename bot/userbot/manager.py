@@ -1,4 +1,5 @@
 import asyncio
+import html
 import logging
 from typing import Optional, Callable, Any
 from urllib.parse import urlparse
@@ -46,7 +47,7 @@ def _parse_proxy(proxy_str: Optional[str]) -> Optional[tuple]:
             return (socks.SOCKS5, host, port, True, username, password)
         return (socks.SOCKS5, host, port)
     except Exception as e:
-        logger.warning(f"Failed to parse proxy '{proxy_str}': {e}")
+        logger.warning(f"Failed to parse account proxy: {e}")
         return None
 
 # Exceptions that mean the account is banned/deactivated/session killed
@@ -189,12 +190,18 @@ class UserbotManager:
                 try:
                     user = await self.db.get_user_by_id(account.user_id)
                     if user:
+                        parsed_proxy = urlparse(account.proxy)
+                        proxy_display = (
+                            f"socks5://{parsed_proxy.hostname}:{parsed_proxy.port}"
+                            if parsed_proxy.hostname and parsed_proxy.port
+                            else "настроенный SOCKS5-прокси"
+                        )
                         await self._bot_notify_callback(
                             user.telegram_id,
                             pe(
                                 f"⚠️ <b>Проблема с прокси!</b>\n\n"
-                                f"📱 Аккаунт: <b>{account.display_name}</b>\n"
-                                f"❌ Не удалось подключиться через прокси <code>{account.proxy}</code>.\n\n"
+                                f"📱 Аккаунт: <b>{html.escape(account.display_name)}</b>\n"
+                                f"❌ Не удалось подключиться через прокси <code>{html.escape(proxy_display)}</code>.\n\n"
                                 f"Аккаунт временно недоступен — рассылки через него не работают.\n\n"
                                 f"Чтобы возобновить работу:\n"
                                 f"1. Зайдите в раздел «Аккаунты»\n"
@@ -351,7 +358,7 @@ class UserbotManager:
                             user.telegram_id,
                             pe(
                                 f"⚠️ <b>Проблема с аккаунтом!</b>\n\n"
-                                f"📱 Аккаунт: <b>{account.display_name}</b>\n"
+                                f"📱 Аккаунт: <b>{html.escape(account.display_name)}</b>\n"
                                 f"❗️ Причина: {reason}\n\n"
                                 f"Аккаунт отключён. Добавьте его заново в разделе «Аккаунты»."
                             ),
