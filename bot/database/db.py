@@ -1042,9 +1042,10 @@ class Database:
         )
         await self._conn.commit()
 
-    async def update_all_target_intervals(self, interval_seconds: int):
+    async def update_all_target_intervals(self, mailing_id: int, interval_seconds: int):
         await self._conn.execute(
-            "UPDATE mailing_targets SET interval_seconds = ?", (interval_seconds,)
+            "UPDATE mailing_targets SET interval_seconds = ? WHERE mailing_id = ?",
+            (interval_seconds, mailing_id),
         )
         await self._conn.commit()
 

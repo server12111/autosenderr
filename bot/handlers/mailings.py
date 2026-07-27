@@ -908,7 +908,7 @@ async def process_target_interval(message: Message, state: FSMContext, db: Datab
         if interval < 30:
             await message.answer(pe("❌ Минимальный КД — 30 секунд."), parse_mode="HTML")
             return
-        await db.update_all_target_intervals(interval)
+        await db.update_all_target_intervals(mailing_id, interval)
         await state.clear()
         targets = await db.get_mailing_targets(mailing_id)
         await message.answer(
