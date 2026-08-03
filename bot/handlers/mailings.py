@@ -342,6 +342,12 @@ async def callback_hidden_tag(callback: CallbackQuery, db: Database, mailing_ser
     if not mailing or not user or mailing.user_id != user.id:
         await callback.answer("⛔ Нет доступа", show_alert=True)
         return
+    if not mailing.hidden_tag_enabled and Database.is_free_ad_active(user):
+        await callback.answer(
+            "❌ Скрытый тег недоступен на бесплатном тарифе.\n\nПерейдите в «Подписка» для активации.",
+            show_alert=True,
+        )
+        return
     status = "включён" if mailing.hidden_tag_enabled else "выключен"
     await callback.message.edit_text(
         pe(
@@ -364,6 +370,14 @@ async def callback_toggle_hidden_tag(callback: CallbackQuery, db: Database):
         await callback.answer("⛔ Нет доступа", show_alert=True)
         return
     enabled = not mailing.hidden_tag_enabled
+    if enabled:
+        user = await db.get_user(callback.from_user.id)
+        if Database.is_free_ad_active(user):
+            await callback.answer(
+                "❌ Скрытый тег недоступен на бесплатном тарифе.\n\nПерейдите в «Подписка» для активации.",
+                show_alert=True,
+            )
+            return
     await db.update_mailing_hidden_tag(mailing_id, enabled)
     status = "включён" if enabled else "выключен"
     await callback.message.edit_text(
@@ -828,7 +842,7 @@ async def process_edit_target(message: Message, state: FSMContext, db: Database,
 
 
 @router.callback_query(F.data.startswith("delete_target:"))
-async def callback_delete_target(callback: CallbackQuery, db: Database):
+async def callback_delete_target(callback: CallbackQuery, db: Database, mailing_service: MailingService):
     target_id = int(callback.data.split(":")[1])
 
     async with db._conn.execute(
@@ -847,6 +861,7 @@ async def callback_delete_target(callback: CallbackQuery, db: Database):
         return
 
     await db.delete_mailing_target(target_id)
+    mailing_service.forget_target(mailing_id, target_id)
     targets = await db.get_mailing_targets(mailing_id)
 
     await callback.answer("Чат удалён")

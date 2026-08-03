@@ -11,7 +11,8 @@ class AlbumMiddleware(BaseMiddleware):
     LATENCY = 0.5  # seconds to wait for all messages in a group
 
     def __init__(self):
-        self.albums: dict[str, list[Message]] = {}
+        # album_id -> {"messages": [...], "version": int}
+        self.albums: dict[str, dict[str, Any]] = {}
 
     async def __call__(
         self,
@@ -23,15 +24,20 @@ class AlbumMiddleware(BaseMiddleware):
             return await handler(event, data)
 
         album_id = event.media_group_id
-        self.albums.setdefault(album_id, []).append(event)
+        entry = self.albums.setdefault(album_id, {"messages": [], "version": 0})
+        entry["messages"].append(event)
+        entry["version"] += 1
+        my_version = entry["version"]
 
-        asyncio.get_running_loop().call_later(5.0, self.albums.pop, album_id, None)
-
+        # Re-arm the wait on every arrival instead of anchoring it to this
+        # message's own arrival time — otherwise a late item in the group
+        # (network jitter, slow media download) gets dispatched separately
+        # as its own one-item "album" once the earlier messages' timers fire.
         await asyncio.sleep(self.LATENCY)
 
-        album = self.albums.pop(album_id, None)
-        if not album:
-            return  # Already handled by another message in the group
+        if entry["version"] != my_version:
+            return  # A newer message for this album arrived — it will dispatch instead
 
-        data["album"] = album
+        self.albums.pop(album_id, None)
+        data["album"] = entry["messages"]
         return await handler(event, data)

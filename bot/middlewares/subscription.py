@@ -15,6 +15,7 @@ from ..utils.time_utils import now_moscow
 class SubscriptionMiddleware(BaseMiddleware):
     EXEMPT_CALLBACKS = {
         "main_menu",
+        "cancel",
         "subscription",
         "buy_subscription",
         "help",

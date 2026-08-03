@@ -166,6 +166,7 @@ async def _create_cryptobot_subscription(
         amount=price,
         currency=invoice.currency,
         plan_days=plan_days,
+        price_usdt=price,
     )
 
     text = pe(
@@ -214,6 +215,7 @@ async def callback_pay_ton(
         currency="TON",
         plan_days=plan_days,
         payment_method="ton",
+        price_usdt=price,
     )
 
     pay_url = ton_service.generate_payment_link(amount, comment)
@@ -257,8 +259,7 @@ async def callback_check_ton_payment(
     is_paid = await ton_service.check_payment(payment.amount, comment)
 
     if is_paid:
-        plan_days = getattr(payment, "plan_days", 30) or 30
-        price_usdt = await db.get_price(plan_days)
+        price_usdt = payment.price_usdt if payment.price_usdt is not None else payment.amount
         new_end = await db.complete_subscription_payment(comment, price_usdt)
         if not new_end:
             await callback.answer("✅ Этот платёж уже обработан", show_alert=True)
@@ -365,6 +366,7 @@ async def callback_pay_platega(
         currency="RUB",
         plan_days=plan_days,
         payment_method="platega",
+        price_usdt=price_usdt,
     )
 
     text = pe(
@@ -409,8 +411,7 @@ async def callback_check_platega_payment(
     is_paid = await platega_service.check_payment(order_id)
 
     if is_paid:
-        plan_days = getattr(payment, "plan_days", 30) or 30
-        price_usdt = await db.get_price(plan_days)
+        price_usdt = payment.price_usdt if payment.price_usdt is not None else payment.amount
         new_end = await db.complete_subscription_payment(order_id, price_usdt)
         if not new_end:
             await callback.answer("✅ Этот платёж уже обработан", show_alert=True)

@@ -13,6 +13,7 @@ if __name__ == "__main__" and __package__ is None:
 from aiogram import Bot, Dispatcher, BaseMiddleware
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
+from aiogram.exceptions import TelegramRetryAfter
 from aiogram.fsm.storage.memory import MemoryStorage
 
 from .config import config
@@ -144,13 +145,30 @@ async def main():
 
     subscription_checker = SubscriptionCheckerService(db, mailing_service)
 
+    notify_locks: dict[int, asyncio.Lock] = {}
+
     async def notify_user(user_id: int, text: str):
-        try:
-            await bot.send_message(user_id, text)
-            logger.info(f"Successfully sent notification to user {user_id}")
-        except Exception as e:
-            logger.error(f"Failed to notify user {user_id}: {e}", exc_info=True)
-            raise
+        # Users with several accounts can have that many concurrent mailing
+        # loops firing notifications (FloodWait, bans, proxy issues, ...) at
+        # the same user chat_id around the same time. Telegram's per-chat
+        # outgoing rate limit then rejects the extras with TelegramRetryAfter,
+        # which callers swallow silently — serialize + retry so notifications
+        # for users with more accounts don't get dropped more often.
+        lock = notify_locks.setdefault(user_id, asyncio.Lock())
+        async with lock:
+            for attempt in range(3):
+                try:
+                    await bot.send_message(user_id, text)
+                    logger.info(f"Successfully sent notification to user {user_id}")
+                    return
+                except TelegramRetryAfter as e:
+                    if attempt == 2:
+                        logger.error(f"Failed to notify user {user_id} after retries: {e}")
+                        raise
+                    await asyncio.sleep(e.retry_after + 0.5)
+                except Exception as e:
+                    logger.error(f"Failed to notify user {user_id}: {e}", exc_info=True)
+                    raise
 
     userbot_manager.set_message_handler(autoresponder_service.handle_message)
     userbot_manager.set_group_reply_handler(autoresponder_service.handle_group_reply)
@@ -158,6 +176,17 @@ async def main():
     userbot_manager.set_bot_notify_callback(notify_user)
 
     dp = Dispatcher(storage=MemoryStorage())
+
+    @dp.errors()
+    async def _on_error(event):
+        logger.error(f"Unhandled error while processing update: {event.exception}", exc_info=event.exception)
+        callback_query = getattr(event.update, "callback_query", None)
+        if callback_query:
+            try:
+                await callback_query.answer("⚠️ Произошла ошибка. Попробуйте ещё раз.", show_alert=True)
+            except Exception:
+                pass
+        return True
 
     dp.message.middleware(AlbumMiddleware())
     dp.message.middleware(ActivityMiddleware(db))

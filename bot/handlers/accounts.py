@@ -661,9 +661,21 @@ async def process_phone(
         await message.answer(pe("❌ Номер должен начинаться с +. Попробуйте снова:"), parse_mode="HTML")
         return
 
-    await state.update_data(phone=phone)
     data = await state.get_data()
-    await _connect_and_send_code(message, state, data)
+    if data.get("connecting"):
+        # Already connecting on a previous phone number — ignore instead of
+        # spawning a second Telethon client that would leak on completion.
+        return
+
+    await state.update_data(phone=phone, connecting=True)
+    data = await state.get_data()
+    try:
+        await _connect_and_send_code(message, state, data)
+    finally:
+        try:
+            await state.update_data(connecting=False)
+        except Exception:
+            pass
 
 
 @router.message(AddAccountStates.waiting_code)
@@ -876,6 +888,14 @@ async def _confirm_code(event, state: FSMContext, db: Database):
         await state.clear()
         return
 
+    if data.get("confirming"):
+        # A previous tap is still being processed against the same Telethon client —
+        # ignore the duplicate instead of racing a second sign_in on it.
+        if isinstance(event, CallbackQuery):
+            await event.answer("Код уже проверяется...")
+        return
+    await state.update_data(confirming=True)
+
     await _edit_code_message(event, state, pe("⏳ Проверяем код..."), parse_mode="HTML")
 
     try:
@@ -908,6 +928,7 @@ async def _confirm_code(event, state: FSMContext, db: Database):
     except Exception as e:
         error_str = str(e).lower()
         if "two-step" in error_str or "password" in error_str:
+            await state.update_data(confirming=False)
             await state.set_state(AddAccountStates.waiting_password)
             await _edit_code_message(event, state,
                 pe("🔐 Требуется пароль двухфакторной аутентификации.\n\nВведите пароль:"),

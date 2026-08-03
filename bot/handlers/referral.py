@@ -17,7 +17,11 @@ class ReferralStates(StatesGroup):
 
 
 @router.callback_query(F.data == "referral")
-async def callback_referral(callback: CallbackQuery, db: Database):
+async def callback_referral(callback: CallbackQuery, db: Database, state: FSMContext):
+    # The "wallet address" wizard's own "Назад" button routes back here (callback_data="referral")
+    # instead of "cancel" — without clearing state, a stray later text message anywhere in the bot
+    # would still be caught by process_wallet() and trigger a real withdrawal to that text as a wallet.
+    await state.clear()
     user = await db.get_user(callback.from_user.id)
 
     ref_count = await db.get_referral_count(user.id)

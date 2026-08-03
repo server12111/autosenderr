@@ -68,7 +68,7 @@ async def cmd_start(message: Message, db: Database, state: FSMContext):
     )
 
     # Set referral if first join and ref_code valid
-    if ref_code and not user.referred_by:
+    if is_new and ref_code and not user.referred_by:
         referrer = await db.get_user_by_ref_code(ref_code)
         if referrer and referrer.telegram_id != message.from_user.id:
             await db.set_referred_by(user.id, referrer.id)

@@ -151,6 +151,7 @@ class Payment:
     plan_days: int
     created_at: datetime
     paid_at: Optional[datetime]
+    price_usdt: Optional[float] = None
 
 
 @dataclass
@@ -279,6 +280,10 @@ class Database:
         # payments
         await _add_col("payments", "payment_method", "TEXT DEFAULT 'cryptobot'")
         await _add_col("payments", "plan_days",       "INTEGER DEFAULT 30")
+        # USDT price quoted at invoice creation — TON/Platega `amount` is in a different
+        # currency (TON/RUB), so referral commission must be computed from this, not a
+        # live re-fetch of the current price at confirmation time.
+        await _add_col("payments", "price_usdt",      "REAL DEFAULT NULL")
         # promocodes
         await _add_col("promocodes", "max_uses",        "INTEGER NOT NULL DEFAULT 1")
         await _add_col("promocodes", "uses_count",      "INTEGER NOT NULL DEFAULT 0")
@@ -594,22 +599,21 @@ class Database:
             return [r["account_id"] for r in await cur.fetchall()]
 
     async def toggle_mailing_extra_account(self, mailing_id: int, account_id: int) -> bool:
-        async with self._conn.execute(
-            "SELECT 1 FROM mailing_accounts WHERE mailing_id = ? AND account_id = ?", (mailing_id, account_id)
-        ) as cur:
-            exists = await cur.fetchone()
-        if exists:
-            await self._conn.execute(
-                "DELETE FROM mailing_accounts WHERE mailing_id = ? AND account_id = ?", (mailing_id, account_id)
-            )
+        # Atomic delete-then-insert-or-ignore instead of check-then-act — the old
+        # SELECT-then-INSERT pattern could raise an unhandled IntegrityError on the
+        # (mailing_id, account_id) primary key if two toggles for the same pair
+        # overlapped (e.g. a double-tap on the toggle button).
+        cur = await self._conn.execute(
+            "DELETE FROM mailing_accounts WHERE mailing_id = ? AND account_id = ?", (mailing_id, account_id)
+        )
+        if cur.rowcount > 0:
             await self._conn.commit()
             return False
-        else:
-            await self._conn.execute(
-                "INSERT INTO mailing_accounts (mailing_id, account_id) VALUES (?, ?)", (mailing_id, account_id)
-            )
-            await self._conn.commit()
-            return True
+        await self._conn.execute(
+            "INSERT OR IGNORE INTO mailing_accounts (mailing_id, account_id) VALUES (?, ?)", (mailing_id, account_id)
+        )
+        await self._conn.commit()
+        return True
 
     async def count_user_accounts(self, user_id: int) -> int:
         async with self._conn.execute(
@@ -768,21 +772,24 @@ class Database:
             return [self._row_to_account(r) for r in await cur.fetchall()]
 
     async def get_registrations_by_period(self, period: str) -> list:
+        # created_at is stored as isoformat() with a 'T' separator, while datetime('now', ...)
+        # returns a space-separated string — raw text comparison would put every 'T...' row
+        # ahead of the threshold regardless of actual time, so normalize before comparing.
         if period == "day":
             sql = ("SELECT strftime('%H:00', created_at) as label, COUNT(*) as cnt "
-                   "FROM users WHERE created_at >= datetime('now', '+3 hours', '-1 day') "
+                   "FROM users WHERE replace(created_at, 'T', ' ') >= datetime('now', '+3 hours', '-1 day') "
                    "GROUP BY label ORDER BY label")
         elif period == "week":
             sql = ("SELECT strftime('%d.%m', created_at) as label, COUNT(*) as cnt "
-                   "FROM users WHERE created_at >= datetime('now', '+3 hours', '-7 days') "
+                   "FROM users WHERE replace(created_at, 'T', ' ') >= datetime('now', '+3 hours', '-7 days') "
                    "GROUP BY label ORDER BY label")
         elif period == "month":
             sql = ("SELECT strftime('%d.%m', created_at) as label, COUNT(*) as cnt "
-                   "FROM users WHERE created_at >= datetime('now', '+3 hours', '-30 days') "
+                   "FROM users WHERE replace(created_at, 'T', ' ') >= datetime('now', '+3 hours', '-30 days') "
                    "GROUP BY label ORDER BY label")
         else:  # year
             sql = ("SELECT strftime('%m.%Y', created_at) as label, COUNT(*) as cnt "
-                   "FROM users WHERE created_at >= datetime('now', '+3 hours', '-1 year') "
+                   "FROM users WHERE replace(created_at, 'T', ' ') >= datetime('now', '+3 hours', '-1 year') "
                    "GROUP BY label ORDER BY label")
         async with self._conn.execute(sql) as cur:
             return [(r["label"], r["cnt"]) for r in await cur.fetchall()]
@@ -1214,12 +1221,14 @@ class Database:
     # === Payments ===
     async def create_payment(self, user_id: int, invoice_id: str, amount: float,
                               currency: str, plan_days: int = 30,
-                              payment_method: str = "cryptobot") -> int:
+                              payment_method: str = "cryptobot",
+                              price_usdt: Optional[float] = None) -> int:
         cursor = await self._conn.execute(
             "INSERT INTO payments "
-            "(user_id, invoice_id, amount, currency, plan_days, payment_method, created_at) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?)",
-            (user_id, invoice_id, amount, currency, plan_days, payment_method, now_moscow().isoformat()),
+            "(user_id, invoice_id, amount, currency, plan_days, payment_method, created_at, price_usdt) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (user_id, invoice_id, amount, currency, plan_days, payment_method, now_moscow().isoformat(),
+             price_usdt if price_usdt is not None else amount),
         )
         await self._conn.commit()
         return cursor.lastrowid
@@ -1235,6 +1244,7 @@ class Database:
                     plan_days=row["plan_days"] if "plan_days" in keys and row["plan_days"] else 30,
                     created_at=self._parse_datetime(row["created_at"]),
                     paid_at=self._parse_datetime(row["paid_at"]),
+                    price_usdt=row["price_usdt"] if "price_usdt" in keys and row["price_usdt"] is not None else row["amount"],
                 )
         return None
 

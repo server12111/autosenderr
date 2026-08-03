@@ -1,4 +1,5 @@
 import asyncio
+import hashlib
 import html
 import logging
 from typing import Optional, Callable, Any
@@ -30,25 +31,37 @@ _DEVICE_POOL = [
 ]
 
 
+def _device_for_account(account_id: int) -> dict:
+    # A plain `account_id % len(pool)` makes every Nth account share an identical
+    # device fingerprint in a trivially predictable pattern (accounts 1 and 6, 2
+    # and 7, ...), which two concurrently-running accounts would then broadcast at
+    # the same time. Hashing spreads the (still finite) pool assignment so it isn't
+    # a simple arithmetic sequence, while staying stable across restarts.
+    digest = hashlib.md5(str(account_id).encode()).digest()
+    return _DEVICE_POOL[digest[0] % len(_DEVICE_POOL)]
+
+
 def _parse_proxy(proxy_str: Optional[str]) -> Optional[tuple]:
-    """Parse 'socks5://[user:pass@]host:port' into Telethon proxy tuple."""
+    """Parse 'socks5://[user:pass@]host:port' into Telethon proxy tuple.
+
+    Raises ValueError if a proxy was configured but couldn't be parsed — the
+    caller must treat that as a hard failure rather than silently connecting
+    without it, since a userbot account explicitly configured to use a proxy
+    should never fall back to the server's real IP unnoticed.
+    """
     if not proxy_str:
         return None
-    try:
-        import socks
-        p = urlparse(proxy_str)
-        host = p.hostname
-        port = p.port
-        username = p.username or None
-        password = p.password or None
-        if not host or not port:
-            return None
-        if username and password:
-            return (socks.SOCKS5, host, port, True, username, password)
-        return (socks.SOCKS5, host, port)
-    except Exception as e:
-        logger.warning(f"Failed to parse account proxy: {e}")
-        return None
+    import socks
+    p = urlparse(proxy_str)
+    host = p.hostname
+    port = p.port
+    username = p.username or None
+    password = p.password or None
+    if not host or not port:
+        raise ValueError(f"invalid proxy string (missing host/port): {proxy_str!r}")
+    if username and password:
+        return (socks.SOCKS5, host, port, True, username, password)
+    return (socks.SOCKS5, host, port)
 
 # Exceptions that mean the account is banned/deactivated/session killed
 _BAN_ERRORS = (
@@ -105,10 +118,16 @@ class UserbotManager:
                 pass
             del self._clients[account.id]
 
-        client = None
         try:
             proxy = _parse_proxy(account.proxy)
-            device = _DEVICE_POOL[account.id % len(_DEVICE_POOL)]
+        except Exception as e:
+            logger.error(f"Invalid proxy for account {account.phone}: {e}")
+            await self._notify_proxy_problem(account, str(e))
+            return None
+
+        client = None
+        try:
+            device = _device_for_account(account.id)
             client = TelegramClient(
                 StringSession(account.session_string),
                 account.api_id,
@@ -171,6 +190,8 @@ class UserbotManager:
             # _start_client_unlocked() is called while the account lock is held.
             # Do not acquire the same lock again from the failure handler.
             await self._handle_account_problem(account.id, e, lock_held=True)
+            self._clients.pop(account.id, None)
+            self._me_ids.pop(account.id, None)
             try:
                 if client is not None:
                     await client.disconnect()
@@ -180,40 +201,21 @@ class UserbotManager:
             return None
         except (OSError, asyncio.TimeoutError, ConnectionError) as e:
             logger.error(f"Proxy connection failed for {account.phone}: {e}")
+            self._clients.pop(account.id, None)
+            self._me_ids.pop(account.id, None)
             try:
                 if client is not None:
                     await client.disconnect()
                 await asyncio.sleep(0)
             except Exception:
                 pass
-            if account.proxy and self._bot_notify_callback:
-                try:
-                    user = await self.db.get_user_by_id(account.user_id)
-                    if user:
-                        parsed_proxy = urlparse(account.proxy)
-                        proxy_display = (
-                            f"socks5://{parsed_proxy.hostname}:{parsed_proxy.port}"
-                            if parsed_proxy.hostname and parsed_proxy.port
-                            else "настроенный SOCKS5-прокси"
-                        )
-                        await self._bot_notify_callback(
-                            user.telegram_id,
-                            pe(
-                                f"⚠️ <b>Проблема с прокси!</b>\n\n"
-                                f"📱 Аккаунт: <b>{html.escape(account.display_name)}</b>\n"
-                                f"❌ Не удалось подключиться через прокси <code>{html.escape(proxy_display)}</code>.\n\n"
-                                f"Аккаунт временно недоступен — рассылки через него не работают.\n\n"
-                                f"Чтобы возобновить работу:\n"
-                                f"1. Зайдите в раздел «Аккаунты»\n"
-                                f"2. Откройте аккаунт и установите рабочий прокси\n"
-                                f"3. Перезапустите бота"
-                            ),
-                        )
-                except Exception as ne:
-                    logger.error(f"Failed to notify about proxy error for account {account.id}: {ne}")
+            if account.proxy:
+                await self._notify_proxy_problem(account, str(e))
             return None
         except Exception as e:
             logger.error(f"Error starting client for {account.phone}: {e}")
+            self._clients.pop(account.id, None)
+            self._me_ids.pop(account.id, None)
             try:
                 if client is not None:
                     await client.disconnect()
@@ -221,6 +223,35 @@ class UserbotManager:
             except Exception:
                 pass
             return None
+
+    async def _notify_proxy_problem(self, account: Account, error_text: str):
+        if not self._bot_notify_callback:
+            return
+        try:
+            user = await self.db.get_user_by_id(account.user_id)
+            if not user:
+                return
+            parsed_proxy = urlparse(account.proxy) if account.proxy else None
+            proxy_display = (
+                f"socks5://{parsed_proxy.hostname}:{parsed_proxy.port}"
+                if parsed_proxy and parsed_proxy.hostname and parsed_proxy.port
+                else "настроенный SOCKS5-прокси"
+            )
+            await self._bot_notify_callback(
+                user.telegram_id,
+                pe(
+                    f"⚠️ <b>Проблема с прокси!</b>\n\n"
+                    f"📱 Аккаунт: <b>{html.escape(account.display_name)}</b>\n"
+                    f"❌ Не удалось подключиться через прокси <code>{html.escape(proxy_display)}</code>.\n\n"
+                    f"Аккаунт временно недоступен — рассылки через него не работают.\n\n"
+                    f"Чтобы возобновить работу:\n"
+                    f"1. Зайдите в раздел «Аккаунты»\n"
+                    f"2. Откройте аккаунт и установите рабочий прокси\n"
+                    f"3. Перезапустите бота"
+                ),
+            )
+        except Exception as ne:
+            logger.error(f"Failed to notify about proxy error for account {account.id}: {ne}")
 
     async def stop_client(self, account_id: int):
         lock = self._client_locks.setdefault(account_id, asyncio.Lock())

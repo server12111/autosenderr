@@ -242,7 +242,11 @@ class TonPaymentService:
         try:
             ssl_ctx = ssl.create_default_context(cafile=certifi.where())
             connector = aiohttp.TCPConnector(ssl=ssl_ctx)
-            params = {"address": self.wallet_address, "limit": 30}
+            # 30 was too easy to grief: sending 30+ small "dust" transfers to the
+            # (public) wallet address pushes a legitimate pending payment out of
+            # the checked window, so a real payer's "check payment" would report
+            # "not paid" even though the money arrived.
+            params = {"address": self.wallet_address, "limit": 100}
             if self.api_key:
                 params["api_key"] = self.api_key
             async with aiohttp.ClientSession(connector=connector) as session:
@@ -258,7 +262,7 @@ class TonPaymentService:
                         in_msg = tx.get("in_msg", {})
                         if in_msg.get("message") != comment:
                             continue
-                        if int(in_msg.get("value", "0")) >= int(expected * 0.95):
+                        if int(in_msg.get("value", "0")) >= int(expected * 0.99):
                             return True
                     return False
         except Exception as e:
@@ -909,6 +913,11 @@ class MailingService:
     def _clear_working_targets(self, mailing_id: int):
         self._working_targets.pop(mailing_id, None)
 
+    def forget_target(self, mailing_id: int, target_id: int):
+        """Evict a deleted target from the in-memory working set immediately,
+        instead of waiting for the next full-clear event to notice it's gone."""
+        self._mark_target_not_working(mailing_id, target_id)
+
     async def get_free_tier_runtime_stats(self) -> dict:
         working_target_ids = {
             target_id
@@ -1317,7 +1326,7 @@ class MailingService:
                             continue
 
                         hidden_tag_user_ids = []
-                        if mailing.hidden_tag_enabled:
+                        if mailing.hidden_tag_enabled and not add_sig:
                             hidden_tag_user_ids = await self._get_recent_user_ids(
                                 target_client, target, target_me.id
                             )
@@ -1434,14 +1443,17 @@ class MailingService:
                                 pass
                             await self._handle_chat_ban(mailing_id, current_account_id, target_obj, e)
                         except _NOT_MEMBER_ERRORS as e:
-                            await self.db.add_error_log(
-                                user_id=mailing.user_id,
-                                error_type=type(e).__name__,
-                                error_text=str(e)[:300],
-                                account_id=current_account_id,
-                                mailing_id=mailing_id,
-                                chat_identifier=target,
-                            )
+                            try:
+                                await self.db.add_error_log(
+                                    user_id=mailing.user_id,
+                                    error_type=type(e).__name__,
+                                    error_text=str(e)[:300],
+                                    account_id=current_account_id,
+                                    mailing_id=mailing_id,
+                                    chat_identifier=target,
+                                )
+                            except Exception:
+                                pass
                             logger.info(f"Mailing {mailing_id}: not participant/forbidden in '{target}', attempting auto-join")
                             joined = await self._try_join_and_send(
                                 target_client, target, target_obj, msg, pm,
@@ -1457,14 +1469,17 @@ class MailingService:
                                 self._mark_target_not_working(mailing_id, target_obj.id)
                         except SlowModeWaitError as e:
                             self._mark_target_not_working(mailing_id, target_obj.id)
-                            await self.db.add_error_log(
-                                user_id=mailing.user_id,
-                                error_type=type(e).__name__,
-                                error_text=f"{e.seconds}s",
-                                account_id=current_account_id,
-                                mailing_id=mailing_id,
-                                chat_identifier=target,
-                            )
+                            try:
+                                await self.db.add_error_log(
+                                    user_id=mailing.user_id,
+                                    error_type=type(e).__name__,
+                                    error_text=f"{e.seconds}s",
+                                    account_id=current_account_id,
+                                    mailing_id=mailing_id,
+                                    chat_identifier=target,
+                                )
+                            except Exception:
+                                pass
                             logger.warning(f"Mailing {mailing_id}: slow mode in '{target}', wait {e.seconds}s")
                             await asyncio.sleep(min(e.seconds, 60))
                         except FloodWaitError as e:
@@ -1508,23 +1523,6 @@ class MailingService:
                                     )
                                 except Exception:
                                     pass
-                                notify = None
-                                if notify:
-                                    try:
-                                        account_obj = await self.db.get_account(current_account_id)
-                                        finish_at = now_moscow() + timedelta(seconds=e.seconds)
-                                        await notify(
-                                            mailing_user.telegram_id if mailing_user else 0,
-                                            pe(
-                                                f"⚠️ <b>FloodWait</b>\n\n"
-                                                f"Аккаунт: <b>{account_obj.display_name if account_obj else current_account_id}</b>\n"
-                                                f"Длительность: <b>{e.seconds} сек.</b>\n"
-                                                f"Окончание (МСК): <b>{finish_at.strftime('%d.%m.%Y %H:%M:%S')}</b>\n\n"
-                                                "Рекомендуется сменить аккаунт."
-                                            ),
-                                        )
-                                    except Exception:
-                                        pass
                                 await asyncio.sleep(wait)
                         except (ChatSendMediaForbiddenError, ChatGuestSendForbiddenError, RightForbiddenError, ChatAdminRequiredError) as e:
                             self._mark_target_not_working(mailing_id, target_obj.id)
@@ -1539,7 +1537,47 @@ class MailingService:
                             logger.warning(f"Mailing {mailing_id}: send forbidden in '{target}' ({type(e).__name__}) — chat restricts this message type, skipping")
                         except Exception as e:
                             err_str = str(e)
-                            if "PLAIN_FORBIDDEN" in err_str or "SEND_PLAIN" in err_str:
+                            if isinstance(e, ValueError) and isinstance(target, str) and "t.me/+" in target and "not part of" in err_str:
+                                # Telethon raises this locally (no RPC round-trip) when the
+                                # invite link hasn't been joined yet — _NOT_MEMBER_ERRORS
+                                # never fires here since it's not a Telegram RPCError.
+                                await self.db.add_error_log(
+                                    user_id=mailing.user_id,
+                                    error_type="InviteNotJoined",
+                                    error_text=err_str[:300],
+                                    account_id=current_account_id,
+                                    mailing_id=mailing_id,
+                                    chat_identifier=target,
+                                )
+                                logger.info(f"Mailing {mailing_id}: invite link '{target}' not joined yet, attempting auto-join")
+                                joined = await self._try_join_and_send(
+                                    target_client, target, target_obj, msg, pm,
+                                    mailing_id, current_account_id,
+                                    reply_to=reply_to_id,
+                                    add_signature=add_sig,
+                                    hidden_tag_user_ids=hidden_tag_user_ids,
+                                )
+                                if joined:
+                                    self._mark_target_working(mailing_id, target_obj.id)
+                                    sent_any = True
+                                else:
+                                    self._mark_target_not_working(mailing_id, target_obj.id)
+                            elif isinstance(e, ValueError) and "Could not find the input entity" in err_str:
+                                self._mark_target_not_working(mailing_id, target_obj.id)
+                                cycle_errors += 1
+                                await self.db.add_error_log(
+                                    user_id=mailing.user_id,
+                                    error_type="EntityUnresolvable",
+                                    error_text=err_str[:300],
+                                    account_id=current_account_id,
+                                    mailing_id=mailing_id,
+                                    chat_identifier=target,
+                                )
+                                logger.warning(
+                                    f"Mailing {mailing_id}: account never saw chat '{target}' — "
+                                    f"can't resolve chat_id without access_hash, account must join/see it first"
+                                )
+                            elif "PLAIN_FORBIDDEN" in err_str or "SEND_PLAIN" in err_str:
                                 self._mark_target_not_working(mailing_id, target_obj.id)
                                 cycle_errors += 1
                                 await self.db.add_error_log(
@@ -1709,7 +1747,7 @@ class MailingService:
         """Try to join target channel/group, then retry sending. Returns True if message was sent."""
         mailing = await self.db.get_mailing(mailing_id)
         try:
-            if "t.me/+" in target:
+            if isinstance(target, str) and "t.me/+" in target:
                 joined = await client(ImportChatInviteRequest(target.rsplit("+", 1)[1]))
                 if getattr(joined, "chats", None):
                     target = joined.chats[0]
@@ -1849,8 +1887,10 @@ class SubscriptionCheckerService:
     async def _loop(self, bot):
         while True:
             try:
-                await asyncio.sleep(3600)  # check every hour
+                # Check first, then sleep — checking after the sleep left subscriptions that
+                # expired shortly before a restart unenforced for up to an extra hour.
                 await self._check(bot)
+                await asyncio.sleep(3600)  # check every hour
             except asyncio.CancelledError:
                 raise
             except Exception as e:

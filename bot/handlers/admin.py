@@ -8,7 +8,7 @@ from typing import Optional
 
 import matplotlib
 matplotlib.use("Agg")
-import matplotlib.pyplot as plt
+from matplotlib.figure import Figure
 
 from aiogram import Router, F, Bot
 from aiogram.types import Message, CallbackQuery, FSInputFile, BufferedInputFile
@@ -125,10 +125,15 @@ _PERIOD_LABELS = {
 
 
 def _build_chart_image(data: list, title: str) -> io.BytesIO | None:
+    # Built via the object-oriented Figure API (not pyplot.subplots/savefig)
+    # so this doesn't touch pyplot's global current-figure state — this runs
+    # inside asyncio.to_thread and pyplot's global state isn't thread-safe,
+    # and a plain Figure also never needs plt.close() to avoid leaking.
     try:
         labels = [d[0] for d in data] or ["—"]
         values = [d[1] for d in data] or [0]
-        fig, ax = plt.subplots(figsize=(10, 4))
+        fig = Figure(figsize=(10, 4))
+        ax = fig.add_subplot(111)
         fig.patch.set_facecolor("#1e1e2e")
         ax.set_facecolor("#1e1e2e")
         bars = ax.bar(range(len(labels)), values, color="#7c9eff", width=0.6)
@@ -147,10 +152,9 @@ def _build_chart_image(data: list, title: str) -> io.BytesIO | None:
                     str(val),
                     ha="center", va="bottom", color="white", fontsize=8,
                 )
-        plt.tight_layout()
+        fig.tight_layout()
         buf = io.BytesIO()
-        plt.savefig(buf, format="png", dpi=120, facecolor=fig.get_facecolor())
-        plt.close(fig)
+        fig.savefig(buf, format="png", dpi=120, facecolor=fig.get_facecolor())
         buf.seek(0)
         return buf
     except Exception:
@@ -320,6 +324,11 @@ async def process_broadcast(message: Message, state: FSMContext, db: Database):
         await message.answer(pe("❌ Отправьте текст, фото, видео или файл."), parse_mode="HTML", reply_markup=cancel_keyboard())
         return
 
+    entities = message.entities or message.caption_entities
+    has_custom_emoji = bool(entities) and any(e.type == "custom_emoji" for e in entities)
+    raw_text = message.html_text if (message.text or message.caption) else None
+    text = pe(raw_text) if raw_text and not has_custom_emoji else raw_text
+
     users = await db.get_all_users()
     sent = 0
     failed = 0
@@ -327,7 +336,16 @@ async def process_broadcast(message: Message, state: FSMContext, db: Database):
     status_msg = await message.answer("⏳ Рассылка...")
     for user in users:
         try:
-            await message.copy_to(user.telegram_id)
+            if message.photo:
+                await message.bot.send_photo(user.telegram_id, message.photo[-1].file_id, caption=text, parse_mode="HTML")
+            elif message.video:
+                await message.bot.send_video(user.telegram_id, message.video.file_id, caption=text, parse_mode="HTML")
+            elif message.document:
+                await message.bot.send_document(user.telegram_id, message.document.file_id, caption=text, parse_mode="HTML")
+            elif message.animation:
+                await message.bot.send_animation(user.telegram_id, message.animation.file_id, caption=text, parse_mode="HTML")
+            else:
+                await message.bot.send_message(user.telegram_id, text, parse_mode="HTML")
             sent += 1
         except Exception:
             failed += 1
