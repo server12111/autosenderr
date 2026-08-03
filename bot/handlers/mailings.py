@@ -49,6 +49,7 @@ from ..keyboards.inline import (
 from ..utils.time_utils import format_active_hours, parse_time_range, create_active_hours_json, now_moscow
 from ..services import MailingService
 from ..userbot.manager import UserbotManager
+from ..utils.errors import friendly_error
 from ..utils.premium_emoji import pe
 
 logger = logging.getLogger(__name__)
@@ -1145,7 +1146,7 @@ async def process_edit_folder(
         logger.error(f"Error resolving folder {slug}: {e}")
         await loading_msg.delete()
         await message.answer(
-            pe(f"❌ Ошибка при получении чатов из папки: {html.escape(str(e))}"),
+            pe(friendly_error(e, default="❌ Не удалось получить чаты из папки. Проверьте ссылку и попробуйте снова.")),
             parse_mode="HTML",
         )
 
@@ -2034,7 +2035,7 @@ async def process_create_folder(
         logger.error(f"Error resolving folder {slug}: {e}")
         await loading_msg.delete()
         await message.answer(
-            pe(f"❌ Ошибка при получении чатов из папки: {html.escape(str(e))}"),
+            pe(friendly_error(e, default="❌ Не удалось получить чаты из папки. Проверьте ссылку и попробуйте снова.")),
             parse_mode="HTML",
         )
 

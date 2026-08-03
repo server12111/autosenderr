@@ -25,6 +25,7 @@ from ..keyboards.inline import (
 from ..userbot.manager import UserbotManager, _parse_proxy, _DEVICE_POOL
 from ..config import config
 from ..services import CryptoBotService, TonPaymentService, MailingService
+from ..utils.errors import friendly_error
 from ..utils.time_utils import now_moscow
 
 
@@ -641,7 +642,7 @@ async def _connect_and_send_code(message: Message, state: FSMContext, data: dict
             await state.clear()
         else:
             await message.answer(
-                pe(f"❌ Ошибка при отправке кода: {html.escape(str(e))}\n\nПопробуйте снова."),
+                pe(friendly_error(e, default="❌ Не удалось отправить код. Попробуйте снова позже.")),
                 parse_mode="HTML",
                 reply_markup=main_menu_keyboard(),
             )
@@ -740,7 +741,7 @@ async def process_password(message: Message, state: FSMContext, db: Database):
         user = await db.get_user(message.from_user.id)
         accounts = await db.get_user_accounts(user.id)
         await message.answer(
-            pe(f"❌ Ошибка авторизации: {html.escape(str(e))}"),
+            pe(friendly_error(e)),
             parse_mode="HTML",
             reply_markup=accounts_keyboard(accounts),
         )
@@ -940,7 +941,7 @@ async def _confirm_code(event, state: FSMContext, db: Database):
             user = await db.get_user(user_id)
             accounts = await db.get_user_accounts(user.id)
             await _edit_code_message(event, state,
-                pe(f"❌ Ошибка авторизации: {html.escape(str(e))}"),
+                pe(friendly_error(e)),
                 parse_mode="HTML",
                 reply_markup=accounts_keyboard(accounts),
             )
