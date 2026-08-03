@@ -2,6 +2,7 @@ import asyncio
 import html
 import logging
 import os
+from typing import Optional
 
 from aiogram import Router, F
 from aiogram.types import Message, CallbackQuery
@@ -30,6 +31,13 @@ def _log_background_task_error(task: asyncio.Task):
         )
 
 
+def _parse_account_id(callback: CallbackQuery) -> Optional[int]:
+    try:
+        return int(callback.data.split(":")[1])
+    except (IndexError, ValueError):
+        return None
+
+
 class AutoresponderStates(StatesGroup):
     waiting_text = State()
     waiting_group_text = State()
@@ -37,7 +45,10 @@ class AutoresponderStates(StatesGroup):
 
 @router.callback_query(F.data.startswith("autoresponder:"))
 async def callback_autoresponder(callback: CallbackQuery, db: Database):
-    account_id = int(callback.data.split(":")[1])
+    account_id = _parse_account_id(callback)
+    if account_id is None:
+        await callback.answer("Некорректные данные", show_alert=True)
+        return
     account = await db.get_account_for_user(account_id, callback.from_user.id)
 
     if not account:
@@ -66,7 +77,10 @@ async def callback_autoresponder(callback: CallbackQuery, db: Database):
 
 @router.callback_query(F.data.startswith("toggle_autoresponder:"))
 async def callback_toggle_autoresponder(callback: CallbackQuery, db: Database, userbot_manager: UserbotManager):
-    account_id = int(callback.data.split(":")[1])
+    account_id = _parse_account_id(callback)
+    if account_id is None:
+        await callback.answer("Некорректные данные", show_alert=True)
+        return
     account = await db.get_account_for_user(account_id, callback.from_user.id)
 
     if not account:
@@ -129,7 +143,10 @@ async def callback_toggle_autoresponder(callback: CallbackQuery, db: Database, u
 
 @router.callback_query(F.data.startswith("toggle_notify:"))
 async def callback_toggle_notify(callback: CallbackQuery, db: Database, userbot_manager: UserbotManager):
-    account_id = int(callback.data.split(":")[1])
+    account_id = _parse_account_id(callback)
+    if account_id is None:
+        await callback.answer("Некорректные данные", show_alert=True)
+        return
     account = await db.get_account_for_user(account_id, callback.from_user.id)
 
     if not account:
@@ -170,7 +187,10 @@ async def callback_toggle_notify(callback: CallbackQuery, db: Database, userbot_
 async def callback_edit_autoresponder_text(
     callback: CallbackQuery, state: FSMContext, db: Database
 ):
-    account_id = int(callback.data.split(":")[1])
+    account_id = _parse_account_id(callback)
+    if account_id is None:
+        await callback.answer("Некорректные данные", show_alert=True)
+        return
     if not await db.get_account_for_user(account_id, callback.from_user.id):
         await callback.answer("⛔ Нет доступа", show_alert=True)
         return
@@ -235,7 +255,10 @@ async def process_autoresponder_text(message: Message, state: FSMContext, db: Da
 
 @router.callback_query(F.data.startswith("group_autoresponder:"))
 async def callback_group_autoresponder(callback: CallbackQuery, db: Database):
-    account_id = int(callback.data.split(":")[1])
+    account_id = _parse_account_id(callback)
+    if account_id is None:
+        await callback.answer("Некорректные данные", show_alert=True)
+        return
     account = await db.get_account_for_user(account_id, callback.from_user.id)
 
     if not account:
@@ -262,7 +285,10 @@ async def callback_group_autoresponder(callback: CallbackQuery, db: Database):
 
 @router.callback_query(F.data.startswith("toggle_group_autoresponder:"))
 async def callback_toggle_group_autoresponder(callback: CallbackQuery, db: Database, userbot_manager: UserbotManager):
-    account_id = int(callback.data.split(":")[1])
+    account_id = _parse_account_id(callback)
+    if account_id is None:
+        await callback.answer("Некорректные данные", show_alert=True)
+        return
     account = await db.get_account_for_user(account_id, callback.from_user.id)
 
     if not account:
@@ -323,7 +349,10 @@ async def callback_toggle_group_autoresponder(callback: CallbackQuery, db: Datab
 async def callback_edit_group_autoresponder_text(
     callback: CallbackQuery, state: FSMContext, db: Database
 ):
-    account_id = int(callback.data.split(":")[1])
+    account_id = _parse_account_id(callback)
+    if account_id is None:
+        await callback.answer("Некорректные данные", show_alert=True)
+        return
     if not await db.get_account_for_user(account_id, callback.from_user.id):
         await callback.answer("⛔ Нет доступа", show_alert=True)
         return
@@ -387,7 +416,10 @@ async def process_group_autoresponder_text(message: Message, state: FSMContext, 
 
 @router.callback_query(F.data.startswith("clear_autoresponder_history:"))
 async def callback_clear_history(callback: CallbackQuery, db: Database):
-    account_id = int(callback.data.split(":")[1])
+    account_id = _parse_account_id(callback)
+    if account_id is None:
+        await callback.answer("Некорректные данные", show_alert=True)
+        return
 
     if not await db.get_account_for_user(account_id, callback.from_user.id):
         await callback.answer("⛔ Нет доступа", show_alert=True)

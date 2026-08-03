@@ -35,6 +35,8 @@ from ..keyboards.inline import (
     active_hours_keyboard,
     launch_mailing_keyboard,
     delete_mailing_confirm_keyboard,
+    delete_message_confirm_keyboard,
+    delete_target_confirm_keyboard,
     cancel_keyboard,
     main_menu_keyboard,
     photo_collection_keyboard,
@@ -702,6 +704,31 @@ async def callback_edit_save_photos(callback: CallbackQuery, state: FSMContext, 
     await callback.answer()
 
 
+@router.callback_query(F.data.startswith("confirm_delete_msg:"))
+async def callback_confirm_delete_message(callback: CallbackQuery, db: Database):
+    message_id = int(callback.data.split(":")[1])
+
+    async with db._conn.execute(
+        "SELECT mailing_id FROM mailing_messages WHERE id = ?", (message_id,)
+    ) as cursor:
+        row = await cursor.fetchone()
+        if not row:
+            await callback.answer("Текст не найден", show_alert=True)
+            return
+        mailing_id = row["mailing_id"]
+
+    if not await db.get_mailing_for_user(mailing_id, callback.from_user.id):
+        await callback.answer("⛔ Нет доступа", show_alert=True)
+        return
+
+    await callback.message.edit_text(
+        pe("❗ Удалить это сообщение из рассылки?"),
+        parse_mode="HTML",
+        reply_markup=delete_message_confirm_keyboard(mailing_id, message_id),
+    )
+    await callback.answer()
+
+
 @router.callback_query(F.data.startswith("delete_msg:"))
 async def callback_delete_message(callback: CallbackQuery, db: Database):
     message_id = int(callback.data.split(":")[1])
@@ -828,7 +855,7 @@ async def process_edit_target(message: Message, state: FSMContext, db: Database,
                "Примеры: <code>https://t.me/chatname/123</code> или <code>123</code>\n\n"
                "Нажмите «Пропустить» для отправки в General."),
             parse_mode="HTML",
-            reply_markup=skip_thread_keyboard(mailing_id, target),
+            reply_markup=skip_thread_keyboard(mailing_id),
         )
         return
 
@@ -839,6 +866,33 @@ async def process_edit_target(message: Message, state: FSMContext, db: Database,
         parse_mode="HTML",
         reply_markup=mailing_targets_keyboard(mailing_id, targets),
     )
+
+
+@router.callback_query(F.data.startswith("confirm_delete_target:"))
+async def callback_confirm_delete_target(callback: CallbackQuery, db: Database):
+    target_id = int(callback.data.split(":")[1])
+
+    async with db._conn.execute(
+        "SELECT mailing_id FROM mailing_targets WHERE id = ?", (target_id,)
+    ) as cursor:
+        row = await cursor.fetchone()
+        if not row:
+            await callback.answer("Чат не найден", show_alert=True)
+            return
+        mailing_id = row["mailing_id"]
+
+    mailing = await db.get_mailing(mailing_id)
+    user = await db.get_user(callback.from_user.id)
+    if not mailing or mailing.user_id != user.id:
+        await callback.answer("⛔ Нет доступа", show_alert=True)
+        return
+
+    await callback.message.edit_text(
+        pe("❗ Удалить этот чат из рассылки?"),
+        parse_mode="HTML",
+        reply_markup=delete_target_confirm_keyboard(mailing_id, target_id),
+    )
+    await callback.answer()
 
 
 @router.callback_query(F.data.startswith("delete_target:"))
@@ -1833,7 +1887,7 @@ async def process_create_target(message: Message, state: FSMContext, db: Databas
                "Примеры: <code>https://t.me/chatname/123</code> или <code>123</code>\n\n"
                "Нажмите «Пропустить» для отправки в General."),
             parse_mode="HTML",
-            reply_markup=skip_thread_keyboard(mailing_id, target),
+            reply_markup=skip_thread_keyboard(mailing_id),
         )
         return
 
@@ -2521,9 +2575,7 @@ async def process_thread_id_for_target(message: Message, state: FSMContext, db: 
 
 @router.callback_query(F.data.startswith("skip_thread:"))
 async def callback_skip_thread(callback: CallbackQuery, state: FSMContext, db: Database):
-    parts = callback.data.split(":", 2)
-    mailing_id = int(parts[1])
-    target_identifier = parts[2] if len(parts) > 2 else ""
+    mailing_id = int(callback.data.split(":")[1])
     if not await db.get_mailing_for_user(mailing_id, callback.from_user.id):
         await callback.answer("⛔ Нет доступа", show_alert=True)
         return

@@ -78,11 +78,11 @@ def dm_mailing_keyboard() -> InlineKeyboardMarkup:
     return builder.as_markup()
 
 
-def skip_thread_keyboard(mailing_id: int, target_identifier: str) -> InlineKeyboardMarkup:
+def skip_thread_keyboard(mailing_id: int) -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
     builder.row(InlineKeyboardButton(
         text="⏭️ Пропустить (General)",
-        callback_data=f"skip_thread:{mailing_id}:{target_identifier}"
+        callback_data=f"skip_thread:{mailing_id}"
     ))
     return builder.as_markup()
 
@@ -310,6 +310,24 @@ def delete_mailing_confirm_keyboard(mailing_id: int) -> InlineKeyboardMarkup:
     return builder.as_markup()
 
 
+def delete_message_confirm_keyboard(mailing_id: int, message_id: int) -> InlineKeyboardMarkup:
+    builder = InlineKeyboardBuilder()
+    builder.row(
+        _btn("✅ Да, удалить", callback_data=f"delete_msg:{message_id}", style="danger"),
+        _btn("◀️ Отмена", callback_data=f"mailing_messages:{mailing_id}", style="primary"),
+    )
+    return builder.as_markup()
+
+
+def delete_target_confirm_keyboard(mailing_id: int, target_id: int) -> InlineKeyboardMarkup:
+    builder = InlineKeyboardBuilder()
+    builder.row(
+        _btn("✅ Да, удалить", callback_data=f"delete_target:{target_id}", style="danger"),
+        _btn("◀️ Отмена", callback_data=f"mailing_targets:{mailing_id}", style="primary"),
+    )
+    return builder.as_markup()
+
+
 # === Mailing messages ===
 def _msg_button_preview(msg: MailingMessage) -> str:
     if msg.is_forward:
@@ -332,7 +350,7 @@ def mailing_messages_keyboard(mailing_id: int, messages: list[MailingMessage]) -
     builder = InlineKeyboardBuilder()
     for msg in messages:
         preview = _msg_button_preview(msg)
-        builder.row(_btn(f"🗑️ {preview}", callback_data=f"delete_msg:{msg.id}", style="danger"))
+        builder.row(_btn(f"🗑️ {preview}", callback_data=f"confirm_delete_msg:{msg.id}", style="danger"))
     builder.row(
         _btn("➕ Текст/фото/видео/эмодзи", callback_data=f"add_mailing_message:{mailing_id}", style="primary"),
         _btn("📨 Переслать", callback_data=f"add_mailing_forward:{mailing_id}", style="primary"),
@@ -382,13 +400,13 @@ def mailing_targets_keyboard(mailing_id: int, targets: list[MailingTarget]) -> I
         if target.is_forum or target.thread_id:
             thread_text = f"🧵#{target.thread_id}" if target.thread_id else "🧵"
             builder.row(
-                _btn(f"🗑️ {target.chat_identifier}", callback_data=f"delete_target:{target.id}", style="danger"),
+                _btn(f"🗑️ {target.chat_identifier}", callback_data=f"confirm_delete_target:{target.id}", style="danger"),
                 _btn(iv_text, callback_data=f"edit_target_interval:{target.id}:{mailing_id}", style="primary"),
                 InlineKeyboardButton(text=thread_text, callback_data=f"set_target_thread:{target.id}:{mailing_id}"),
             )
         else:
             builder.row(
-                _btn(f"🗑️ {target.chat_identifier}", callback_data=f"delete_target:{target.id}", style="danger"),
+                _btn(f"🗑️ {target.chat_identifier}", callback_data=f"confirm_delete_target:{target.id}", style="danger"),
                 _btn(iv_text, callback_data=f"edit_target_interval:{target.id}:{mailing_id}", style="primary"),
             )
     builder.row(

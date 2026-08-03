@@ -42,6 +42,7 @@ from ..config import config
 from ..services import MailingService
 from ..utils.premium_emoji import pe
 from ..utils.time_utils import now_moscow
+from ..utils.tg import edit_or_answer
 
 router = Router()
 
@@ -1005,11 +1006,7 @@ async def callback_admin_back(callback: CallbackQuery):
         return
     await callback.answer()
     text = pe("🔧 Админ-панель\n\nВыберите действие:")
-    try:
-        await callback.message.edit_text(text, parse_mode="HTML", reply_markup=admin_keyboard())
-    except Exception:
-        await callback.message.delete()
-        await callback.message.answer(text, parse_mode="HTML", reply_markup=admin_keyboard())
+    await edit_or_answer(callback, text, parse_mode="HTML", reply_markup=admin_keyboard(), delete_on_fallback=True)
 
 
 @router.callback_query(F.data == "admin_export_db")
@@ -1345,10 +1342,7 @@ async def callback_admin_diag_show(callback: CallbackQuery, db: Database):
         return
 
     diag_text, keyboard = result
-    try:
-        await callback.message.edit_text(diag_text, parse_mode="HTML", reply_markup=keyboard)
-    except Exception:
-        await callback.message.answer(diag_text, parse_mode="HTML", reply_markup=keyboard)
+    await edit_or_answer(callback, diag_text, parse_mode="HTML", reply_markup=keyboard)
     await callback.answer()
 
 
@@ -1384,14 +1378,7 @@ async def callback_admin_user_errors(callback: CallbackQuery, db: Database):
             parts.append(f"  🕐 {time_str}")
             text += "\n".join(parts) + "\n\n"
 
-    try:
-        await callback.message.edit_text(
-            text, parse_mode="HTML", reply_markup=admin_errors_keyboard(telegram_id)
-        )
-    except Exception:
-        await callback.message.answer(
-            text, parse_mode="HTML", reply_markup=admin_errors_keyboard(telegram_id)
-        )
+    await edit_or_answer(callback, text, parse_mode="HTML", reply_markup=admin_errors_keyboard(telegram_id))
     await callback.answer()
 
 
@@ -1414,19 +1401,7 @@ async def callback_admin_free_tier(
         f"💬 Уникальные чаты: <b>{stats['unique_chats']}</b>"
     )
 
-    try:
-        await callback.message.edit_text(
-            text,
-            parse_mode="HTML",
-            reply_markup=admin_free_tier_keyboard(),
-        )
-    except Exception:
-        await callback.message.delete()
-        await callback.message.answer(
-            text,
-            parse_mode="HTML",
-            reply_markup=admin_free_tier_keyboard(),
-        )
+    await edit_or_answer(callback, text, parse_mode="HTML", reply_markup=admin_free_tier_keyboard(), delete_on_fallback=True)
     await callback.answer()
 
 
@@ -1470,19 +1445,7 @@ async def callback_admin_free_chats(
         page,
         has_next=(start + per_page) < len(chats),
     )
-    try:
-        await callback.message.edit_text(
-            text,
-            parse_mode="HTML",
-            reply_markup=keyboard,
-        )
-    except Exception:
-        await callback.message.delete()
-        await callback.message.answer(
-            text,
-            parse_mode="HTML",
-            reply_markup=keyboard,
-        )
+    await edit_or_answer(callback, text, parse_mode="HTML", reply_markup=keyboard, delete_on_fallback=True)
     await callback.answer()
 
 
@@ -1565,9 +1528,5 @@ async def callback_admin_subscriptions(callback: CallbackQuery, db: Database, bo
         builder.row(*nav)
     builder.row(IKBtn(text="◀️ Назад", callback_data="admin_back"))
 
-    try:
-        await callback.message.edit_text(text, parse_mode="HTML", reply_markup=builder.as_markup())
-    except Exception:
-        await callback.message.delete()
-        await callback.message.answer(text, parse_mode="HTML", reply_markup=builder.as_markup())
+    await edit_or_answer(callback, text, parse_mode="HTML", reply_markup=builder.as_markup(), delete_on_fallback=True)
     await callback.answer()
