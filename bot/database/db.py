@@ -67,6 +67,16 @@ class Account:
     name: Optional[str] = None
     proxy: Optional[str] = None
     auto_subscribe_sponsors: bool = False
+    proxy_pool_id: Optional[int] = None
+
+
+@dataclass
+class PoolProxy:
+    id: int
+    proxy: str
+    is_active: bool
+    added_by: Optional[int]
+    created_at: datetime
 
     @property
     def display_name(self) -> str:
@@ -262,6 +272,17 @@ class Database:
         await _add_col("accounts", "group_autoresponder_photo",    "TEXT")
         await _add_col("accounts", "proxy",                        "TEXT")
         await _add_col("accounts", "auto_subscribe_sponsors",      "BOOLEAN DEFAULT FALSE")
+        await _add_col("accounts", "proxy_pool_id",                "INTEGER DEFAULT NULL")
+        await self._conn.execute("""
+            CREATE TABLE IF NOT EXISTS proxy_pool (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                proxy TEXT NOT NULL,
+                is_active INTEGER DEFAULT 1,
+                added_by INTEGER,
+                created_at DATETIME DEFAULT (datetime('now', '+3 hours'))
+            )
+        """)
+        await self._conn.commit()
         # mailing_messages
         await _add_col("mailing_messages", "photo_path",    "TEXT")
         await _add_col("mailing_messages", "video_path",    "TEXT")
@@ -416,6 +437,7 @@ class Database:
             name=row["name"] if "name" in keys else None,
             proxy=row["proxy"] if "proxy" in keys else None,
             auto_subscribe_sponsors=bool(row["auto_subscribe_sponsors"]) if "auto_subscribe_sponsors" in keys and row["auto_subscribe_sponsors"] is not None else False,
+            proxy_pool_id=row["proxy_pool_id"] if "proxy_pool_id" in keys else None,
         )
 
     # === Users ===
@@ -719,11 +741,105 @@ class Database:
         )
         await self._conn.commit()
 
-    async def update_account_proxy(self, account_id: int, proxy: Optional[str]):
+    async def update_account_proxy(self, account_id: int, proxy: Optional[str], proxy_pool_id: Optional[int] = None):
         await self._conn.execute(
-            "UPDATE accounts SET proxy = ? WHERE id = ?", (proxy, account_id)
+            "UPDATE accounts SET proxy = ?, proxy_pool_id = ? WHERE id = ?", (proxy, proxy_pool_id, account_id)
         )
         await self._conn.commit()
+
+    # === Proxy pool ===
+
+    async def add_pool_proxy(self, proxy: str, added_by: Optional[int]) -> int:
+        cursor = await self._conn.execute(
+            "INSERT INTO proxy_pool (proxy, added_by) VALUES (?, ?)", (proxy, added_by)
+        )
+        await self._conn.commit()
+        return cursor.lastrowid
+
+    async def get_pool_proxies(self) -> list[tuple["PoolProxy", int]]:
+        """All pool proxies with the number of active accounts currently on each."""
+        async with self._conn.execute(
+            """SELECT p.id, p.proxy, p.is_active, p.added_by, p.created_at,
+                      (SELECT COUNT(*) FROM accounts a WHERE a.proxy_pool_id = p.id AND a.is_active = 1) as cnt
+               FROM proxy_pool p ORDER BY p.created_at DESC"""
+        ) as cur:
+            rows = await cur.fetchall()
+            return [
+                (
+                    PoolProxy(
+                        id=r["id"], proxy=r["proxy"], is_active=bool(r["is_active"]),
+                        added_by=r["added_by"], created_at=self._parse_datetime(r["created_at"]),
+                    ),
+                    r["cnt"],
+                )
+                for r in rows
+            ]
+
+    async def delete_pool_proxy(self, pool_id: int):
+        await self._conn.execute("DELETE FROM proxy_pool WHERE id = ?", (pool_id,))
+        await self._conn.commit()
+
+    async def deactivate_pool_proxy(self, pool_id: int) -> bool:
+        """Mark a pool proxy dead. Returns True only if it was still active
+        (so callers don't re-notify for a proxy that's already been reported)."""
+        cur = await self._conn.execute(
+            "UPDATE proxy_pool SET is_active = 0 WHERE id = ? AND is_active = 1", (pool_id,)
+        )
+        await self._conn.commit()
+        return cur.rowcount > 0
+
+    async def get_least_loaded_pool_proxy(self, exclude_id: Optional[int] = None) -> Optional["PoolProxy"]:
+        query = (
+            "SELECT p.id, p.proxy, p.is_active, p.added_by, p.created_at, "
+            "(SELECT COUNT(*) FROM accounts a WHERE a.proxy_pool_id = p.id AND a.is_active = 1) as cnt "
+            "FROM proxy_pool p WHERE p.is_active = 1"
+        )
+        params: list = []
+        if exclude_id is not None:
+            query += " AND p.id != ?"
+            params.append(exclude_id)
+        query += " ORDER BY cnt ASC, p.id ASC LIMIT 1"
+        async with self._conn.execute(query, params) as cur:
+            row = await cur.fetchone()
+            if not row:
+                return None
+            return PoolProxy(
+                id=row["id"], proxy=row["proxy"], is_active=bool(row["is_active"]),
+                added_by=row["added_by"], created_at=self._parse_datetime(row["created_at"]),
+            )
+
+    async def find_own_proxy_with_room(self, user_id: int, cap: int = 3) -> Optional[str]:
+        """A proxy the user already typed in themselves (not pool-assigned) that
+        has fewer than `cap` accounts on it — reused automatically for their next
+        account instead of asking again."""
+        async with self._conn.execute(
+            """SELECT proxy, COUNT(*) as cnt FROM accounts
+               WHERE user_id = ? AND proxy_pool_id IS NULL AND proxy IS NOT NULL AND proxy != ''
+               GROUP BY proxy HAVING cnt < ?
+               ORDER BY cnt DESC LIMIT 1""",
+            (user_id, cap),
+        ) as cur:
+            row = await cur.fetchone()
+            return row["proxy"] if row else None
+
+    async def auto_assign_proxy(self, user_id: int, account_id: int) -> Optional[str]:
+        """Called when a new account was created without an explicit proxy: reuse
+        the user's own under-capacity proxy if they have one, else hand out the
+        least-loaded pool proxy, else leave the account without a proxy."""
+        own_proxy = await self.find_own_proxy_with_room(user_id)
+        if own_proxy:
+            await self.update_account_proxy(account_id, own_proxy, proxy_pool_id=None)
+            return own_proxy
+        pool = await self.get_least_loaded_pool_proxy()
+        if pool:
+            await self.update_account_proxy(account_id, pool.proxy, proxy_pool_id=pool.id)
+            return pool.proxy
+        return None
+
+    async def reassign_dead_pool_account(self, account_id: int, dead_pool_id: int):
+        pool = await self.get_least_loaded_pool_proxy(exclude_id=dead_pool_id)
+        if pool:
+            await self.update_account_proxy(account_id, pool.proxy, proxy_pool_id=pool.id)
 
     async def update_auto_subscribe_sponsors(self, account_id: int, enabled: bool):
         await self._conn.execute(

@@ -33,6 +33,7 @@ from ..keyboards.inline import (
     admin_errors_keyboard,
     admin_free_tier_keyboard,
     admin_free_chats_keyboard,
+    admin_proxy_pool_keyboard,
     cancel_keyboard,
     main_menu_keyboard,
     promo_subscription_keyboard,
@@ -62,6 +63,7 @@ class AdminStates(StatesGroup):
     waiting_db_file = State()
     waiting_diag_user_id = State()
     waiting_promo_edit_uses = State()
+    waiting_pool_proxy = State()
 
 
 def is_admin(user_id: int) -> bool:
@@ -628,6 +630,105 @@ async def callback_admin_promo_info(callback: CallbackQuery, db: Database):
     promocodes = await db.get_all_promocodes()
     await callback.message.edit_text(text, parse_mode="HTML", reply_markup=admin_promo_list_keyboard(promocodes))
     await callback.answer()
+
+
+# === Proxy pool ===
+
+def _mask_proxy(proxy: str) -> str:
+    """Hide the credentials portion when showing a pool proxy to the admin."""
+    return proxy.split("@")[-1] if "@" in proxy else proxy
+
+
+@router.callback_query(F.data == "admin_proxy_pool")
+async def callback_admin_proxy_pool(callback: CallbackQuery, db: Database):
+    if not is_admin(callback.from_user.id):
+        await callback.answer("Нет доступа", show_alert=True)
+        return
+    proxies = await db.get_pool_proxies()
+    if not proxies:
+        text = (
+            "🌐 Пул прокси\n\n"
+            "Прокси в пуле пока нет. Аккаунты без своего прокси подключаются напрямую.\n\n"
+            "Добавленные сюда прокси автоматически и незаметно для пользователей "
+            "распределяются между их аккаунтами, у которых нет собственного прокси."
+        )
+    else:
+        text = "🌐 Пул прокси\n\n🟢 — активен, 💀 — отключён (не отвечает)\nВ скобках — число аккаунтов на нём:\n"
+    await callback.message.edit_text(pe(text), parse_mode="HTML", reply_markup=admin_proxy_pool_keyboard(proxies))
+    await callback.answer()
+
+
+@router.callback_query(F.data == "admin_add_proxy")
+async def callback_admin_add_proxy(callback: CallbackQuery, state: FSMContext):
+    if not is_admin(callback.from_user.id):
+        await callback.answer("Нет доступа", show_alert=True)
+        return
+    await state.set_state(AdminStates.waiting_pool_proxy)
+    await callback.message.edit_text(
+        "➕ Добавление прокси в пул\n\n"
+        "Введите прокси в формате:\n"
+        "<code>socks5://host:port</code>\n"
+        "или с авторизацией:\n"
+        "<code>socks5://user:pass@host:port</code>",
+        parse_mode="HTML",
+        reply_markup=cancel_keyboard(),
+    )
+    await callback.answer()
+
+
+@router.message(AdminStates.waiting_pool_proxy)
+async def process_admin_add_proxy(message: Message, state: FSMContext, db: Database):
+    if not is_admin(message.from_user.id):
+        await state.clear()
+        return
+    text = (message.text or "").strip()
+    if not text.startswith("socks5://"):
+        await message.answer(
+            pe("❌ Неверный формат. Введите прокси в формате:\n"
+               "<code>socks5://host:port</code>\n"
+               "или <code>socks5://user:pass@host:port</code>"),
+            parse_mode="HTML",
+            reply_markup=cancel_keyboard(),
+        )
+        return
+    await db.add_pool_proxy(text, message.from_user.id)
+    await state.clear()
+
+    proxies = await db.get_pool_proxies()
+    await message.answer(
+        pe(f"✅ Прокси добавлен в пул: <code>{html.escape(_mask_proxy(text))}</code>"),
+        parse_mode="HTML",
+        reply_markup=admin_proxy_pool_keyboard(proxies),
+    )
+
+
+@router.callback_query(F.data.startswith("admin_proxy_info:"))
+async def callback_admin_proxy_info(callback: CallbackQuery, db: Database):
+    if not is_admin(callback.from_user.id):
+        await callback.answer("Нет доступа", show_alert=True)
+        return
+    pool_id = int(callback.data.split(":")[1])
+    proxies = await db.get_pool_proxies()
+    match = next((p for p, cnt in proxies if p.id == pool_id), None)
+    if not match:
+        await callback.answer("Прокси не найден", show_alert=True)
+        return
+    status = "активен" if match.is_active else "отключён (не отвечает)"
+    await callback.answer(f"{match.proxy}\n\nСтатус: {status}", show_alert=True)
+
+
+@router.callback_query(F.data.startswith("admin_delete_proxy:"))
+async def callback_admin_delete_proxy(callback: CallbackQuery, db: Database):
+    if not is_admin(callback.from_user.id):
+        await callback.answer("Нет доступа", show_alert=True)
+        return
+    pool_id = int(callback.data.split(":")[1])
+    await db.delete_pool_proxy(pool_id)
+    await callback.answer("✅ Прокси удалён из пула")
+
+    proxies = await db.get_pool_proxies()
+    text = "🌐 Пул прокси\n\nПрокси в пуле пока нет." if not proxies else "🌐 Пул прокси\n\n🟢 — активен, 💀 — отключён\nВ скобках — число аккаунтов на нём:"
+    await callback.message.edit_text(pe(text), parse_mode="HTML", reply_markup=admin_proxy_pool_keyboard(proxies))
 
 
 # === Settings panel ===

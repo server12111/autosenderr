@@ -39,6 +39,15 @@ async def _test_proxy_connection(host: str, port: int) -> bool:
         return False
 from ..utils.premium_emoji import pe
 
+
+def _proxy_status_text(account) -> str:
+    # Pool-assigned proxies must stay invisible to the account owner — shown
+    # exactly as if no proxy were configured at all.
+    if not account.proxy or account.proxy_pool_id:
+        return "🌐 Прокси: не настроен"
+    return f"🌐 {html.escape(account.proxy)}"
+
+
 router = Router()
 
 
@@ -91,7 +100,7 @@ async def callback_account_menu(callback: CallbackQuery, db: Database):
 
     ar_status = "✅ Включён" if account.autoresponder_enabled else "❌ Выключен"
     gr_status = "✅ Включён" if account.group_autoresponder_enabled else "❌ Выключен"
-    proxy_status = f"🌐 {html.escape(account.proxy)}" if account.proxy else "🌐 Прокси: не настроен"
+    proxy_status = _proxy_status_text(account)
     sponsor_status = "✅ Включена" if account.auto_subscribe_sponsors else "❌ Выключена"
 
     text = pe(
@@ -725,7 +734,10 @@ async def process_password(message: Message, state: FSMContext, db: Database):
         )
         proxy_str = data.get("proxy")
         if account_id:
-            await db.update_account_proxy(account_id, proxy_str)
+            if proxy_str:
+                await db.update_account_proxy(account_id, proxy_str)
+            else:
+                await db.auto_assign_proxy(user.id, account_id)
 
         user = await db.get_user(message.from_user.id)
         accounts = await db.get_user_accounts(user.id)
@@ -915,7 +927,10 @@ async def _confirm_code(event, state: FSMContext, db: Database):
         )
         proxy_str = data.get("proxy")
         if account_id:
-            await db.update_account_proxy(account_id, proxy_str)
+            if proxy_str:
+                await db.update_account_proxy(account_id, proxy_str)
+            else:
+                await db.auto_assign_proxy(user.id, account_id)
 
         user = await db.get_user(user_id)
         accounts = await db.get_user_accounts(user.id)
@@ -1078,7 +1093,7 @@ async def callback_set_proxy(callback: CallbackQuery, state: FSMContext, db: Dat
     await state.update_data(account_id=account_id)
     await state.set_state(SetProxyStates.waiting_proxy)
 
-    current = f"<code>{html.escape(account.proxy)}</code>" if account.proxy else "не настроен"
+    current = "не настроен" if (not account.proxy or account.proxy_pool_id) else f"<code>{html.escape(account.proxy)}</code>"
     await callback.message.edit_text(
         pe(f"🌐 <b>Настройка прокси SOCKS5</b>\n\n"
         f"Текущий прокси: {current}\n\n"
@@ -1190,7 +1205,7 @@ async def callback_toggle_sponsor_sub(callback: CallbackQuery, db: Database):
     account = await db.get_account_for_user(account_id, callback.from_user.id)
     ar_status = "✅ Включён" if account.autoresponder_enabled else "❌ Выключен"
     gr_status = "✅ Включён" if account.group_autoresponder_enabled else "❌ Выключен"
-    proxy_status = f"🌐 {html.escape(account.proxy)}" if account.proxy else "🌐 Прокси: не настроен"
+    proxy_status = _proxy_status_text(account)
     sponsor_status = "✅ Включена" if account.auto_subscribe_sponsors else "❌ Выключена"
 
     text = pe(

@@ -684,6 +684,7 @@ def admin_keyboard() -> InlineKeyboardMarkup:
     )
     builder.row(
         _btn("🆓 Бесплатный тариф", callback_data="admin_free_tier", style="primary"),
+        _btn("🌐 Пул прокси", callback_data="admin_proxy_pool", style="primary"),
     )
     builder.row(
         _btn("🔍 Диагностика", callback_data="admin_diagnostics", style="primary"),
@@ -819,6 +820,21 @@ def admin_promo_list_keyboard(promocodes: list[Promocode]) -> InlineKeyboardMark
             _btn("🗑️", callback_data=f"admin_delete_promo:{promo.id}", style="danger"),
         )
     builder.row(_btn("◀️ Назад", callback_data="admin_promocodes", style="primary"))
+    return builder.as_markup()
+
+
+def admin_proxy_pool_keyboard(proxies: list) -> InlineKeyboardMarkup:
+    """proxies: list of (PoolProxy, account_count) tuples."""
+    builder = InlineKeyboardBuilder()
+    for pool_proxy, count in proxies:
+        status = "🟢" if pool_proxy.is_active else "💀"
+        host = pool_proxy.proxy.split("@")[-1] if "@" in pool_proxy.proxy else pool_proxy.proxy.replace("socks5://", "")
+        builder.row(
+            _btn(f"{status} {host} [{count}]", callback_data=f"admin_proxy_info:{pool_proxy.id}", style="primary"),
+            _btn("🗑️", callback_data=f"admin_delete_proxy:{pool_proxy.id}", style="danger"),
+        )
+    builder.row(_btn("➕ Добавить прокси", callback_data="admin_add_proxy", style="success"))
+    builder.row(_btn("◀️ Назад", callback_data="admin_back", style="primary"))
     return builder.as_markup()
 
 

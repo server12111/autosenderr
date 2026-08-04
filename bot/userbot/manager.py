@@ -16,6 +16,7 @@ from telethon.errors import (
     AuthKeyDuplicatedError,
 )
 
+from ..config import config
 from ..database.db import Database, Account
 from ..utils.premium_emoji import pe
 
@@ -122,7 +123,10 @@ class UserbotManager:
             proxy = _parse_proxy(account.proxy)
         except Exception as e:
             logger.error(f"Invalid proxy for account {account.phone}: {e}")
-            await self._notify_proxy_problem(account, str(e))
+            if account.proxy_pool_id:
+                await self._handle_pool_proxy_failure(account, str(e))
+            else:
+                await self._notify_proxy_problem(account, str(e))
             return None
 
         client = None
@@ -209,7 +213,9 @@ class UserbotManager:
                 await asyncio.sleep(0)
             except Exception:
                 pass
-            if account.proxy:
+            if account.proxy_pool_id:
+                await self._handle_pool_proxy_failure(account, str(e))
+            elif account.proxy:
                 await self._notify_proxy_problem(account, str(e))
             return None
         except Exception as e:
@@ -252,6 +258,38 @@ class UserbotManager:
             )
         except Exception as ne:
             logger.error(f"Failed to notify about proxy error for account {account.id}: {ne}")
+
+    async def _handle_pool_proxy_failure(self, account: Account, error_text: str):
+        """A pool-assigned proxy died. Unlike a user's own proxy, the account
+        owner must never learn their account rides on a shared pool proxy — so
+        this notifies the admins instead, marks the proxy dead, and quietly
+        reassigns the account to another pool proxy for its next connection
+        attempt (get_client() always re-reads the account fresh from the DB)."""
+        try:
+            was_active = await self.db.deactivate_pool_proxy(account.proxy_pool_id)
+        except Exception as ne:
+            logger.error(f"Failed to deactivate pool proxy {account.proxy_pool_id}: {ne}")
+            was_active = False
+
+        if was_active and self._bot_notify_callback:
+            for admin_id in config.ADMIN_IDS:
+                try:
+                    await self._bot_notify_callback(
+                        admin_id,
+                        pe(
+                            f"⚠️ <b>Прокси из пула отключён</b>\n\n"
+                            f"Перестал работать и помечен неактивным. Затронутые аккаунты "
+                            f"автоматически переключаются на другой прокси из пула при следующем подключении.\n\n"
+                            f"{html.escape(error_text[:200])}"
+                        ),
+                    )
+                except Exception:
+                    pass
+
+        try:
+            await self.db.reassign_dead_pool_account(account.id, account.proxy_pool_id)
+        except Exception as ne:
+            logger.error(f"Failed to reassign account {account.id} off dead pool proxy: {ne}")
 
     async def stop_client(self, account_id: int):
         lock = self._client_locks.setdefault(account_id, asyncio.Lock())
