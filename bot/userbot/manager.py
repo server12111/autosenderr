@@ -2,6 +2,7 @@ import asyncio
 import hashlib
 import html
 import logging
+import random
 from typing import Optional, Callable, Any
 from urllib.parse import urlparse
 
@@ -457,9 +458,18 @@ class UserbotManager:
             logger.info("No accounts need connection at startup")
             return
 
-        semaphore = asyncio.Semaphore(20)
+        semaphore = asyncio.Semaphore(10)
 
         async def _start(account):
+            if account.proxy:
+                # Spread out proxied connections instead of firing them all
+                # in the same instant — many simultaneous outbound
+                # connections to non-standard SOCKS5 ports (vs. Telegram's
+                # normal 443) is exactly the pattern datacenter/PaaS hosts
+                # flag as abuse and respond to by blocking the container's
+                # IP outright, which would break every account, proxied or
+                # not, not just the ones actually misbehaving.
+                await asyncio.sleep(random.uniform(0.3, 1.5))
             async with semaphore:
                 return await self.start_client(account)
 
