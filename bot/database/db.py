@@ -69,6 +69,10 @@ class Account:
     auto_subscribe_sponsors: bool = False
     proxy_pool_id: Optional[int] = None
 
+    @property
+    def display_name(self) -> str:
+        return self.name if self.name else self.phone
+
 
 @dataclass
 class PoolProxy:
@@ -77,10 +81,6 @@ class PoolProxy:
     is_active: bool
     added_by: Optional[int]
     created_at: datetime
-
-    @property
-    def display_name(self) -> str:
-        return self.name if self.name else self.phone
 
 
 @dataclass
