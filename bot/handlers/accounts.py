@@ -1,11 +1,14 @@
 import asyncio
 import html
+import logging
 import time
 from datetime import datetime
+from typing import Optional
 from aiogram import Router, F
 from aiogram.types import Message, CallbackQuery
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
+from telethon.errors import PasswordHashInvalidError, PhoneCodeInvalidError
 
 from ..database.db import Database
 from ..keyboards.inline import (
@@ -48,7 +51,46 @@ def _proxy_status_text(account) -> str:
     return f"🌐 {html.escape(account.proxy)}"
 
 
+logger = logging.getLogger(__name__)
 router = Router()
+
+_last_pool_exhausted_notify = 0.0
+_POOL_EXHAUSTED_NOTIFY_COOLDOWN = 1800  # seconds — avoid spamming admins
+
+
+async def _disconnect_pending_client(state: FSMContext):
+    """If an add-account flow was mid-way (waiting_code/waiting_password),
+    its live Telethon client sits in FSM data. Call before clearing/
+    restarting the flow so that client doesn't leak an open connection."""
+    data = await state.get_data()
+    client = data.get("client")
+    if client:
+        try:
+            await client.disconnect()
+        except Exception:
+            pass
+
+
+async def _notify_pool_exhausted(bot):
+    global _last_pool_exhausted_notify
+    now = time.monotonic()
+    if now - _last_pool_exhausted_notify < _POOL_EXHAUSTED_NOTIFY_COOLDOWN:
+        return
+    _last_pool_exhausted_notify = now
+    for admin_id in config.ADMIN_IDS:
+        try:
+            await bot.send_message(
+                admin_id,
+                pe(
+                    "⚠️ <b>Пул прокси заполнен</b>\n\n"
+                    "Все прокси в пуле уже обслуживают максимум аккаунтов. "
+                    "Новые аккаунты подключаются без прокси.\n\n"
+                    "Добавьте новые прокси в админ-панели."
+                ),
+                parse_mode="HTML",
+            )
+        except Exception:
+            pass
 
 
 class RenameAccountStates(StatesGroup):
@@ -188,6 +230,7 @@ async def callback_add_account(callback: CallbackQuery, state: FSMContext, db: D
         "или <code>socks5://user:pass@host:port</code>"
     )
 
+    await _disconnect_pending_client(state)
     await state.clear()
     await state.update_data(account_setup_allowed=True)
     await callback.message.edit_text(text, parse_mode="HTML", reply_markup=add_account_proxy_keyboard())
@@ -341,6 +384,7 @@ async def callback_check_ton_account(
         "или <code>socks5://user:pass@host:port</code>"
     )
 
+    await _disconnect_pending_client(state)
     await state.clear()
     await state.update_data(account_setup_allowed=True)
     await callback.message.edit_text(text, parse_mode="HTML", reply_markup=add_account_proxy_keyboard())
@@ -386,6 +430,7 @@ async def callback_check_account_payment(callback: CallbackQuery, state: FSMCont
         "или <code>socks5://user:pass@host:port</code>"
     )
 
+    await _disconnect_pending_client(state)
     await state.clear()
     await state.update_data(account_setup_allowed=True)
     await callback.message.edit_text(text, parse_mode="HTML", reply_markup=add_account_proxy_keyboard())
@@ -524,7 +569,7 @@ async def process_api_id(message: Message, state: FSMContext):
 
 
 @router.message(AddAccountStates.waiting_api_hash)
-async def process_api_hash(message: Message, state: FSMContext):
+async def process_api_hash(message: Message, state: FSMContext, db: Database):
     if not message.text:
         await message.answer(pe("❌ Введите API Hash текстом."), parse_mode="HTML", reply_markup=cancel_keyboard())
         return
@@ -539,7 +584,7 @@ async def process_api_hash(message: Message, state: FSMContext):
 
     if data.get("phone"):
         # Phone is already known (retry after API credentials error) — connect immediately
-        await _connect_and_send_code(message, state, data)
+        await _connect_and_send_code(message, state, data, db)
     else:
         await message.answer(
             pe("➕ Добавление аккаунта\n\n"
@@ -552,13 +597,30 @@ async def process_api_hash(message: Message, state: FSMContext):
         await state.set_state(AddAccountStates.waiting_phone)
 
 
-async def _connect_and_send_code(message: Message, state: FSMContext, data: dict):
+async def _connect_and_send_code(message: Message, state: FSMContext, data: dict, db: Database):
     """Connect to Telegram and request login code. On API credentials error, asks for new ones."""
     from telethon import TelegramClient
     from telethon.sessions import StringSession
 
     phone = data["phone"]
-    has_proxy = bool(data.get("proxy"))
+
+    # If the user didn't type their own proxy, decide the pool/shared proxy
+    # to use NOW — before the very first connection — instead of assigning
+    # it only after login succeeds. Assigning it afterward meant the login
+    # itself (code request + sign-in) always went out unproxied, which is
+    # exactly the "connected from the wrong region" symptom this fixes.
+    auto_proxy: Optional[str] = None
+    auto_proxy_pool_id: Optional[int] = None
+    connect_proxy = data.get("proxy")
+    if not connect_proxy:
+        user = await db.get_user(message.from_user.id)
+        auto_proxy, auto_proxy_pool_id, pool_exhausted = await db.pick_proxy_for_new_account(user.id)
+        connect_proxy = auto_proxy
+        await state.update_data(auto_proxy=auto_proxy, auto_proxy_pool_id=auto_proxy_pool_id)
+        if pool_exhausted:
+            asyncio.create_task(_notify_pool_exhausted(message.bot))
+
+    has_proxy = bool(connect_proxy)
 
     if has_proxy:
         status_msg = await message.answer(
@@ -573,7 +635,7 @@ async def _connect_and_send_code(message: Message, state: FSMContext, data: dict
         device = _DEVICE_POOL[abs(hash(phone)) % len(_DEVICE_POOL)]
         client = TelegramClient(
             StringSession(), data["api_id"], data["api_hash"],
-            proxy=_parse_proxy(data.get("proxy")),
+            proxy=_parse_proxy(connect_proxy),
             device_model=device["device_model"],
             system_version=device["system_version"],
             app_version=device["app_version"],
@@ -660,7 +722,7 @@ async def _connect_and_send_code(message: Message, state: FSMContext, data: dict
 
 @router.message(AddAccountStates.waiting_phone)
 async def process_phone(
-    message: Message, state: FSMContext, userbot_manager: UserbotManager
+    message: Message, state: FSMContext, userbot_manager: UserbotManager, db: Database
 ):
     if not message.text:
         await message.answer(pe("❌ Введите номер телефона."), parse_mode="HTML", reply_markup=cancel_keyboard())
@@ -680,7 +742,7 @@ async def process_phone(
     await state.update_data(phone=phone, connecting=True)
     data = await state.get_data()
     try:
-        await _connect_and_send_code(message, state, data)
+        await _connect_and_send_code(message, state, data, db)
     finally:
         try:
             await state.update_data(connecting=False)
@@ -737,7 +799,13 @@ async def process_password(message: Message, state: FSMContext, db: Database):
             if proxy_str:
                 await db.update_account_proxy(account_id, proxy_str)
             else:
-                await db.auto_assign_proxy(user.id, account_id)
+                # Reuse the exact proxy already picked (and connected
+                # through) in _connect_and_send_code — re-picking here could
+                # land on a different pool proxy than the one actually used
+                # for the login itself.
+                await db.update_account_proxy(
+                    account_id, data.get("auto_proxy"), proxy_pool_id=data.get("auto_proxy_pool_id")
+                )
 
         user = await db.get_user(message.from_user.id)
         accounts = await db.get_user_accounts(user.id)
@@ -748,7 +816,15 @@ async def process_password(message: Message, state: FSMContext, db: Database):
         )
         await state.clear()
 
+    except PasswordHashInvalidError as e:
+        # Keep the client connected and stay in waiting_password — the
+        # message tells the user to try again, so there must actually be
+        # something left to retry into instead of dumping them back to the
+        # accounts list and burning the login session.
+        await message.answer(pe(friendly_error(e)), parse_mode="HTML", reply_markup=cancel_keyboard())
+
     except Exception as e:
+        logger.warning(f"Unexpected error confirming 2FA password for user {message.from_user.id}: {e}", exc_info=True)
         await client.disconnect()
         user = await db.get_user(message.from_user.id)
         accounts = await db.get_user_accounts(user.id)
@@ -930,7 +1006,13 @@ async def _confirm_code(event, state: FSMContext, db: Database):
             if proxy_str:
                 await db.update_account_proxy(account_id, proxy_str)
             else:
-                await db.auto_assign_proxy(user.id, account_id)
+                # Reuse the exact proxy already picked (and connected
+                # through) in _connect_and_send_code — re-picking here could
+                # land on a different pool proxy than the one actually used
+                # for the login itself.
+                await db.update_account_proxy(
+                    account_id, data.get("auto_proxy"), proxy_pool_id=data.get("auto_proxy_pool_id")
+                )
 
         user = await db.get_user(user_id)
         accounts = await db.get_user_accounts(user.id)
@@ -951,7 +1033,20 @@ async def _confirm_code(event, state: FSMContext, db: Database):
                 parse_mode="HTML",
                 reply_markup=cancel_keyboard(),
             )
+        elif isinstance(e, PhoneCodeInvalidError):
+            # Same reasoning as the password branch — keep the client and
+            # the waiting_code state alive so "try again" is actually
+            # possible instead of forcing a full restart (new SMS/code).
+            await state.update_data(confirming=False, entered_code="")
+            await _edit_code_message(event, state,
+                pe(f"{friendly_error(e)}\n\n"
+                "🔢 Введите код с помощью кнопок:\n\n"
+                f"Код: {_format_code_display('')}"),
+                parse_mode="HTML",
+                reply_markup=code_input_keyboard(),
+            )
         else:
+            logger.warning(f"Unexpected error confirming code for user {user_id}: {e}", exc_info=True)
             await client.disconnect()
             user = await db.get_user(user_id)
             accounts = await db.get_user_accounts(user.id)

@@ -123,6 +123,10 @@ async def main():
     await db.connect()
     logger.info("Database connected")
 
+    backfilled = await db.backfill_missing_proxies()
+    if backfilled:
+        logger.info(f"Backfilled pool/shared proxies onto {backfilled} existing account(s)")
+
     bot = Bot(
         token=config.BOT_TOKEN,
         default=DefaultBotProperties(parse_mode=ParseMode.HTML),

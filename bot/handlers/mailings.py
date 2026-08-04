@@ -594,6 +594,12 @@ async def process_edit_message_video(message: Message, state: FSMContext, db: Da
         await state.clear()
         await message.answer("⛔ Нет доступа", parse_mode="HTML")
         return
+    if data.get("pending_photos"):
+        await message.answer(
+            pe("❌ Сначала сохраните добавленные фотографии."),
+            parse_mode="HTML",
+        )
+        return
     video_path = await save_video_from_message(message)
     if not video_path:
         await message.answer(pe("❌ Не удалось сохранить видео."), parse_mode="HTML")
@@ -1254,6 +1260,18 @@ async def process_edit_txt_file(message: Message, state: FSMContext, db: Databas
     )
 
 
+@router.message(EditMailingStates.waiting_txt_file)
+async def process_edit_txt_file_wrong_type(message: Message):
+    # F.document | F.text on the handler above means anything else (photo,
+    # voice, sticker, ...) matched no handler at all and got zero response —
+    # looked like the bot was stuck. Catch it so there's always a reply.
+    await message.answer(
+        pe("❌ Отправьте .txt файл или список чатов текстом."),
+        parse_mode="HTML",
+        reply_markup=cancel_keyboard(),
+    )
+
+
 # === Active Hours ===
 @router.callback_query(F.data.startswith("mailing_hours:"))
 async def callback_mailing_hours(callback: CallbackQuery, db: Database, state: FSMContext):
@@ -1652,6 +1670,12 @@ async def process_create_message_video(message: Message, state: FSMContext, db: 
         await state.clear()
         await message.answer("⛔ Нет доступа", parse_mode="HTML")
         return
+    if data.get("pending_photos"):
+        await message.answer(
+            pe("❌ Сначала сохраните добавленные фотографии."),
+            parse_mode="HTML",
+        )
+        return
     video_path = await save_video_from_message(message)
     if not video_path:
         await message.answer(pe("❌ Не удалось сохранить видео."), parse_mode="HTML")
@@ -1880,7 +1904,11 @@ async def process_create_target(message: Message, state: FSMContext, db: Databas
     target_id = await db.add_mailing_target(mailing_id, target, is_forum=is_forum)
 
     if is_forum:
-        await state.update_data(target_id=target_id, mailing_id=mailing_id)
+        # Flag the origin so process_thread_id_for_target/callback_skip_thread
+        # (both EditMailingStates handlers) know to hand control back to the
+        # creation wizard instead of dropping into the edit-mode target list,
+        # which has no "Готово" button and would silently strand the wizard.
+        await state.update_data(target_id=target_id, mailing_id=mailing_id, target_return_to_creation=True)
         await state.set_state(EditMailingStates.waiting_thread_id_for_target)
         await message.answer(
             pe(f"💬 Чат <b>{html.escape(target)}</b> использует темы (Topics).\n\n"
@@ -2142,6 +2170,17 @@ async def process_create_txt_file(message: Message, state: FSMContext, db: Datab
         pe(f"✅ Добавлено {added} чатов из файла! Всего чатов: {len(targets)}\n\nДобавьте ещё или нажмите «Готово»:") + forum_hint,
         parse_mode="HTML",
         reply_markup=mailing_creation_targets_keyboard(mailing_id, targets),
+    )
+
+
+@router.message(CreateMailingStates.waiting_txt_file)
+async def process_create_txt_file_wrong_type(message: Message):
+    # Same as process_edit_txt_file_wrong_type — F.document | F.text on the
+    # handler above means anything else got zero response and looked stuck.
+    await message.answer(
+        pe("❌ Отправьте .txt файл или список чатов текстом."),
+        parse_mode="HTML",
+        reply_markup=cancel_keyboard(),
     )
 
 
@@ -2536,10 +2575,20 @@ async def process_thread_id_for_target(message: Message, state: FSMContext, db: 
         await message.answer("Чат не найден", parse_mode="HTML")
         return
 
+    return_to_creation = data.get("target_return_to_creation")
+
     if text == "0":
         await db.update_target_thread(target_id, None)
         await state.clear()
         targets = await db.get_mailing_targets(mailing_id)
+        if return_to_creation:
+            await state.set_state(CreateMailingStates.adding_targets)
+            await message.answer(
+                pe(f"✅ Привязка к теме удалена. Всего чатов: {len(targets)}\n\nДобавьте ещё или нажмите «Готово»:"),
+                parse_mode="HTML",
+                reply_markup=mailing_creation_targets_keyboard(mailing_id, targets),
+            )
+            return
         await message.answer(
             pe("✅ Привязка к теме удалена."),
             parse_mode="HTML",
@@ -2567,6 +2616,14 @@ async def process_thread_id_for_target(message: Message, state: FSMContext, db: 
     await state.clear()
 
     targets = await db.get_mailing_targets(mailing_id)
+    if return_to_creation:
+        await state.set_state(CreateMailingStates.adding_targets)
+        await message.answer(
+            pe(f"✅ Тема #{thread_id} привязана к чату. Всего чатов: {len(targets)}\n\nДобавьте ещё или нажмите «Готово»:"),
+            parse_mode="HTML",
+            reply_markup=mailing_creation_targets_keyboard(mailing_id, targets),
+        )
+        return
     await message.answer(
         pe(f"✅ Тема #{thread_id} привязана к чату."),
         parse_mode="HTML",
@@ -2580,8 +2637,19 @@ async def callback_skip_thread(callback: CallbackQuery, state: FSMContext, db: D
     if not await db.get_mailing_for_user(mailing_id, callback.from_user.id):
         await callback.answer("⛔ Нет доступа", show_alert=True)
         return
+    data = await state.get_data()
+    return_to_creation = data.get("target_return_to_creation")
     await state.clear()
     targets = await db.get_mailing_targets(mailing_id)
+    if return_to_creation:
+        await state.set_state(CreateMailingStates.adding_targets)
+        await callback.message.edit_text(
+            pe(f"✅ Чат добавлен без привязки к теме (General). Всего чатов: {len(targets)}\n\nДобавьте ещё или нажмите «Готово»:"),
+            parse_mode="HTML",
+            reply_markup=mailing_creation_targets_keyboard(mailing_id, targets),
+        )
+        await callback.answer()
+        return
     await callback.message.edit_text(
         pe(f"✅ Чат добавлен без привязки к теме (General)."),
         parse_mode="HTML",

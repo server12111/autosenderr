@@ -793,6 +793,7 @@ def promo_subscription_keyboard() -> InlineKeyboardMarkup:
         _btn("✅ Да, платная подписка", callback_data="promo_is_sub:1", style="success"),
         _btn("❌ Нет, обычный промокод", callback_data="promo_is_sub:0", style="primary"),
     )
+    builder.row(_btn("◀️ Назад", callback_data="cancel", style="primary"))
     return builder.as_markup()
 
 

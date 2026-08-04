@@ -1153,6 +1153,10 @@ async def process_import_db(
     mailing_service: MailingService,
     userbot_manager,
 ):
+    if not is_admin(message.from_user.id):
+        await state.clear()
+        return
+
     doc = message.document
     if not doc.file_name or not doc.file_name.endswith(".db"):
         await message.answer(pe("❌ Файл должен иметь расширение .db"), parse_mode="HTML")

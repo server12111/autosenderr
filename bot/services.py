@@ -828,6 +828,11 @@ def _build_telethon_entities(entities_json: str) -> list:
                 result.append(MessageEntityBlockquote(offset=o, length=l))
             except TypeError:
                 pass
+        elif t == "expandable_blockquote":
+            try:
+                result.append(MessageEntityBlockquote(offset=o, length=l, collapsed=True))
+            except TypeError:
+                pass
     return result
 
 
@@ -1513,7 +1518,8 @@ class MailingService:
                                 wait = min(e.seconds, 3600)
                                 logger.warning(
                                     f"Mailing {mailing_id}: FloodWait {e.seconds}s on account "
-                                    f"{current_account_id} for {target}, no fallback — sleeping {wait}s"
+                                    f"{current_account_id} for {target}, no fallback — sleeping {wait}s "
+                                    f"and deferring remaining targets to the next cycle"
                                 )
                                 try:
                                     await self.db.add_error_log(
@@ -1527,6 +1533,12 @@ class MailingService:
                                 except Exception:
                                     pass
                                 await asyncio.sleep(wait)
+                                # FloodWait is account-wide, not per-target — every
+                                # remaining target in this cycle would immediately
+                                # hit the same wait again, stalling for
+                                # N x up_to_3600s and spamming N flood alerts.
+                                # Defer them to the next cycle instead.
+                                break
                         except (ChatSendMediaForbiddenError, ChatGuestSendForbiddenError, RightForbiddenError, ChatAdminRequiredError) as e:
                             self._mark_target_not_working(mailing_id, target_obj.id)
                             await self.db.add_error_log(
@@ -1629,6 +1641,10 @@ class MailingService:
                                         pass
                                     logger.warning(f"Mailing {mailing_id}: PEER_FLOOD на аккаунте, пауза 60с")
                                     await asyncio.sleep(60)
+                                    # Same reasoning as FloodWaitError above — this
+                                    # is account-wide, so stop hammering the rest
+                                    # of this cycle's targets and retry next cycle.
+                                    break
                             else:
                                 self._mark_target_not_working(mailing_id, target_obj.id)
                                 cycle_errors += 1
@@ -1961,9 +1977,12 @@ class SubscriptionCheckerService:
 
 class InactivityCleanupService:
     """Background service that logs out and permanently deletes userbot
-    accounts for users where every mailing has been stopped (and had no
-    activity) for 15+ days. No warning is sent — the account is just gone,
-    same as if the user had deleted it themselves via the bot."""
+    accounts whose own mailing(s) have been stopped (and had no activity)
+    for 15+ days. Scoped per-account, not per-user — a user's other,
+    unrelated accounts (e.g. a brand-new one with no mailing yet) are never
+    touched just because a different account of theirs went stale. No
+    warning is sent — the account is just gone, same as if the user had
+    deleted it themselves via the bot."""
 
     def __init__(self, db: Database, userbot_manager, days: int = 15):
         self.db = db
@@ -1989,21 +2008,18 @@ class InactivityCleanupService:
                 await asyncio.sleep(60)
 
     async def _check(self):
-        users = await self.db.get_users_with_all_mailings_stale(days=self.days)
-        for user in users:
-            accounts = await self.db.get_user_accounts(user.id)
-            if not accounts:
+        accounts = await self.db.get_stale_accounts(days=self.days)
+        for account in accounts:
+            try:
+                await self.userbot_manager.logout_and_stop(account)
+            except Exception as e:
+                logger.warning(f"Inactivity cleanup: failed to log out account {account.id}: {e}")
+            try:
+                await self.db.delete_account_permanently(account.id)
+            except Exception as e:
+                logger.error(f"Inactivity cleanup: failed to delete account {account.id}: {e}")
                 continue
-            for account in accounts:
-                try:
-                    await self.userbot_manager.logout_and_stop(account)
-                except Exception as e:
-                    logger.warning(f"Inactivity cleanup: failed to log out account {account.id}: {e}")
-                try:
-                    await self.db.delete_account_permanently(account.id)
-                except Exception as e:
-                    logger.error(f"Inactivity cleanup: failed to delete account {account.id}: {e}")
             logger.info(
-                f"Inactivity cleanup: removed {len(accounts)} account(s) for user "
-                f"{user.telegram_id} — no mailing activity in {self.days}+ days"
+                f"Inactivity cleanup: removed account {account.id} (user_id={account.user_id}) "
+                f"— no mailing activity in {self.days}+ days"
             )

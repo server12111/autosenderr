@@ -301,29 +301,31 @@ class UserbotManager:
                 logger.info(f"Stopped client for account {account_id}")
 
     async def logout_and_stop(self, account):
-        if account.id in self._clients:
-            client = self._clients[account.id]
-            try:
-                await client.log_out()
-            except Exception:
-                pass
-            await client.disconnect()
-            del self._clients[account.id]
-            self._me_ids.pop(account.id, None)
-        else:
-            try:
-                proxy = _parse_proxy(account.proxy)
-                client = TelegramClient(
-                    StringSession(account.session_string), account.api_id, account.api_hash,
-                    proxy=proxy,
-                    connection_retries=3,
-                    retry_delay=5,
-                )
-                await client.connect()
-                await client.log_out()
+        lock = self._client_locks.setdefault(account.id, asyncio.Lock())
+        async with lock:
+            if account.id in self._clients:
+                client = self._clients[account.id]
+                try:
+                    await client.log_out()
+                except Exception:
+                    pass
                 await client.disconnect()
-            except Exception as e:
-                logger.warning(f"Failed to log out account {account.id}: {e}")
+                del self._clients[account.id]
+                self._me_ids.pop(account.id, None)
+            else:
+                try:
+                    proxy = _parse_proxy(account.proxy)
+                    client = TelegramClient(
+                        StringSession(account.session_string), account.api_id, account.api_hash,
+                        proxy=proxy,
+                        connection_retries=3,
+                        retry_delay=5,
+                    )
+                    await client.connect()
+                    await client.log_out()
+                    await client.disconnect()
+                except Exception as e:
+                    logger.warning(f"Failed to log out account {account.id}: {e}")
 
     async def get_client(self, account_id: int) -> Optional[TelegramClient]:
         if account_id in self._clients:
@@ -347,26 +349,40 @@ class UserbotManager:
             try:
                 await asyncio.sleep(_MONITOR_INTERVAL)
                 for account_id in list(self._clients.keys()):
-                    try:
-                        client = self._clients[account_id]
-                        if not client.is_connected():
-                            try:
-                                await client.connect()
-                            except _BAN_ERRORS as e:
-                                await self._handle_account_problem(account_id, e)
-                                continue
-                        await client.get_me()
+                    # Hold the same per-account lock start_client()/logout_and_stop()
+                    # use, so this loop never reconnects/touches a client that's
+                    # concurrently being replaced or torn down elsewhere — without
+                    # it, a race here could spin up a second live Telethon session
+                    # for the same account (ban risk) or overwrite a fresher
+                    # session_string with a stale one.
+                    lock = self._client_locks.setdefault(account_id, asyncio.Lock())
+                    async with lock:
+                        client = self._clients.get(account_id)
+                        if client is None:
+                            continue  # removed/replaced while we waited for the lock
                         try:
-                            fresh_session = client.session.save()
+                            if not client.is_connected():
+                                await client.connect()
+                            await client.get_me()
+                            try:
+                                fresh_session = client.session.save()
+                                account = await self.db.get_account(account_id)
+                                if account and fresh_session != account.session_string:
+                                    await self.db.update_account_session(account_id, fresh_session)
+                            except Exception:
+                                pass
+                        except _BAN_ERRORS as e:
+                            await self._handle_account_problem(account_id, e, lock_held=True)
+                        except (OSError, asyncio.TimeoutError, ConnectionError) as e:
+                            logger.warning(f"Monitor reconnect failed for account {account_id}: {e}")
                             account = await self.db.get_account(account_id)
-                            if account and fresh_session != account.session_string:
-                                await self.db.update_account_session(account_id, fresh_session)
-                        except Exception:
-                            pass
-                    except _BAN_ERRORS as e:
-                        await self._handle_account_problem(account_id, e)
-                    except Exception as e:
-                        logger.warning(f"Monitor check failed for account {account_id}: {e}")
+                            if account:
+                                if account.proxy_pool_id:
+                                    await self._handle_pool_proxy_failure(account, str(e))
+                                elif account.proxy:
+                                    await self._notify_proxy_problem(account, str(e))
+                        except Exception as e:
+                            logger.warning(f"Monitor check failed for account {account_id}: {e}")
             except asyncio.CancelledError:
                 raise
             except Exception as e:

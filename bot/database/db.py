@@ -13,6 +13,7 @@ from ..utils.time_utils import now_moscow
 
 _SETTINGS_TTL = 60      # seconds — settings/prices
 _CHANNELS_TTL = 300     # seconds — required channels list
+POOL_PROXY_ACCOUNT_CAP = 50   # max active accounts per pool proxy
 
 
 def is_safe_media_path(path: str) -> bool:
@@ -363,7 +364,7 @@ class Database:
                 error_type TEXT NOT NULL,
                 error_text TEXT,
                 chat_identifier TEXT,
-                created_at DATETIME DEFAULT (datetime('now'))
+                created_at DATETIME DEFAULT (datetime('now', '+3 hours'))
             )
         """)
         await self._conn.execute(
@@ -788,17 +789,23 @@ class Database:
         await self._conn.commit()
         return cur.rowcount > 0
 
-    async def get_least_loaded_pool_proxy(self, exclude_id: Optional[int] = None) -> Optional["PoolProxy"]:
-        query = (
+    async def get_least_loaded_pool_proxy(
+        self, exclude_id: Optional[int] = None, cap: Optional[int] = None
+    ) -> Optional["PoolProxy"]:
+        inner = (
             "SELECT p.id, p.proxy, p.is_active, p.added_by, p.created_at, "
             "(SELECT COUNT(*) FROM accounts a WHERE a.proxy_pool_id = p.id AND a.is_active = 1) as cnt "
             "FROM proxy_pool p WHERE p.is_active = 1"
         )
         params: list = []
         if exclude_id is not None:
-            query += " AND p.id != ?"
+            inner += " AND p.id != ?"
             params.append(exclude_id)
-        query += " ORDER BY cnt ASC, p.id ASC LIMIT 1"
+        query = f"SELECT * FROM ({inner}) WHERE 1=1"
+        if cap is not None:
+            query += " AND cnt < ?"
+            params.append(cap)
+        query += " ORDER BY cnt ASC, id ASC LIMIT 1"
         async with self._conn.execute(query, params) as cur:
             row = await cur.fetchone()
             if not row:
@@ -823,7 +830,30 @@ class Database:
             row = await cur.fetchone()
             return row["proxy"] if row else None
 
-    async def auto_assign_proxy(self, user_id: int, account_id: int) -> Optional[str]:
+    async def pick_proxy_for_new_account(
+        self, user_id: int, cap: int = POOL_PROXY_ACCOUNT_CAP
+    ) -> tuple[Optional[str], Optional[int], bool]:
+        """Decide which proxy a not-yet-created account should connect
+        through, WITHOUT writing anything — the account row doesn't exist
+        until after Telegram login succeeds, so the caller uses this to pick
+        the proxy the Telethon client itself connects with (otherwise the
+        very first login happens unproxied and only gets a proxy assigned
+        afterward, for future connections only).
+        Returns (proxy, proxy_pool_id, pool_exhausted) — pool_exhausted is
+        True only when pool proxies exist but every one is already at the
+        per-proxy cap, so the caller can alert admins."""
+        own_proxy = await self.find_own_proxy_with_room(user_id)
+        if own_proxy:
+            return own_proxy, None, False
+        pool = await self.get_least_loaded_pool_proxy(cap=cap)
+        if pool:
+            return pool.proxy, pool.id, False
+        any_pool = await self.get_least_loaded_pool_proxy()
+        return None, None, any_pool is not None
+
+    async def auto_assign_proxy(
+        self, user_id: int, account_id: int, cap: int = POOL_PROXY_ACCOUNT_CAP
+    ) -> Optional[str]:
         """Called when a new account was created without an explicit proxy: reuse
         the user's own under-capacity proxy if they have one, else hand out the
         least-loaded pool proxy, else leave the account without a proxy."""
@@ -831,16 +861,34 @@ class Database:
         if own_proxy:
             await self.update_account_proxy(account_id, own_proxy, proxy_pool_id=None)
             return own_proxy
-        pool = await self.get_least_loaded_pool_proxy()
+        pool = await self.get_least_loaded_pool_proxy(cap=cap)
         if pool:
             await self.update_account_proxy(account_id, pool.proxy, proxy_pool_id=pool.id)
             return pool.proxy
         return None
 
-    async def reassign_dead_pool_account(self, account_id: int, dead_pool_id: int):
-        pool = await self.get_least_loaded_pool_proxy(exclude_id=dead_pool_id)
+    async def reassign_dead_pool_account(
+        self, account_id: int, dead_pool_id: int, cap: int = POOL_PROXY_ACCOUNT_CAP
+    ):
+        pool = await self.get_least_loaded_pool_proxy(exclude_id=dead_pool_id, cap=cap)
         if pool:
             await self.update_account_proxy(account_id, pool.proxy, proxy_pool_id=pool.id)
+
+    async def backfill_missing_proxies(self, cap: int = POOL_PROXY_ACCOUNT_CAP) -> int:
+        """One-time-per-restart backfill: assign a proxy (an under-capacity
+        proxy the user already owns, else a pool slot) to every active
+        account that doesn't have one yet. Idempotent — only touches rows
+        with proxy IS NULL/'' — so it's safe to run on every startup."""
+        async with self._conn.execute(
+            "SELECT id, user_id FROM accounts WHERE is_active = 1 AND (proxy IS NULL OR proxy = '')"
+        ) as cur:
+            rows = await cur.fetchall()
+        assigned = 0
+        for row in rows:
+            proxy = await self.auto_assign_proxy(row["user_id"], row["id"], cap=cap)
+            if proxy:
+                assigned += 1
+        return assigned
 
     async def update_auto_subscribe_sponsors(self, account_id: int, enabled: bool):
         await self._conn.execute(
@@ -947,13 +995,23 @@ class Database:
     async def delete_account_permanently(self, account_id: int) -> None:
         """Hard-delete an account row — cascades to its mailings/targets/
         messages/autoresponder-history rows via ON DELETE CASCADE — and clean
-        up its local photo files. Unlike deactivate_account/delete_account
-        (which just flip is_active=0), this removes the row immediately."""
+        up its local photo files, including photo/video files attached to
+        any of its mailings' messages (the CASCADE only removes DB rows, it
+        never runs this application-level file cleanup, so without doing it
+        here those files would leak on disk forever). Unlike
+        deactivate_account/delete_account (which just flip is_active=0),
+        this removes the row immediately."""
         async with self._conn.execute(
             "SELECT autoresponder_photo, group_autoresponder_photo FROM accounts WHERE id = ?",
             (account_id,),
         ) as cur:
             row = await cur.fetchone()
+        async with self._conn.execute(
+            """SELECT photo_path, video_path FROM mailing_messages
+               WHERE mailing_id IN (SELECT id FROM mailings WHERE account_id = ?)""",
+            (account_id,),
+        ) as cur:
+            message_rows = await cur.fetchall()
         await self._conn.execute("DELETE FROM accounts WHERE id = ?", (account_id,))
         await self._conn.commit()
         if row:
@@ -963,23 +1021,44 @@ class Database:
                         os.remove(path)
                     except OSError:
                         pass
+        for msg_row in message_rows:
+            paths = []
+            if msg_row["photo_path"]:
+                try:
+                    parsed = json.loads(msg_row["photo_path"])
+                    paths = parsed if isinstance(parsed, list) else [msg_row["photo_path"]]
+                except (json.JSONDecodeError, TypeError):
+                    paths = [msg_row["photo_path"]]
+            if msg_row["video_path"]:
+                paths.append(msg_row["video_path"])
+            for path in paths:
+                if not is_safe_media_path(path):
+                    continue
+                try:
+                    os.remove(path)
+                except OSError:
+                    pass
 
-    async def get_users_with_all_mailings_stale(self, days: int = 15) -> list["User"]:
-        """Users who have at least one mailing, where NONE of their mailings
-        is currently active and NONE has had activity (a send, or — if it
-        never sent — its creation) within the last `days` days."""
+    async def get_stale_accounts(self, days: int = 15) -> list[Account]:
+        """Accounts that have at least one mailing of their own, where NONE
+        of that account's mailings is currently active and NONE has had
+        activity (a send, or — if it never sent — its creation) within the
+        last `days` days. Scoped per-account (not per-user) on purpose: a
+        user's brand-new account with no mailing yet must never be swept
+        just because a DIFFERENT, older account of theirs went stale."""
         cutoff = (now_moscow() - timedelta(days=days)).isoformat()
         async with self._conn.execute(
-            """SELECT DISTINCT u.* FROM users u
-               WHERE EXISTS (SELECT 1 FROM mailings m WHERE m.user_id = u.id)
+            """SELECT a.* FROM accounts a
+               WHERE a.is_active = 1
+                 AND EXISTS (SELECT 1 FROM mailings m WHERE m.account_id = a.id)
                  AND NOT EXISTS (
                      SELECT 1 FROM mailings m2
-                     WHERE m2.user_id = u.id
+                     WHERE m2.account_id = a.id
                        AND (m2.is_active = 1 OR COALESCE(m2.last_sent_at, m2.created_at) >= ?)
                  )""",
             (cutoff,),
         ) as cur:
-            return [self._row_to_user(r) for r in await cur.fetchall()]
+            return [self._row_to_account(r) for r in await cur.fetchall()]
 
     # === Mailings ===
     def _row_to_mailing(self, r) -> Mailing:
@@ -1226,6 +1305,17 @@ class Database:
         if not normalized.startswith('-') and not normalized.isdigit() and not normalized.startswith("https://t.me/+"):
             if not normalized.startswith('@'):
                 normalized = f"@{normalized}"
+        # De-dup: without this, re-importing the same list/folder (or adding
+        # "@chan" after "chan" already normalized to the same value) creates
+        # a second row for the same chat, and the mailing loop then sends to
+        # it twice per cycle.
+        async with self._conn.execute(
+            "SELECT id FROM mailing_targets WHERE mailing_id = ? AND chat_identifier = ?",
+            (mailing_id, normalized),
+        ) as cur:
+            existing = await cur.fetchone()
+        if existing:
+            return existing["id"]
         cursor = await self._conn.execute(
             """INSERT INTO mailing_targets
                (mailing_id, chat_identifier, is_forum, interval_seconds)
@@ -1489,13 +1579,18 @@ class Database:
     async def get_pending_payments(self) -> list[Payment]:
         async with self._conn.execute("SELECT * FROM payments WHERE status = 'pending'") as cur:
             rows = await cur.fetchall()
-            return [Payment(
-                id=r["id"], user_id=r["user_id"], invoice_id=r["invoice_id"],
-                amount=r["amount"], currency=r["currency"], status=r["status"],
-                plan_days=r["plan_days"] if r["plan_days"] else 30,
-                created_at=self._parse_datetime(r["created_at"]),
-                paid_at=self._parse_datetime(r["paid_at"]),
-            ) for r in rows]
+            result = []
+            for r in rows:
+                keys = r.keys()
+                result.append(Payment(
+                    id=r["id"], user_id=r["user_id"], invoice_id=r["invoice_id"],
+                    amount=r["amount"], currency=r["currency"], status=r["status"],
+                    plan_days=r["plan_days"] if r["plan_days"] else 30,
+                    created_at=self._parse_datetime(r["created_at"]),
+                    paid_at=self._parse_datetime(r["paid_at"]),
+                    price_usdt=r["price_usdt"] if "price_usdt" in keys and r["price_usdt"] is not None else r["amount"],
+                ))
+            return result
 
     async def get_platega_stats(self) -> dict:
         """Revenue stats for Platega payments."""
