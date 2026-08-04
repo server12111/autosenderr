@@ -814,7 +814,8 @@ class Database:
         account instead of asking again."""
         async with self._conn.execute(
             """SELECT proxy, COUNT(*) as cnt FROM accounts
-               WHERE user_id = ? AND proxy_pool_id IS NULL AND proxy IS NOT NULL AND proxy != ''
+               WHERE user_id = ? AND is_active = 1 AND proxy_pool_id IS NULL
+                     AND proxy IS NOT NULL AND proxy != ''
                GROUP BY proxy HAVING cnt < ?
                ORDER BY cnt DESC LIMIT 1""",
             (user_id, cap),
