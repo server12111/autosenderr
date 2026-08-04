@@ -623,8 +623,11 @@ async def _connect_and_send_code(message: Message, state: FSMContext, data: dict
     has_proxy = bool(connect_proxy)
 
     if has_proxy:
+        # Never mention "прокси" here — pool-assigned proxies must stay
+        # invisible to the account owner, and even for a user's own proxy
+        # there's no need to call it out on this screen.
         status_msg = await message.answer(
-            pe("⏳ Подключаемся через прокси...\n<i>Это может занять до 60 секунд</i>"),
+            pe("⏳ Подключаемся к Telegram...\n<i>Это может занять до 60 секунд</i>"),
             parse_mode="HTML",
         )
     else:
@@ -668,9 +671,12 @@ async def _connect_and_send_code(message: Message, state: FSMContext, data: dict
         if client:
             await client.disconnect()
         await status_msg.delete()
+        # Pool-assigned proxies must stay invisible even in error messages —
+        # only mention "прокси" if the user set one themselves.
+        hint = "или прокси " if data.get("proxy") else ""
         await message.answer(
             pe("❌ Превышено время ожидания.\n\n"
-            "Telegram не отвечает. Проверьте интернет-соединение или прокси и попробуйте снова."),
+            f"Telegram не отвечает. Проверьте интернет-соединение {hint}и попробуйте снова."),
             parse_mode="HTML",
             reply_markup=main_menu_keyboard(),
         )
@@ -682,11 +688,12 @@ async def _connect_and_send_code(message: Message, state: FSMContext, data: dict
         await status_msg.delete()
         err = str(e)
         if "Connection to Telegram failed" in err or "ConnectionError" in type(e).__name__:
+            proxy_hint = "• Telegram заблокирован — попробуйте добавить прокси\n\n" if data.get("proxy") else ""
             await message.answer(
                 pe("❌ Не удалось подключиться к Telegram.\n\n"
                 "Возможные причины:\n"
                 "• Нет интернета на сервере\n"
-                "• Telegram заблокирован — попробуйте добавить прокси\n\n"
+                f"{proxy_hint}"
                 "Попробуйте снова позже."),
                 parse_mode="HTML",
                 reply_markup=main_menu_keyboard(),
