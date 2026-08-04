@@ -1957,3 +1957,53 @@ class SubscriptionCheckerService:
             # Reminder 1 day before
             elif 23 * 3600 < delta < 25 * 3600 and not user.reminder_1d_sent_at:
                 await self._send_reminder(bot, user, 1)
+
+
+class InactivityCleanupService:
+    """Background service that logs out and permanently deletes userbot
+    accounts for users where every mailing has been stopped (and had no
+    activity) for 15+ days. No warning is sent — the account is just gone,
+    same as if the user had deleted it themselves via the bot."""
+
+    def __init__(self, db: Database, userbot_manager, days: int = 15):
+        self.db = db
+        self.userbot_manager = userbot_manager
+        self.days = days
+        self._task: Optional[asyncio.Task] = None
+
+    def start(self):
+        if self._task and not self._task.done():
+            return
+        self._task = asyncio.create_task(self._loop())
+        logger.info("Inactivity cleanup service started")
+
+    async def _loop(self):
+        while True:
+            try:
+                await self._check()
+                await asyncio.sleep(3600)  # check every hour
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:
+                logger.error(f"Inactivity cleanup error: {e}", exc_info=True)
+                await asyncio.sleep(60)
+
+    async def _check(self):
+        users = await self.db.get_users_with_all_mailings_stale(days=self.days)
+        for user in users:
+            accounts = await self.db.get_user_accounts(user.id)
+            if not accounts:
+                continue
+            for account in accounts:
+                try:
+                    await self.userbot_manager.logout_and_stop(account)
+                except Exception as e:
+                    logger.warning(f"Inactivity cleanup: failed to log out account {account.id}: {e}")
+                try:
+                    await self.db.delete_account_permanently(account.id)
+                except Exception as e:
+                    logger.error(f"Inactivity cleanup: failed to delete account {account.id}: {e}")
+            logger.info(
+                f"Inactivity cleanup: removed {len(accounts)} account(s) for user "
+                f"{user.telegram_id} — no mailing activity in {self.days}+ days"
+            )

@@ -22,7 +22,7 @@ from .handlers import setup_routers
 from .middlewares.subscription import SubscriptionMiddleware
 from .middlewares.album import AlbumMiddleware
 from .userbot.manager import UserbotManager
-from .services import CryptoBotService, TonPaymentService, PlategaService, AutoresponderService, MailingService, SubscriptionCheckerService
+from .services import CryptoBotService, TonPaymentService, PlategaService, AutoresponderService, MailingService, SubscriptionCheckerService, InactivityCleanupService
 from .utils.time_utils import moscow_logging_converter
 
 
@@ -145,6 +145,8 @@ async def main():
 
     subscription_checker = SubscriptionCheckerService(db, mailing_service)
 
+    inactivity_cleanup = InactivityCleanupService(db, userbot_manager)
+
     notify_locks: dict[int, asyncio.Lock] = {}
 
     async def notify_user(user_id: int, text: str):
@@ -233,6 +235,11 @@ async def main():
             subscription_checker._task.add_done_callback(_task_done_callback)
         logger.info("Subscription checker started")
 
+        inactivity_cleanup.start()
+        if inactivity_cleanup._task:
+            inactivity_cleanup._task.add_done_callback(_task_done_callback)
+        logger.info("Inactivity cleanup service started")
+
         logger.info("Starting bot polling...")
         try:
             await dp.start_polling(bot)
@@ -245,6 +252,11 @@ async def main():
                 subscription_checker._task.cancel()
                 with contextlib.suppress(asyncio.CancelledError):
                     await subscription_checker._task
+        with contextlib.suppress(Exception):
+            if inactivity_cleanup._task and not inactivity_cleanup._task.done():
+                inactivity_cleanup._task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await inactivity_cleanup._task
         with contextlib.suppress(Exception):
             if userbot_manager._monitor_task and not userbot_manager._monitor_task.done():
                 userbot_manager._monitor_task.cancel()

@@ -944,6 +944,43 @@ class Database:
                         pass
         return count
 
+    async def delete_account_permanently(self, account_id: int) -> None:
+        """Hard-delete an account row — cascades to its mailings/targets/
+        messages/autoresponder-history rows via ON DELETE CASCADE — and clean
+        up its local photo files. Unlike deactivate_account/delete_account
+        (which just flip is_active=0), this removes the row immediately."""
+        async with self._conn.execute(
+            "SELECT autoresponder_photo, group_autoresponder_photo FROM accounts WHERE id = ?",
+            (account_id,),
+        ) as cur:
+            row = await cur.fetchone()
+        await self._conn.execute("DELETE FROM accounts WHERE id = ?", (account_id,))
+        await self._conn.commit()
+        if row:
+            for path in (row["autoresponder_photo"], row["group_autoresponder_photo"]):
+                if path and is_safe_media_path(path):
+                    try:
+                        os.remove(path)
+                    except OSError:
+                        pass
+
+    async def get_users_with_all_mailings_stale(self, days: int = 15) -> list["User"]:
+        """Users who have at least one mailing, where NONE of their mailings
+        is currently active and NONE has had activity (a send, or — if it
+        never sent — its creation) within the last `days` days."""
+        cutoff = (now_moscow() - timedelta(days=days)).isoformat()
+        async with self._conn.execute(
+            """SELECT DISTINCT u.* FROM users u
+               WHERE EXISTS (SELECT 1 FROM mailings m WHERE m.user_id = u.id)
+                 AND NOT EXISTS (
+                     SELECT 1 FROM mailings m2
+                     WHERE m2.user_id = u.id
+                       AND (m2.is_active = 1 OR COALESCE(m2.last_sent_at, m2.created_at) >= ?)
+                 )""",
+            (cutoff,),
+        ) as cur:
+            return [self._row_to_user(r) for r in await cur.fetchall()]
+
     # === Mailings ===
     def _row_to_mailing(self, r) -> Mailing:
         keys = r.keys() if hasattr(r, 'keys') else []
