@@ -1291,8 +1291,11 @@ class MailingService:
                         continue
 
                     for target_idx, target_obj in enumerate(targets):
-                        # Interval check per target
-                        target_interval = target_obj.interval_seconds or mailing.interval_seconds
+                        # Interval check per target — jitter ±3s around the configured
+                        # value so sends don't land on a perfectly regular cadence
+                        # (a dead-even interval is itself a spam-pattern signal).
+                        base_interval = target_obj.interval_seconds or mailing.interval_seconds
+                        target_interval = max(1, base_interval + random.uniform(-3, 3))
                         if target_obj.last_sent_at is not None:
                             elapsed = (now - target_obj.last_sent_at).total_seconds()
                             if elapsed < target_interval:

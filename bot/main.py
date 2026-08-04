@@ -4,8 +4,6 @@ import logging
 import os
 import sys
 import time
-from datetime import datetime
-from urllib.parse import urlparse
 
 # Allow running as `python bot/main.py` directly
 if __name__ == "__main__" and __package__ is None:
@@ -110,78 +108,6 @@ def release_instance_lock():
         _instance_lock_file = None
 
 
-async def _tcp_check(host: str, port: int, timeout: float = 10) -> str:
-    try:
-        _, writer = await asyncio.wait_for(asyncio.open_connection(host, port), timeout=timeout)
-        writer.close()
-        try:
-            await writer.wait_closed()
-        except Exception:
-            pass
-        return "OK"
-    except Exception as e:
-        return f"FAILED ({type(e).__name__}: {e})"
-
-
-def _socks5_handshake_check(host: str, port: int, username: str | None, password: str | None) -> str:
-    """Blocking — run via asyncio.to_thread. Exercises the exact same PySocks
-    path Telethon/_parse_proxy uses, connecting all the way through the proxy
-    to api.telegram.org:443 — unlike a bare TCP check, this catches a proxy
-    that accepts TCP connections but rejects the SOCKS5 handshake/auth or
-    can't actually relay traffic."""
-    import socks
-    s = socks.socksocket()
-    try:
-        s.set_proxy(socks.SOCKS5, host, port, username=username or None, password=password or None, rdns=True)
-        s.settimeout(15)
-        s.connect(("api.telegram.org", 443))
-        return "OK (SOCKS5 handshake + relay to api.telegram.org succeeded)"
-    except Exception as e:
-        return f"FAILED ({type(e).__name__}: {e})"
-    finally:
-        try:
-            s.close()
-        except Exception:
-            pass
-
-
-async def _run_proxy_diagnostic():
-    """One-off startup connectivity check. Set the PROXY_TEST env var (e.g.
-    socks5://user:pass@host:port) to enable it — writes results to
-    <DATA_DIR>/proxy_test_result.txt so they're readable via a plain `cat`
-    even on restricted hosting consoles without curl/grep. Does a baseline
-    check against api.telegram.org:443 alongside the proxy port so a
-    "baseline OK, proxy port FAILED" result points at the hosting provider
-    blocking that specific outbound port, not a general network outage —
-    plus a real SOCKS5 handshake through the proxy, since a port can accept
-    raw TCP while the proxy itself rejects the handshake/auth or is dead."""
-    proxy_test = os.getenv("PROXY_TEST")
-    if not proxy_test:
-        return
-
-    data_dir = os.getenv("DATA_DIR", "/app/data")
-    lines = [f"=== Proxy diagnostic @ {datetime.now().isoformat()} ==="]
-    lines.append(f"Baseline api.telegram.org:443 -> {await _tcp_check('api.telegram.org', 443)}")
-
-    parsed = urlparse(proxy_test)
-    host, port = parsed.hostname, parsed.port
-    if host and port:
-        lines.append(f"Proxy {host}:{port} raw TCP -> {await _tcp_check(host, port)}")
-        handshake = await asyncio.to_thread(_socks5_handshake_check, host, port, parsed.username, parsed.password)
-        lines.append(f"Proxy {host}:{port} SOCKS5 handshake -> {handshake}")
-    else:
-        lines.append(f"Could not parse PROXY_TEST={proxy_test!r} (expected socks5://[user:pass@]host:port)")
-
-    result = "\n".join(lines) + "\n"
-    logger.info(result)
-    try:
-        os.makedirs(data_dir, exist_ok=True)
-        with open(os.path.join(data_dir, "proxy_test_result.txt"), "w", encoding="utf-8") as f:
-            f.write(result)
-    except Exception as e:
-        logger.error(f"Failed to write proxy diagnostic file: {e}")
-
-
 async def main():
     if not config.BOT_TOKEN:
         logger.error("BOT_TOKEN is not set in .env file")
@@ -196,7 +122,6 @@ async def main():
     db = Database(config.DATABASE_PATH)
     await db.connect()
     logger.info("Database connected")
-    asyncio.create_task(_run_proxy_diagnostic())
 
     bot = Bot(
         token=config.BOT_TOKEN,
