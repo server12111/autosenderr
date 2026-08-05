@@ -787,6 +787,13 @@ async def process_password(message: Message, state: FSMContext, db: Database):
         await state.clear()
         return
 
+    if data.get("confirming"):
+        # A previous submission is still being processed against the same
+        # Telethon client — ignore the duplicate instead of racing a second
+        # sign_in on it (mirrors the same guard in _confirm_code).
+        return
+    await state.update_data(confirming=True)
+
     try:
         await client.sign_in(password=password)
 
@@ -828,6 +835,7 @@ async def process_password(message: Message, state: FSMContext, db: Database):
         # message tells the user to try again, so there must actually be
         # something left to retry into instead of dumping them back to the
         # accounts list and burning the login session.
+        await state.update_data(confirming=False)
         await message.answer(pe(friendly_error(e)), parse_mode="HTML", reply_markup=cancel_keyboard())
 
     except Exception as e:

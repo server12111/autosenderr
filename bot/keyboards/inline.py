@@ -84,6 +84,7 @@ def skip_thread_keyboard(mailing_id: int) -> InlineKeyboardMarkup:
         text="⏭️ Пропустить (General)",
         callback_data=f"skip_thread:{mailing_id}"
     ))
+    builder.row(_btn("◀️ Назад", callback_data="cancel", style="primary"))
     return builder.as_markup()
 
 
@@ -439,24 +440,6 @@ def select_account_for_mailing_keyboard(accounts: list[Account], mailing_id: int
     return builder.as_markup()
 
 
-def multi_account_select_keyboard(accounts: list[Account], selected_ids: list[int], mailing_id: int, rotation_mode: str = "per_target") -> InlineKeyboardMarkup:
-    builder = InlineKeyboardBuilder()
-    for acc in accounts:
-        prefix = "✅ " if acc.id in selected_ids else "📱 "
-        builder.row(_btn(
-            f"{prefix}{acc.display_name}",
-            callback_data=f"toggle_mailing_account:{acc.id}:{mailing_id}",
-            style="primary",
-        ))
-    if rotation_mode == "per_cycle":
-        mode_label = "🔄 Режим: все чаты одним акк."
-    else:
-        mode_label = "🔄 Режим: по одному чату"
-    builder.row(_btn(mode_label, callback_data=f"toggle_rotation_mode:{mailing_id}", style="primary"))
-    builder.row(_btn("✅ Готово", callback_data=f"mailing:{mailing_id}", style="success"))
-    return builder.as_markup()
-
-
 def mailing_creation_messages_keyboard(mailing_id: int, messages: list[MailingMessage]) -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
     for msg in messages:
@@ -688,6 +671,11 @@ def admin_keyboard() -> InlineKeyboardMarkup:
     )
     builder.row(
         _btn("🔍 Диагностика", callback_data="admin_diagnostics", style="primary"),
+        _btn("🗑 Мёртвые аккаунты", callback_data="admin_cleanup_accounts", style="primary"),
+    )
+    builder.row(
+        _btn("💳 Статистика Platega", callback_data="admin_platega", style="primary"),
+        _btn("📋 Подписки", callback_data="admin_subscriptions:0", style="primary"),
     )
     builder.row(
         _btn("📤 Экспорт БД", callback_data="admin_export_db", style="primary"),

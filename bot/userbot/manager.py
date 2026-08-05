@@ -90,6 +90,7 @@ class UserbotManager:
         self._startup_task: Optional[asyncio.Task] = None
         self._sponsor_check_handler: Optional[Callable] = None
         self._client_locks: dict[int, asyncio.Lock] = {}
+        self._proxy_failure_lock = asyncio.Lock()
 
     def set_message_handler(self, handler: Callable):
         self._message_handler = handler
@@ -268,34 +269,49 @@ class UserbotManager:
         happened to discover the failure — otherwise the rest sit stuck on
         the dead proxy until each independently hits the same error), and
         forces those accounts to reconnect right away instead of waiting for
-        their own next natural reconnect attempt."""
+        their own next natural reconnect attempt.
+
+        Serialized via _proxy_failure_lock: several accounts sharing the
+        same dead proxy can all discover the failure at nearly the same
+        time (e.g. a burst of connections at startup) and call this
+        concurrently — without a lock, each would independently re-read the
+        live pool-proxy load and could all pick the same "least loaded"
+        replacement, pushing it over POOL_PROXY_ACCOUNT_CAP, and each would
+        schedule its own reconnect batch, multiplying the intended
+        concurrency-5 stagger. The lock makes only the first caller for a
+        given dead proxy actually do the work; the rest see was_active=False
+        and skip — that work is already in flight."""
         dead_pool_id = account.proxy_pool_id
-        try:
-            was_active = await self.db.deactivate_pool_proxy(dead_pool_id)
-        except Exception as ne:
-            logger.error(f"Failed to deactivate pool proxy {dead_pool_id}: {ne}")
-            was_active = False
+        async with self._proxy_failure_lock:
+            try:
+                was_active = await self.db.deactivate_pool_proxy(dead_pool_id)
+            except Exception as ne:
+                logger.error(f"Failed to deactivate pool proxy {dead_pool_id}: {ne}")
+                was_active = False
 
-        if was_active and self._bot_notify_callback:
-            for admin_id in config.ADMIN_IDS:
-                try:
-                    await self._bot_notify_callback(
-                        admin_id,
-                        pe(
-                            f"⚠️ <b>Прокси из пула отключён</b>\n\n"
-                            f"Перестал работать и помечен неактивным. Затронутые аккаунты "
-                            f"переподключаются на другой прокси из пула.\n\n"
-                            f"{html.escape(error_text[:200])}"
-                        ),
-                    )
-                except Exception:
-                    pass
+            if not was_active:
+                return
 
-        affected_ids: list[int] = []
-        try:
-            affected_ids = await self.db.reassign_all_accounts_off_dead_pool_proxy(dead_pool_id)
-        except Exception as ne:
-            logger.error(f"Failed to reassign accounts off dead pool proxy {dead_pool_id}: {ne}")
+            if self._bot_notify_callback:
+                for admin_id in config.ADMIN_IDS:
+                    try:
+                        await self._bot_notify_callback(
+                            admin_id,
+                            pe(
+                                f"⚠️ <b>Прокси из пула отключён</b>\n\n"
+                                f"Перестал работать и помечен неактивным. Затронутые аккаунты "
+                                f"переподключаются на другой прокси из пула.\n\n"
+                                f"{html.escape(error_text[:200])}"
+                            ),
+                        )
+                    except Exception:
+                        pass
+
+            affected_ids: list[int] = []
+            try:
+                affected_ids = await self.db.reassign_all_accounts_off_dead_pool_proxy(dead_pool_id)
+            except Exception as ne:
+                logger.error(f"Failed to reassign accounts off dead pool proxy {dead_pool_id}: {ne}")
 
         if affected_ids:
             asyncio.create_task(self._reconnect_accounts_staggered(affected_ids))

@@ -5,6 +5,7 @@ import os
 import tempfile
 from datetime import datetime, timedelta
 from typing import Optional
+from urllib.parse import urlparse
 
 import matplotlib
 matplotlib.use("Agg")
@@ -43,6 +44,7 @@ from ..config import config
 from ..services import MailingService
 from ..utils.premium_emoji import pe
 from ..utils.time_utils import now_moscow
+from .accounts import _test_proxy_connection
 from ..utils.tg import edit_or_answer
 
 router = Router()
@@ -691,12 +693,42 @@ async def process_admin_add_proxy(message: Message, state: FSMContext, db: Datab
             reply_markup=cancel_keyboard(),
         )
         return
+
+    parsed = urlparse(text)
+    if not parsed.hostname or not parsed.port:
+        await message.answer(
+            pe("❌ Не удалось распознать хост или порт.\n"
+               "Проверьте формат: <code>socks5://host:port</code>"),
+            parse_mode="HTML",
+            reply_markup=cancel_keyboard(),
+        )
+        return
+    if not await _test_proxy_connection(parsed.hostname, parsed.port):
+        await message.answer(
+            pe(f"❌ <b>Прокси не отвечает!</b>\n\n"
+               f"Не удалось подключиться к <code>{html.escape(parsed.hostname)}:{parsed.port}</code>.\n\n"
+               f"Проверьте адрес, порт и что прокси рабочий. Прокси, который "
+               f"сразу же не отвечает, будет выдан аккаунтам и все они не смогут "
+               f"подключиться — вводить его в пул незамеченным нежелательно.\n\n"
+               f"Введите другой прокси:"),
+            parse_mode="HTML",
+            reply_markup=cancel_keyboard(),
+        )
+        return
+
     await db.add_pool_proxy(text, message.from_user.id)
     await state.clear()
 
+    # Immediately absorb any accounts that don't have a proxy yet — without
+    # this, they'd stay proxy-less until the next bot restart (that's what
+    # backfill_missing_proxies() also runs at startup), and a newly added
+    # proxy would sit at 0 accounts until then.
+    backfilled = await db.backfill_missing_proxies()
+
     proxies = await db.get_pool_proxies()
+    backfill_note = f"\n\n📥 Прокси из пула назначен {backfilled} аккаунтам без прокси." if backfilled else ""
     await message.answer(
-        pe(f"✅ Прокси добавлен в пул: <code>{html.escape(_mask_proxy(text))}</code>"),
+        pe(f"✅ Прокси добавлен в пул: <code>{html.escape(_mask_proxy(text))}</code>{backfill_note}"),
         parse_mode="HTML",
         reply_markup=admin_proxy_pool_keyboard(proxies),
     )
@@ -718,13 +750,17 @@ async def callback_admin_proxy_info(callback: CallbackQuery, db: Database):
 
 
 @router.callback_query(F.data.startswith("admin_delete_proxy:"))
-async def callback_admin_delete_proxy(callback: CallbackQuery, db: Database):
+async def callback_admin_delete_proxy(callback: CallbackQuery, db: Database, userbot_manager):
     if not is_admin(callback.from_user.id):
         await callback.answer("Нет доступа", show_alert=True)
         return
     pool_id = int(callback.data.split(":")[1])
-    await db.delete_pool_proxy(pool_id)
-    await callback.answer("✅ Прокси удалён из пула")
+    affected = await db.delete_pool_proxy(pool_id)
+    if affected:
+        asyncio.create_task(userbot_manager._reconnect_accounts_staggered(affected))
+        await callback.answer(f"✅ Прокси удалён, {len(affected)} аккаунт(ов) переехали на другой")
+    else:
+        await callback.answer("✅ Прокси удалён из пула")
 
     proxies = await db.get_pool_proxies()
     text = "🌐 Пул прокси\n\nПрокси в пуле пока нет." if not proxies else "🌐 Пул прокси\n\n🟢 — активен, 💀 — отключён\nВ скобках — число аккаунтов на нём:"

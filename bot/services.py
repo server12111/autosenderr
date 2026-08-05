@@ -1279,10 +1279,6 @@ class MailingService:
                         self._me_cache[mailing.account_id] = await client.get_me()
                     me = self._me_cache[mailing.account_id]
 
-                    pool_ids: list[int] = [mailing.account_id]
-                    pool_clients: list[tuple] = [(mailing.account_id, client, me)]
-                    client_map: dict[int, tuple] = {mailing.account_id: (client, me)}
-
                     # Free tier: check once per cycle
                     mailing_user = await self.db.get_user_by_id(mailing.user_id)
                     add_sig = Database.is_free_ad_active(mailing_user) if mailing_user else False
@@ -1392,49 +1388,18 @@ class MailingService:
                             sent_any = True
                             cycle_sent += 1
                         except _BAN_ERRORS as e:
-                            if current_account_id == mailing.account_id:
-                                # Головний акаунт — зупиняємо розсилку повністю
-                                try:
-                                    await self.db.add_error_log(
-                                        user_id=mailing.user_id,
-                                        error_type=type(e).__name__,
-                                        error_text=str(e)[:300],
-                                        account_id=current_account_id,
-                                        mailing_id=mailing_id,
-                                    )
-                                except Exception:
-                                    pass
-                                await self._handle_mailing_ban(mailing_id, current_account_id, e)
-                                return
-                            # Допоміжний акаунт — деактивуємо його, розсилка продовжується
                             try:
                                 await self.db.add_error_log(
                                     user_id=mailing.user_id,
-                                    error_type=f"{type(e).__name__}:Extra",
+                                    error_type=type(e).__name__,
                                     error_text=str(e)[:300],
                                     account_id=current_account_id,
                                     mailing_id=mailing_id,
                                 )
                             except Exception:
                                 pass
-                            logger.warning(f"Mailing {mailing_id}: extra account {current_account_id} banned ({type(e).__name__}), removing from pool")
-                            await self.db.deactivate_account(current_account_id)
-                            self._me_cache.pop(current_account_id, None)
-                            client_map.pop(current_account_id, None)
-                            pool_clients = [(aid, c, m_) for aid, c, m_ in pool_clients if aid != current_account_id]
-                            try:
-                                notify = getattr(self.userbot_manager, '_bot_notify_callback', None)
-                                if notify:
-                                    acc_obj = await self.db.get_account(current_account_id)
-                                    if acc_obj:
-                                        u = await self.db.get_user_by_id(acc_obj.user_id)
-                                        if u:
-                                            await notify(u.telegram_id, pe(
-                                                f"⚠️ Дополнительный аккаунт <b>{html.escape(acc_obj.display_name)}</b> заблокирован и удалён из пула рассылки."
-                                            ))
-                            except Exception:
-                                pass
-                            continue
+                            await self._handle_mailing_ban(mailing_id, current_account_id, e)
+                            return
                         except _CHAT_BAN_ERRORS as e:
                             self._mark_target_not_working(mailing_id, target_obj.id)
                             cycle_errors += 1
@@ -1493,52 +1458,31 @@ class MailingService:
                         except FloodWaitError as e:
                             self._clear_working_targets(mailing_id)
                             await self._notify_flood_wait(mailing_user, current_account_id, e.seconds)
-                            fallback_sent = False
-                            if pool_clients and len(pool_clients) > 1:
-                                for fb_id, fb_client, _ in pool_clients:
-                                    if fb_id == current_account_id:
-                                        continue
-                                    try:
-                                        await self._send_msg(
-                                            fb_client, target, msg, pm,
-                                            reply_to=reply_to_id,
-                                            add_signature=add_sig,
-                                            hidden_tag_user_ids=hidden_tag_user_ids,
-                                        )
-                                        logger.info(f"Mailing {mailing_id}: FloodWait fallback → account {fb_id} → {target}")
-                                        await self.db.update_target_last_sent(target_obj.id, fb_id)
-                                        self._mark_target_working(mailing_id, target_obj.id)
-                                        sent_any = True
-                                        fallback_sent = True
-                                        break
-                                    except Exception:
-                                        continue
-                            if not fallback_sent:
-                                cycle_errors += 1
-                                wait = min(e.seconds, 3600)
-                                logger.warning(
-                                    f"Mailing {mailing_id}: FloodWait {e.seconds}s on account "
-                                    f"{current_account_id} for {target}, no fallback — sleeping {wait}s "
-                                    f"and deferring remaining targets to the next cycle"
+                            cycle_errors += 1
+                            wait = min(e.seconds, 3600)
+                            logger.warning(
+                                f"Mailing {mailing_id}: FloodWait {e.seconds}s on account "
+                                f"{current_account_id} for {target} — sleeping {wait}s "
+                                f"and deferring remaining targets to the next cycle"
+                            )
+                            try:
+                                await self.db.add_error_log(
+                                    user_id=mailing.user_id,
+                                    error_type="FloodWait",
+                                    error_text=f"{e.seconds}s",
+                                    account_id=current_account_id,
+                                    mailing_id=mailing_id,
+                                    chat_identifier=target,
                                 )
-                                try:
-                                    await self.db.add_error_log(
-                                        user_id=mailing.user_id,
-                                        error_type="FloodWait",
-                                        error_text=f"{e.seconds}s",
-                                        account_id=current_account_id,
-                                        mailing_id=mailing_id,
-                                        chat_identifier=target,
-                                    )
-                                except Exception:
-                                    pass
-                                await asyncio.sleep(wait)
-                                # FloodWait is account-wide, not per-target — every
-                                # remaining target in this cycle would immediately
-                                # hit the same wait again, stalling for
-                                # N x up_to_3600s and spamming N flood alerts.
-                                # Defer them to the next cycle instead.
-                                break
+                            except Exception:
+                                pass
+                            await asyncio.sleep(wait)
+                            # FloodWait is account-wide, not per-target — every
+                            # remaining target in this cycle would immediately
+                            # hit the same wait again, stalling for
+                            # up_to_3600s and spamming duplicate flood alerts.
+                            # Defer them to the next cycle instead.
+                            break
                         except (ChatSendMediaForbiddenError, ChatGuestSendForbiddenError, RightForbiddenError, ChatAdminRequiredError) as e:
                             self._mark_target_not_working(mailing_id, target_obj.id)
                             await self.db.add_error_log(
@@ -1606,45 +1550,24 @@ class MailingService:
                                 logger.warning(f"Mailing {mailing_id}: '{target}' — чат разрешает только медиа (PLAIN_FORBIDDEN), skipping")
                             elif "PEER_FLOOD" in err_str or isinstance(e, PeerFloodError):
                                 self._clear_working_targets(mailing_id)
-                                fallback_sent = False
-                                if pool_clients and len(pool_clients) > 1:
-                                    for fb_id, fb_client, _ in pool_clients:
-                                        if fb_id == current_account_id:
-                                            continue
-                                        try:
-                                            await self._send_msg(
-                                                fb_client, target, msg, pm,
-                                                reply_to=reply_to_id,
-                                                add_signature=add_sig,
-                                                hidden_tag_user_ids=hidden_tag_user_ids,
-                                            )
-                                            logger.info(f"Mailing {mailing_id}: PEER_FLOOD fallback → account {fb_id} → {target}")
-                                            await self.db.update_target_last_sent(target_obj.id, fb_id)
-                                            self._mark_target_working(mailing_id, target_obj.id)
-                                            sent_any = True
-                                            fallback_sent = True
-                                            break
-                                        except Exception:
-                                            continue
-                                if not fallback_sent:
-                                    cycle_errors += 1
-                                    try:
-                                        await self.db.add_error_log(
-                                            user_id=mailing.user_id,
-                                            error_type="PeerFlood",
-                                            error_text="PEER_FLOOD",
-                                            account_id=current_account_id,
-                                            mailing_id=mailing_id,
-                                            chat_identifier=target,
-                                        )
-                                    except Exception:
-                                        pass
-                                    logger.warning(f"Mailing {mailing_id}: PEER_FLOOD на аккаунте, пауза 60с")
-                                    await asyncio.sleep(60)
-                                    # Same reasoning as FloodWaitError above — this
-                                    # is account-wide, so stop hammering the rest
-                                    # of this cycle's targets and retry next cycle.
-                                    break
+                                cycle_errors += 1
+                                try:
+                                    await self.db.add_error_log(
+                                        user_id=mailing.user_id,
+                                        error_type="PeerFlood",
+                                        error_text="PEER_FLOOD",
+                                        account_id=current_account_id,
+                                        mailing_id=mailing_id,
+                                        chat_identifier=target,
+                                    )
+                                except Exception:
+                                    pass
+                                logger.warning(f"Mailing {mailing_id}: PEER_FLOOD на аккаунте, пауза 60с")
+                                await asyncio.sleep(60)
+                                # Same reasoning as FloodWaitError above — this
+                                # is account-wide, so stop hammering the rest
+                                # of this cycle's targets and retry next cycle.
+                                break
                             else:
                                 self._mark_target_not_working(mailing_id, target_obj.id)
                                 cycle_errors += 1

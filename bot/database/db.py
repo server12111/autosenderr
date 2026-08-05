@@ -607,37 +607,6 @@ class Database:
         ) as cur:
             return [self._row_to_account(r) for r in await cur.fetchall()]
 
-    async def get_mailing_extra_accounts(self, mailing_id: int) -> list[Account]:
-        async with self._conn.execute(
-            "SELECT a.* FROM accounts a "
-            "JOIN mailing_accounts ma ON a.id = ma.account_id "
-            "WHERE ma.mailing_id = ? AND a.is_active = 1 ORDER BY ma.rowid", (mailing_id,)
-        ) as cur:
-            return [self._row_to_account(r) for r in await cur.fetchall()]
-
-    async def get_mailing_extra_account_ids(self, mailing_id: int) -> list[int]:
-        async with self._conn.execute(
-            "SELECT account_id FROM mailing_accounts WHERE mailing_id = ? ORDER BY rowid", (mailing_id,)
-        ) as cur:
-            return [r["account_id"] for r in await cur.fetchall()]
-
-    async def toggle_mailing_extra_account(self, mailing_id: int, account_id: int) -> bool:
-        # Atomic delete-then-insert-or-ignore instead of check-then-act — the old
-        # SELECT-then-INSERT pattern could raise an unhandled IntegrityError on the
-        # (mailing_id, account_id) primary key if two toggles for the same pair
-        # overlapped (e.g. a double-tap on the toggle button).
-        cur = await self._conn.execute(
-            "DELETE FROM mailing_accounts WHERE mailing_id = ? AND account_id = ?", (mailing_id, account_id)
-        )
-        if cur.rowcount > 0:
-            await self._conn.commit()
-            return False
-        await self._conn.execute(
-            "INSERT OR IGNORE INTO mailing_accounts (mailing_id, account_id) VALUES (?, ?)", (mailing_id, account_id)
-        )
-        await self._conn.commit()
-        return True
-
     async def count_user_accounts(self, user_id: int) -> int:
         async with self._conn.execute(
             "SELECT COUNT(*) as cnt FROM accounts WHERE user_id = ? AND is_active = 1", (user_id,)
@@ -776,9 +745,18 @@ class Database:
                 for r in rows
             ]
 
-    async def delete_pool_proxy(self, pool_id: int):
+    async def delete_pool_proxy(self, pool_id: int, cap: int = POOL_PROXY_ACCOUNT_CAP) -> list[int]:
+        """Reassign any accounts still on this proxy to another pool proxy
+        before deleting the row — otherwise they'd silently keep using the
+        now-deleted pool_id forever (no FK enforces this), invisible to
+        get_pool_proxies(), and a later real failure of that same physical
+        proxy would never notify admins again (deactivate_pool_proxy would
+        match 0 rows for a pool_id that no longer exists). Returns the ids
+        of accounts that got reassigned, so the caller can reconnect them."""
+        affected = await self.reassign_all_accounts_off_dead_pool_proxy(pool_id, cap=cap)
         await self._conn.execute("DELETE FROM proxy_pool WHERE id = ?", (pool_id,))
         await self._conn.commit()
+        return affected
 
     async def deactivate_pool_proxy(self, pool_id: int) -> bool:
         """Mark a pool proxy dead. Returns True only if it was still active
@@ -1158,10 +1136,6 @@ class Database:
             "UPDATE mailings SET hidden_tag_enabled = ? WHERE id = ?",
             (1 if enabled else 0, mailing_id),
         )
-        await self._conn.commit()
-
-    async def update_mailing_rotation_mode(self, mailing_id: int, mode: str):
-        await self._conn.execute("UPDATE mailings SET account_rotation_mode = ? WHERE id = ?", (mode, mailing_id))
         await self._conn.commit()
 
     async def update_mailing_batch(self, mailing_id: int, batch_size: Optional[int], batch_pause: int):
