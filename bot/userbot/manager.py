@@ -263,13 +263,17 @@ class UserbotManager:
     async def _handle_pool_proxy_failure(self, account: Account, error_text: str):
         """A pool-assigned proxy died. Unlike a user's own proxy, the account
         owner must never learn their account rides on a shared pool proxy — so
-        this notifies the admins instead, marks the proxy dead, and quietly
-        reassigns the account to another pool proxy for its next connection
-        attempt (get_client() always re-reads the account fresh from the DB)."""
+        this notifies the admins instead, marks the proxy dead, reassigns
+        EVERY account still on it (not just the one whose connection attempt
+        happened to discover the failure — otherwise the rest sit stuck on
+        the dead proxy until each independently hits the same error), and
+        forces those accounts to reconnect right away instead of waiting for
+        their own next natural reconnect attempt."""
+        dead_pool_id = account.proxy_pool_id
         try:
-            was_active = await self.db.deactivate_pool_proxy(account.proxy_pool_id)
+            was_active = await self.db.deactivate_pool_proxy(dead_pool_id)
         except Exception as ne:
-            logger.error(f"Failed to deactivate pool proxy {account.proxy_pool_id}: {ne}")
+            logger.error(f"Failed to deactivate pool proxy {dead_pool_id}: {ne}")
             was_active = False
 
         if was_active and self._bot_notify_callback:
@@ -280,17 +284,43 @@ class UserbotManager:
                         pe(
                             f"⚠️ <b>Прокси из пула отключён</b>\n\n"
                             f"Перестал работать и помечен неактивным. Затронутые аккаунты "
-                            f"автоматически переключаются на другой прокси из пула при следующем подключении.\n\n"
+                            f"переподключаются на другой прокси из пула.\n\n"
                             f"{html.escape(error_text[:200])}"
                         ),
                     )
                 except Exception:
                     pass
 
+        affected_ids: list[int] = []
         try:
-            await self.db.reassign_dead_pool_account(account.id, account.proxy_pool_id)
+            affected_ids = await self.db.reassign_all_accounts_off_dead_pool_proxy(dead_pool_id)
         except Exception as ne:
-            logger.error(f"Failed to reassign account {account.id} off dead pool proxy: {ne}")
+            logger.error(f"Failed to reassign accounts off dead pool proxy {dead_pool_id}: {ne}")
+
+        if affected_ids:
+            asyncio.create_task(self._reconnect_accounts_staggered(affected_ids))
+
+    async def _reconnect_accounts_staggered(self, account_ids: list[int]):
+        """Force accounts that were just reassigned off a dead pool proxy to
+        pick up their new proxy immediately, instead of waiting for whatever
+        naturally calls get_client() next (could be up to _MONITOR_INTERVAL
+        away). Staggered/limited concurrency for the same reason
+        start_all_clients() is — avoid a burst of simultaneous outbound
+        proxy connections."""
+        semaphore = asyncio.Semaphore(5)
+
+        async def _reconnect_one(account_id: int):
+            async with semaphore:
+                await asyncio.sleep(random.uniform(0.3, 1.5))
+                try:
+                    await self.stop_client(account_id)
+                    fresh = await self.db.get_account(account_id)
+                    if fresh and fresh.is_active:
+                        await self.start_client(fresh)
+                except Exception as e:
+                    logger.warning(f"Failed to reconnect account {account_id} onto new pool proxy: {e}")
+
+        await asyncio.gather(*[_reconnect_one(aid) for aid in account_ids], return_exceptions=True)
 
     async def stop_client(self, account_id: int):
         lock = self._client_locks.setdefault(account_id, asyncio.Lock())

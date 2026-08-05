@@ -874,6 +874,30 @@ class Database:
         if pool:
             await self.update_account_proxy(account_id, pool.proxy, proxy_pool_id=pool.id)
 
+    async def reassign_all_accounts_off_dead_pool_proxy(
+        self, dead_pool_id: int, cap: int = POOL_PROXY_ACCOUNT_CAP
+    ) -> list[int]:
+        """Like reassign_dead_pool_account, but for every account still
+        pointing at a pool proxy that just died — not only the one whose
+        connection attempt happened to be the one that discovered it. Without
+        this, every other account sharing the dead proxy stays stuck on it
+        until its own next connection attempt fails too, one at a time.
+        Returns the ids of accounts that got reassigned, so the caller can
+        reconnect them right away instead of waiting."""
+        async with self._conn.execute(
+            "SELECT id FROM accounts WHERE proxy_pool_id = ? AND is_active = 1",
+            (dead_pool_id,),
+        ) as cur:
+            rows = await cur.fetchall()
+        reassigned = []
+        for row in rows:
+            pool = await self.get_least_loaded_pool_proxy(exclude_id=dead_pool_id, cap=cap)
+            if not pool:
+                break  # no room anywhere else — leave the rest on the dead proxy
+            await self.update_account_proxy(row["id"], pool.proxy, proxy_pool_id=pool.id)
+            reassigned.append(row["id"])
+        return reassigned
+
     async def backfill_missing_proxies(self, cap: int = POOL_PROXY_ACCOUNT_CAP) -> int:
         """One-time-per-restart backfill: assign a proxy (an under-capacity
         proxy the user already owns, else a pool slot) to every active
