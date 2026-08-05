@@ -679,7 +679,7 @@ async def callback_admin_add_proxy(callback: CallbackQuery, state: FSMContext):
 
 
 @router.message(AdminStates.waiting_pool_proxy)
-async def process_admin_add_proxy(message: Message, state: FSMContext, db: Database):
+async def process_admin_add_proxy(message: Message, state: FSMContext, db: Database, userbot_manager):
     if not is_admin(message.from_user.id):
         await state.clear()
         return
@@ -722,11 +722,15 @@ async def process_admin_add_proxy(message: Message, state: FSMContext, db: Datab
     # Immediately absorb any accounts that don't have a proxy yet — without
     # this, they'd stay proxy-less until the next bot restart (that's what
     # backfill_missing_proxies() also runs at startup), and a newly added
-    # proxy would sit at 0 accounts until then.
+    # proxy would sit at 0 accounts until then. A DB update alone doesn't
+    # affect an account that's already connected unproxied though, so force
+    # those to reconnect right away too.
     backfilled = await db.backfill_missing_proxies()
+    if backfilled:
+        asyncio.create_task(userbot_manager._reconnect_accounts_staggered(backfilled))
 
     proxies = await db.get_pool_proxies()
-    backfill_note = f"\n\n📥 Прокси из пула назначен {backfilled} аккаунтам без прокси." if backfilled else ""
+    backfill_note = f"\n\n📥 Прокси из пула назначен {len(backfilled)} аккаунтам без прокси." if backfilled else ""
     await message.answer(
         pe(f"✅ Прокси добавлен в пул: <code>{html.escape(_mask_proxy(text))}</code>{backfill_note}"),
         parse_mode="HTML",

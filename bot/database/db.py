@@ -845,23 +845,16 @@ class Database:
             return pool.proxy
         return None
 
-    async def reassign_dead_pool_account(
-        self, account_id: int, dead_pool_id: int, cap: int = POOL_PROXY_ACCOUNT_CAP
-    ):
-        pool = await self.get_least_loaded_pool_proxy(exclude_id=dead_pool_id, cap=cap)
-        if pool:
-            await self.update_account_proxy(account_id, pool.proxy, proxy_pool_id=pool.id)
-
     async def reassign_all_accounts_off_dead_pool_proxy(
         self, dead_pool_id: int, cap: int = POOL_PROXY_ACCOUNT_CAP
     ) -> list[int]:
-        """Like reassign_dead_pool_account, but for every account still
-        pointing at a pool proxy that just died — not only the one whose
-        connection attempt happened to be the one that discovered it. Without
-        this, every other account sharing the dead proxy stays stuck on it
-        until its own next connection attempt fails too, one at a time.
-        Returns the ids of accounts that got reassigned, so the caller can
-        reconnect them right away instead of waiting."""
+        """Reassigns every account still pointing at a pool proxy that just
+        died — not only the one whose connection attempt happened to be the
+        one that discovered it. Without this, every other account sharing
+        the dead proxy stays stuck on it until its own next connection
+        attempt fails too, one at a time. Returns the ids of accounts that
+        got reassigned, so the caller can reconnect them right away instead
+        of waiting."""
         async with self._conn.execute(
             "SELECT id FROM accounts WHERE proxy_pool_id = ? AND is_active = 1",
             (dead_pool_id,),
@@ -876,20 +869,24 @@ class Database:
             reassigned.append(row["id"])
         return reassigned
 
-    async def backfill_missing_proxies(self, cap: int = POOL_PROXY_ACCOUNT_CAP) -> int:
-        """One-time-per-restart backfill: assign a proxy (an under-capacity
-        proxy the user already owns, else a pool slot) to every active
-        account that doesn't have one yet. Idempotent — only touches rows
-        with proxy IS NULL/'' — so it's safe to run on every startup."""
+    async def backfill_missing_proxies(self, cap: int = POOL_PROXY_ACCOUNT_CAP) -> list[int]:
+        """Backfill: assign a proxy (an under-capacity proxy the user
+        already owns, else a pool slot) to every active account that
+        doesn't have one yet. Idempotent — only touches rows with proxy IS
+        NULL/'' — so it's safe to call both on every startup and whenever
+        an admin adds a new pool proxy. Returns the ids of accounts that
+        got assigned, so the caller can force already-connected clients to
+        reconnect and actually pick up the new proxy (a DB-only update
+        doesn't affect a client that's already running unproxied)."""
         async with self._conn.execute(
             "SELECT id, user_id FROM accounts WHERE is_active = 1 AND (proxy IS NULL OR proxy = '')"
         ) as cur:
             rows = await cur.fetchall()
-        assigned = 0
+        assigned = []
         for row in rows:
             proxy = await self.auto_assign_proxy(row["user_id"], row["id"], cap=cap)
             if proxy:
-                assigned += 1
+                assigned.append(row["id"])
         return assigned
 
     async def update_auto_subscribe_sponsors(self, account_id: int, enabled: bool):

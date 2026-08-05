@@ -125,7 +125,7 @@ async def main():
 
     backfilled = await db.backfill_missing_proxies()
     if backfilled:
-        logger.info(f"Backfilled pool/shared proxies onto {backfilled} existing account(s)")
+        logger.info(f"Backfilled pool/shared proxies onto {len(backfilled)} existing account(s)")
 
     bot = Bot(
         token=config.BOT_TOKEN,
