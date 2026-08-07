@@ -597,8 +597,21 @@ class UserbotManager:
                     await self.db.deactivate_account(account.id)
             except _BAN_ERRORS as e:
                 await self._handle_account_problem(account.id, e, lock_held=True)
+            except (OSError, asyncio.TimeoutError, ConnectionError) as e:
+                # Same reasoning as _start_client_unlocked: if this idle
+                # account's proxy came from the pool and died, quietly
+                # reassign it here too — otherwise an account that never
+                # gets naturally reconnected could sit on a dead pool proxy
+                # indefinitely, invisible to this same sweep that's
+                # otherwise designed to catch exactly this kind of orphan.
+                # A user's own proxy failing isn't reported from here on
+                # purpose — that notification belongs to the account's
+                # actual next real connection attempt, not a background
+                # sweep of an account nobody's currently using.
+                if account.proxy_pool_id:
+                    await self._handle_pool_proxy_failure(account, str(e))
             except Exception:
-                pass  # transient network/proxy hiccup — not conclusive, next check will retry
+                pass  # transient network hiccup — not conclusive, next check will retry
             finally:
                 if client is not None:
                     try:
