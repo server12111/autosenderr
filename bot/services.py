@@ -859,6 +859,7 @@ class MailingService:
         self._me_cache: dict[int, object] = {}  # account_id -> me object, avoids get_me() every loop
         self._mailing_locks: dict[int, asyncio.Lock] = {}
         self._working_targets: dict[int, set[int]] = {}
+        self._message_rotation: dict[int, int] = {}  # mailing_id -> next message index (round-robin, not random)
 
     async def start(self):
         self._running = True
@@ -899,6 +900,7 @@ class MailingService:
             await asyncio.gather(task, return_exceptions=True)
         self._stagger_until.pop(mailing_id, None)
         self._working_targets.pop(mailing_id, None)
+        self._message_rotation.pop(mailing_id, None)
 
     async def stop_user_mailings(self, user_id: int):
         """Stop all active mailings for a user (called when subscription expires)."""
@@ -1339,7 +1341,13 @@ class MailingService:
                         if not sendable:
                             logger.debug(f"Mailing {mailing_id}: all messages are forwards, skipping target for free-tier user")
                             continue
-                        msg = random.choice(sendable)
+                        # Round-robin through the mailing's messages instead of
+                        # picking randomly — with several text variants added,
+                        # they should go out in order (1, 2, 3, 1, 2, ...), not
+                        # in an unpredictable sequence.
+                        idx = self._message_rotation.get(mailing_id, 0) % len(sendable)
+                        msg = sendable[idx]
+                        self._message_rotation[mailing_id] = idx + 1
                         pm = msg.parse_mode or 'html'
                         if pm == 'plain':
                             pm = None
