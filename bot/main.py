@@ -192,6 +192,17 @@ async def main():
                 await callback_query.answer("⚠️ Произошла ошибка. Попробуйте ещё раз.", show_alert=True)
             except Exception:
                 pass
+            return True
+        # A plain message (text/photo/etc.) that raised gets NO feedback at
+        # all if we stop here — the user just sees silence and assumes the
+        # bot is stuck (e.g. mid-wizard, typing a mailing name), when really
+        # a handler crashed. Answer it the same way.
+        message = getattr(event.update, "message", None)
+        if message:
+            try:
+                await message.answer("⚠️ Произошла ошибка. Попробуйте ещё раз.")
+            except Exception:
+                pass
         return True
 
     dp.message.middleware(AlbumMiddleware())
