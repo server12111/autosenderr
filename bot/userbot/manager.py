@@ -570,51 +570,21 @@ class UserbotManager:
         in self._clients). An idle account with no active mailing and no
         autoresponder traffic never hits any of those paths, so it can sit
         in the DB as is_active=1 indefinitely even though it's long dead.
-        This does one lightweight connect+auth check for exactly that case;
-        callers should only invoke it for accounts NOT already tracked as
+        Callers should only invoke this for accounts NOT already tracked as
         connected (is_client_active() is False), to avoid a redundant
-        second connection for accounts already being watched normally."""
+        second connection for accounts already being watched normally.
+
+        Just reconnects via the normal path (_start_client_unlocked already
+        handles stale-entry cleanup, proxy parsing, ban/proxy-failure
+        routing, and not-authorized deactivation) instead of building a
+        separate throwaway client — a second independent TelegramClient on
+        the same session string is exactly the dual-live-session pattern
+        this codebase has been hardened against elsewhere, and it left the
+        connection alive afterward is actually preferable here: a verified
+        idle account then stays connected and usable (e.g. for its
+        autoresponder) instead of being immediately dropped again."""
         lock = self._client_locks.setdefault(account.id, asyncio.Lock())
         async with lock:
             if account.id in self._clients and self._clients[account.id].is_connected():
                 return  # got connected through the normal path in the meantime
-            try:
-                proxy = _parse_proxy(account.proxy)
-            except Exception:
-                return  # a broken proxy string is already surfaced by the normal connect path
-            client = None
-            try:
-                client = TelegramClient(
-                    StringSession(account.session_string), account.api_id, account.api_hash,
-                    proxy=proxy,
-                    connection_retries=2,
-                    retry_delay=5,
-                    timeout=20,
-                )
-                await client.connect()
-                if not await client.is_user_authorized():
-                    logger.info(f"Account {account.id} ({account.phone}) session no longer authorized — deactivating")
-                    await self.db.deactivate_account(account.id)
-            except _BAN_ERRORS as e:
-                await self._handle_account_problem(account.id, e, lock_held=True)
-            except (OSError, asyncio.TimeoutError, ConnectionError) as e:
-                # Same reasoning as _start_client_unlocked: if this idle
-                # account's proxy came from the pool and died, quietly
-                # reassign it here too — otherwise an account that never
-                # gets naturally reconnected could sit on a dead pool proxy
-                # indefinitely, invisible to this same sweep that's
-                # otherwise designed to catch exactly this kind of orphan.
-                # A user's own proxy failing isn't reported from here on
-                # purpose — that notification belongs to the account's
-                # actual next real connection attempt, not a background
-                # sweep of an account nobody's currently using.
-                if account.proxy_pool_id:
-                    await self._handle_pool_proxy_failure(account, str(e))
-            except Exception:
-                pass  # transient network hiccup — not conclusive, next check will retry
-            finally:
-                if client is not None:
-                    try:
-                        await client.disconnect()
-                    except Exception:
-                        pass
+            await self._start_client_unlocked(account)
