@@ -223,7 +223,13 @@ async def callback_account_mailings(callback: CallbackQuery, db: Database):
 
 
 @router.callback_query(F.data == "mailings")
-async def callback_mailings(callback: CallbackQuery, db: Database):
+async def callback_mailings(callback: CallbackQuery, db: Database, state: FSMContext):
+    # Always-reachable nav button — without clearing state, a stray text
+    # message sent after navigating here from mid-wizard would still be
+    # caught by whatever text handler that old state points to and get
+    # silently applied to it (same bug class already fixed for the
+    # referral wallet flow, see callback_referral).
+    await state.clear()
     user = await db.get_user(callback.from_user.id)
     mailings = await db.get_user_mailings(user.id)
 
@@ -1328,8 +1334,18 @@ async def process_edit_hours(message: Message, state: FSMContext, db: Database):
     for part in text.split(","):
         part = part.strip()
         parsed = parse_time_range(part)
-        if parsed:
-            ranges.append(parsed)
+        if not parsed:
+            # Reject the whole input on any bad part instead of silently
+            # keeping only the valid ones — otherwise a typo in one of
+            # several ranges (e.g. "10:00-13:00, 18:0-22:00") saves a
+            # schedule missing that range with no indication anything
+            # was dropped.
+            await message.answer(
+                pe(f"❌ Не удалось распознать «{html.escape(part)}». Используйте формат: 10:00-13:00\n"
+                   "Или несколько диапазонов: 10:00-13:00, 18:00-22:00")
+            )
+            return
+        ranges.append(parsed)
 
     if not ranges:
         await message.answer(
@@ -2261,8 +2277,15 @@ async def process_create_hours(message: Message, state: FSMContext, db: Database
     for part in text.split(","):
         part = part.strip()
         parsed = parse_time_range(part)
-        if parsed:
-            ranges.append(parsed)
+        if not parsed:
+            # Reject the whole input on any bad part instead of silently
+            # keeping only the valid ones — see process_edit_hours.
+            await message.answer(
+                pe(f"❌ Не удалось распознать «{html.escape(part)}». Используйте формат: 10:00-13:00\n"
+                   "Или несколько диапазонов: 10:00-13:00, 18:00-22:00")
+            )
+            return
+        ranges.append(parsed)
 
     if not ranges:
         await message.answer(

@@ -171,7 +171,13 @@ async def callback_check_channels(callback: CallbackQuery, db: Database, state: 
 
 
 @router.callback_query(F.data == "main_menu")
-async def callback_main_menu(callback: CallbackQuery, db: Database):
+async def callback_main_menu(callback: CallbackQuery, db: Database, state: FSMContext):
+    # Always-reachable nav button — without clearing state, a stray text
+    # message sent after navigating here from mid-wizard would still be
+    # caught by whatever text handler that old state points to and get
+    # silently applied to it (same bug class already fixed for the
+    # referral wallet flow, see callback_referral).
+    await state.clear()
     await db.get_or_create_user(callback.from_user.id, callback.from_user.username)
     await callback.message.edit_text(
         pe("📋 <b>Главное меню</b>\n\nВыберите раздел:"),
@@ -182,7 +188,8 @@ async def callback_main_menu(callback: CallbackQuery, db: Database):
 
 
 @router.callback_query(F.data == "help")
-async def callback_help(callback: CallbackQuery, db: Database):
+async def callback_help(callback: CallbackQuery, db: Database, state: FSMContext):
+    await state.clear()
     support = await db.get_setting("card_manager_username") or "autosenderkarta"
     text = pe(
         "ℹ️ <b>Помощь</b>\n\n"

@@ -111,7 +111,13 @@ class AddAccountStates(StatesGroup):
 
 
 @router.callback_query(F.data == "accounts")
-async def callback_accounts(callback: CallbackQuery, db: Database):
+async def callback_accounts(callback: CallbackQuery, db: Database, state: FSMContext):
+    # Always-reachable nav button — without clearing state, a stray text
+    # message sent after navigating here from mid-wizard would still be
+    # caught by whatever text handler that old state points to and get
+    # silently applied to it (same bug class already fixed for the
+    # referral wallet flow, see callback_referral).
+    await state.clear()
     user = await db.get_user(callback.from_user.id)
     accounts = await db.get_user_accounts(user.id)
 

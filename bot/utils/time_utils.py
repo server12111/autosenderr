@@ -65,6 +65,13 @@ def parse_time_range(text: str) -> Optional[dict]:
     except ValueError:
         return None
 
+    if start == end:
+        # Not a genuine range (would only be "active" for that one minute a
+        # day) — almost certainly a typo like "10:00-10:00" meant to be
+        # "10:00-13:00". Reject at input time instead of silently saving a
+        # mailing schedule that looks normal but never actually runs.
+        return None
+
     return {"start": start, "end": end}
 
 

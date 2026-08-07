@@ -215,7 +215,8 @@ async def process_autoresponder_text(message: Message, state: FSMContext, db: Da
         await message.answer(pe("❌ Сессия устарела. Начните заново."), parse_mode="HTML")
         await state.clear()
         return
-    if not await db.get_account_for_user(account_id, message.from_user.id):
+    account_before = await db.get_account_for_user(account_id, message.from_user.id)
+    if not account_before:
         await state.clear()
         await message.answer("⛔ Нет доступа", parse_mode="HTML")
         return
@@ -236,7 +237,12 @@ async def process_autoresponder_text(message: Message, state: FSMContext, db: Da
         await message.answer(pe("❌ Отправьте текст или фото."), parse_mode="HTML", reply_markup=cancel_keyboard())
         return
 
-    await db.update_autoresponder(account_id, False, text, photo=photo_path)
+    # Preserve the current enabled/disabled state instead of always forcing
+    # it off — otherwise a routine "fix a typo" edit on an already-enabled
+    # autoresponder silently kills it, with the confirmation message
+    # ("не забудьте включить") looking identical whether it was already
+    # off or just got turned off by this save.
+    await db.update_autoresponder(account_id, account_before.autoresponder_enabled, text, photo=photo_path)
     await state.clear()
 
     account = await db.get_account_for_user(account_id, message.from_user.id)
@@ -244,10 +250,10 @@ async def process_autoresponder_text(message: Message, state: FSMContext, db: Da
         await message.answer(pe("❌ Аккаунт не найден."), parse_mode="HTML")
         return
     saved = "Фото + текст сохранены" if photo_path else "Текст автоответа сохранён"
+    hint = "" if account.autoresponder_enabled else "\n\nНе забудьте включить автоответчик."
 
     await message.answer(
-        pe(f"✅ {saved}!\n\n"
-        f"Не забудьте включить автоответчик."),
+        pe(f"✅ {saved}!{hint}"),
         parse_mode="HTML",
         reply_markup=autoresponder_keyboard(account_id, account.autoresponder_enabled, account.notify_messages),
     )
@@ -377,7 +383,8 @@ async def process_group_autoresponder_text(message: Message, state: FSMContext, 
         await state.clear()
         return
 
-    if not await db.get_account_for_user(account_id, message.from_user.id):
+    account_before = await db.get_account_for_user(account_id, message.from_user.id)
+    if not account_before:
         await state.clear()
         await message.answer("⛔ Нет доступа", parse_mode="HTML")
         return
@@ -398,7 +405,9 @@ async def process_group_autoresponder_text(message: Message, state: FSMContext, 
         await message.answer(pe("❌ Отправьте текст или фото."), parse_mode="HTML", reply_markup=cancel_keyboard())
         return
 
-    await db.update_group_autoresponder(account_id, False, text, photo=photo_path)
+    # Preserve the current enabled/disabled state — see the identical fix
+    # in process_autoresponder_text (private autoresponder) above.
+    await db.update_group_autoresponder(account_id, account_before.group_autoresponder_enabled, text, photo=photo_path)
     await state.clear()
 
     account = await db.get_account_for_user(account_id, message.from_user.id)
@@ -406,9 +415,9 @@ async def process_group_autoresponder_text(message: Message, state: FSMContext, 
         await message.answer(pe("❌ Аккаунт не найден."), parse_mode="HTML")
         return
     saved = "Фото + текст сохранены" if photo_path else "Текст автоответа для групп сохранён"
+    hint = "" if account.group_autoresponder_enabled else "\n\nНе забудьте включить автоответчик."
     await message.answer(
-        pe(f"✅ {saved}!\n\n"
-        "Не забудьте включить автоответчик."),
+        pe(f"✅ {saved}!{hint}"),
         parse_mode="HTML",
         reply_markup=group_autoresponder_keyboard(account_id, account.group_autoresponder_enabled),
     )
