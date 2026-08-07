@@ -22,7 +22,7 @@ from .handlers import setup_routers
 from .middlewares.subscription import SubscriptionMiddleware
 from .middlewares.album import AlbumMiddleware
 from .userbot.manager import UserbotManager
-from .services import CryptoBotService, TonPaymentService, PlategaService, AutoresponderService, MailingService, SubscriptionCheckerService, InactivityCleanupService
+from .services import CryptoBotService, TonPaymentService, PlategaService, AutoresponderService, MailingService, SubscriptionCheckerService, InactivityCleanupService, DeadAccountCleanupService
 from .utils.time_utils import moscow_logging_converter
 
 
@@ -151,6 +151,8 @@ async def main():
 
     inactivity_cleanup = InactivityCleanupService(db, userbot_manager)
 
+    dead_account_cleanup = DeadAccountCleanupService(db, userbot_manager)
+
     notify_locks: dict[int, asyncio.Lock] = {}
 
     async def notify_user(user_id: int, text: str):
@@ -255,6 +257,11 @@ async def main():
             inactivity_cleanup._task.add_done_callback(_task_done_callback)
         logger.info("Inactivity cleanup service started")
 
+        dead_account_cleanup.start()
+        if dead_account_cleanup._task:
+            dead_account_cleanup._task.add_done_callback(_task_done_callback)
+        logger.info("Dead account cleanup service started")
+
         logger.info("Starting bot polling...")
         try:
             await dp.start_polling(bot)
@@ -272,6 +279,11 @@ async def main():
                 inactivity_cleanup._task.cancel()
                 with contextlib.suppress(asyncio.CancelledError):
                     await inactivity_cleanup._task
+        with contextlib.suppress(Exception):
+            if dead_account_cleanup._task and not dead_account_cleanup._task.done():
+                dead_account_cleanup._task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await dead_account_cleanup._task
         with contextlib.suppress(Exception):
             if userbot_manager._monitor_task and not userbot_manager._monitor_task.done():
                 userbot_manager._monitor_task.cancel()

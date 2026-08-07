@@ -1954,3 +1954,59 @@ class InactivityCleanupService:
                 f"Inactivity cleanup: removed account {account.id} (user_id={account.user_id}) "
                 f"— no mailing activity in {self.days}+ days"
             )
+
+
+class DeadAccountCleanupService:
+    """Once a day: verify the session of every active account that isn't
+    currently being watched by anything else (no live tracked client), so a
+    session kicked/revoked out-of-band — from another device, or by
+    Telegram — gets discovered and marked inactive even for an idle
+    account with no active mailing or autoresponder traffic to naturally
+    surface the problem. Then purge accounts already marked inactive
+    (banned/kicked) that aren't referenced by any mailing — previously
+    only reachable via the admin panel's manual "🗑 Мёртвые аккаунты"
+    button, this makes it automatic."""
+
+    def __init__(self, db: Database, userbot_manager, interval_hours: int = 24):
+        self.db = db
+        self.userbot_manager = userbot_manager
+        self.interval_seconds = interval_hours * 3600
+        self._task: Optional[asyncio.Task] = None
+
+    def start(self):
+        if self._task and not self._task.done():
+            return
+        self._task = asyncio.create_task(self._loop())
+        logger.info("Dead account cleanup service started")
+
+    async def _loop(self):
+        while True:
+            try:
+                await self._check()
+                await asyncio.sleep(self.interval_seconds)
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:
+                logger.error(f"Dead account cleanup error: {e}", exc_info=True)
+                await asyncio.sleep(3600)
+
+    async def _check(self):
+        accounts = await self.db.get_all_active_accounts()
+        verified = 0
+        for account in accounts:
+            if self.userbot_manager.is_client_active(account.id):
+                continue  # already connected and watched by the normal monitor loop
+            try:
+                await self.userbot_manager.verify_account_session(account)
+                verified += 1
+            except Exception as e:
+                logger.warning(f"Dead account cleanup: failed to verify account {account.id}: {e}")
+            # Staggered, same reasoning as start_all_clients()/reconnect
+            # batches — avoid a burst of simultaneous outbound connections.
+            await asyncio.sleep(random.uniform(0.3, 1.0))
+        if verified:
+            logger.info(f"Dead account cleanup: verified {verified} idle account session(s)")
+
+        purged = await self.db.purge_inactive_accounts()
+        if purged:
+            logger.info(f"Dead account cleanup: purged {purged} banned/dead account(s)")

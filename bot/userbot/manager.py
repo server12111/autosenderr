@@ -560,3 +560,48 @@ class UserbotManager:
 
     def is_client_active(self, account_id: int) -> bool:
         return account_id in self._clients and self._clients[account_id].is_connected()
+
+    async def verify_account_session(self, account: Account):
+        """A session that gets kicked/revoked out-of-band (logged out from
+        another device, or by Telegram itself) is normally only discovered
+        the next time something naturally tries to use that account — a
+        mailing send, an incoming message for the autoresponder, or
+        _monitor_loop's health check (which only watches accounts already
+        in self._clients). An idle account with no active mailing and no
+        autoresponder traffic never hits any of those paths, so it can sit
+        in the DB as is_active=1 indefinitely even though it's long dead.
+        This does one lightweight connect+auth check for exactly that case;
+        callers should only invoke it for accounts NOT already tracked as
+        connected (is_client_active() is False), to avoid a redundant
+        second connection for accounts already being watched normally."""
+        lock = self._client_locks.setdefault(account.id, asyncio.Lock())
+        async with lock:
+            if account.id in self._clients and self._clients[account.id].is_connected():
+                return  # got connected through the normal path in the meantime
+            try:
+                proxy = _parse_proxy(account.proxy)
+            except Exception:
+                return  # a broken proxy string is already surfaced by the normal connect path
+            client = None
+            try:
+                client = TelegramClient(
+                    StringSession(account.session_string), account.api_id, account.api_hash,
+                    proxy=proxy,
+                    connection_retries=2,
+                    retry_delay=5,
+                    timeout=20,
+                )
+                await client.connect()
+                if not await client.is_user_authorized():
+                    logger.info(f"Account {account.id} ({account.phone}) session no longer authorized — deactivating")
+                    await self.db.deactivate_account(account.id)
+            except _BAN_ERRORS as e:
+                await self._handle_account_problem(account.id, e, lock_held=True)
+            except Exception:
+                pass  # transient network/proxy hiccup — not conclusive, next check will retry
+            finally:
+                if client is not None:
+                    try:
+                        await client.disconnect()
+                    except Exception:
+                        pass
