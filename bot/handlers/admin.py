@@ -1414,7 +1414,7 @@ async def _build_diag_text(telegram_id: int, db) -> Optional[tuple]:
         sub_end = "—"
 
     last_activity = user.last_activity.strftime("%d.%m.%Y %H:%M") if user.last_activity else "—"
-    reg_date = user.created_at.strftime("%d.%m.%Y %H:%M")
+    reg_date = user.created_at.strftime("%d.%m.%Y %H:%M") if user.created_at else "—"
     username = f"@{html.escape(user.username)}" if user.username else "—"
 
     text = pe(

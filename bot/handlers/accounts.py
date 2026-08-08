@@ -158,7 +158,7 @@ async def callback_account_menu(callback: CallbackQuery, db: Database):
         f"💬 Групповой автоответчик: {gr_status}\n"
         f"🤖 Автоподписка на спонсоров: {sponsor_status}\n"
         f"{proxy_status}\n"
-        f"📅 Добавлен: {account.created_at.strftime('%d.%m.%Y')}\n\n"
+        f"📅 Добавлен: {account.created_at.strftime('%d.%m.%Y') if account.created_at else '—'}\n\n"
         "Выберите действие:"
     )
 
@@ -1331,7 +1331,7 @@ async def callback_toggle_sponsor_sub(callback: CallbackQuery, db: Database):
         f"💬 Групповой автоответчик: {gr_status}\n"
         f"🤖 Автоподписка на спонсоров: {sponsor_status}\n"
         f"{proxy_status}\n"
-        f"📅 Добавлен: {account.created_at.strftime('%d.%m.%Y')}\n\n"
+        f"📅 Добавлен: {account.created_at.strftime('%d.%m.%Y') if account.created_at else '—'}\n\n"
         "Выберите действие:"
     )
     await callback.message.edit_text(

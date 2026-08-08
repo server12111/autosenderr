@@ -2606,6 +2606,7 @@ async def process_thread_id_for_target(message: Message, state: FSMContext, db: 
         targets = await db.get_mailing_targets(mailing_id)
         if return_to_creation:
             await state.set_state(CreateMailingStates.adding_targets)
+            await state.update_data(mailing_id=mailing_id)
             await message.answer(
                 pe(f"✅ Привязка к теме удалена. Всего чатов: {len(targets)}\n\nДобавьте ещё или нажмите «Готово»:"),
                 parse_mode="HTML",
@@ -2641,6 +2642,7 @@ async def process_thread_id_for_target(message: Message, state: FSMContext, db: 
     targets = await db.get_mailing_targets(mailing_id)
     if return_to_creation:
         await state.set_state(CreateMailingStates.adding_targets)
+        await state.update_data(mailing_id=mailing_id)
         await message.answer(
             pe(f"✅ Тема #{thread_id} привязана к чату. Всего чатов: {len(targets)}\n\nДобавьте ещё или нажмите «Готово»:"),
             parse_mode="HTML",
@@ -2666,6 +2668,7 @@ async def callback_skip_thread(callback: CallbackQuery, state: FSMContext, db: D
     targets = await db.get_mailing_targets(mailing_id)
     if return_to_creation:
         await state.set_state(CreateMailingStates.adding_targets)
+        await state.update_data(mailing_id=mailing_id)
         await callback.message.edit_text(
             pe(f"✅ Чат добавлен без привязки к теме (General). Всего чатов: {len(targets)}\n\nДобавьте ещё или нажмите «Готово»:"),
             parse_mode="HTML",
