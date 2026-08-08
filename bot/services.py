@@ -1493,6 +1493,12 @@ class MailingService:
                                 sent_any = True
                             else:
                                 self._mark_target_not_working(mailing_id, target_obj.id)
+                                if self._flood_until.get(current_account_id):
+                                    # _try_join_and_send hit a FloodWait internally —
+                                    # same reasoning as the main FloodWaitError
+                                    # handler: stop hammering remaining targets
+                                    # this cycle, the top-of-loop gate takes over.
+                                    break
                         except SlowModeWaitError as e:
                             self._mark_target_not_working(mailing_id, target_obj.id)
                             try:
@@ -1510,13 +1516,23 @@ class MailingService:
                             await asyncio.sleep(min(e.seconds, 60))
                         except FloodWaitError as e:
                             self._clear_working_targets(mailing_id)
+                            # _notify_flood_wait sets _flood_until (account_id ->
+                            # expiry) and notifies once — the gate at the top of
+                            # this loop is what actually waits it out on
+                            # subsequent cycles. Do NOT also sleep in place here:
+                            # that used to sleep out the (capped) wait fully
+                            # within this same cycle, so by the time the next
+                            # cycle's gate check ran, _flood_until already looked
+                            # expired and got deleted — right before Telegram's
+                            # next FloodWaitError (with an updated, still-nonzero
+                            # remaining count) was treated as a brand new episode
+                            # and re-notified, causing duplicate alerts.
                             await self._notify_flood_wait(mailing_user, current_account_id, e.seconds)
                             cycle_errors += 1
-                            wait = min(e.seconds, 3600)
                             logger.warning(
                                 f"Mailing {mailing_id}: FloodWait {e.seconds}s on account "
-                                f"{current_account_id} for {target} — sleeping {wait}s "
-                                f"and deferring remaining targets to the next cycle"
+                                f"{current_account_id} for {target} — deferring remaining "
+                                f"targets until it clears"
                             )
                             try:
                                 await self.db.add_error_log(
@@ -1529,12 +1545,10 @@ class MailingService:
                                 )
                             except Exception:
                                 pass
-                            await asyncio.sleep(wait)
                             # FloodWait is account-wide, not per-target — every
                             # remaining target in this cycle would immediately
-                            # hit the same wait again, stalling for
-                            # up_to_3600s and spamming duplicate flood alerts.
-                            # Defer them to the next cycle instead.
+                            # hit the same wait again. Defer them; the top-of-loop
+                            # gate handles the actual waiting from here.
                             break
                         except (ChatSendMediaForbiddenError, ChatGuestSendForbiddenError, RightForbiddenError, ChatAdminRequiredError) as e:
                             self._mark_target_not_working(mailing_id, target_obj.id)
@@ -1574,6 +1588,8 @@ class MailingService:
                                     sent_any = True
                                 else:
                                     self._mark_target_not_working(mailing_id, target_obj.id)
+                                    if self._flood_until.get(current_account_id):
+                                        break
                             elif isinstance(e, ValueError) and "Could not find the input entity" in err_str:
                                 self._mark_target_not_working(mailing_id, target_obj.id)
                                 cycle_errors += 1
@@ -1788,7 +1804,10 @@ class MailingService:
                 )
                 user = await self.db.get_user_by_id(mailing.user_id)
                 await self._notify_flood_wait(user, account_id, e.seconds)
-            await asyncio.sleep(min(e.seconds, 3600))
+            # No in-place sleep — _notify_flood_wait already set _flood_until,
+            # which the mailing loop's top-of-cycle gate waits out (see the
+            # comment on the main FloodWaitError handler for why sleeping
+            # here too caused duplicate notifications).
             return False
         except Exception as e:
             if mailing:
@@ -1837,7 +1856,10 @@ class MailingService:
                 )
                 user = await self.db.get_user_by_id(mailing.user_id)
                 await self._notify_flood_wait(user, account_id, e.seconds)
-            await asyncio.sleep(min(e.seconds, 3600))
+            # No in-place sleep — _notify_flood_wait already set _flood_until,
+            # which the mailing loop's top-of-cycle gate waits out (see the
+            # comment on the main FloodWaitError handler for why sleeping
+            # here too caused duplicate notifications).
             return False
         except ChatWriteForbiddenError as e:
             if mailing:
