@@ -860,7 +860,10 @@ class MailingService:
         self._mailing_locks: dict[int, asyncio.Lock] = {}
         self._working_targets: dict[int, set[int]] = {}
         self._message_rotation: dict[int, int] = {}  # mailing_id -> next message index (round-robin, not random)
-        self._flood_until: dict[int, datetime] = {}  # account_id -> when its current FloodWait expires
+        # Flood-wait expiry is persisted in accounts.flood_wait_until (DB), not
+        # kept here in memory — a bot restart (which happens on every deploy)
+        # must not forget an account is still in an active flood window and
+        # re-notify about the very same episode on the next reconnect/send.
 
     async def start(self):
         self._running = True
@@ -1039,11 +1042,14 @@ class MailingService:
     async def _notify_flood_wait(self, user, account_id: int, seconds: int):
         finish_at = now_moscow() + timedelta(seconds=seconds)
         # Only notify once per flood-wait episode — the mailing loop checks
-        # _flood_until itself and skips this account entirely until it
-        # expires, so retrying (and re-notifying) every cycle would just
-        # spam the same alert until the wait is actually over.
-        already_flooded = self._flood_until.get(account_id)
-        self._flood_until[account_id] = finish_at
+        # accounts.flood_wait_until itself and skips this account entirely
+        # until it expires, so retrying (and re-notifying) every cycle would
+        # just spam the same alert until the wait is actually over.
+        # Persisted in the DB (not in-memory) — a bot restart between
+        # notifications, which happens on every deploy, must not forget an
+        # account is still in the SAME flood episode and re-notify about it.
+        already_flooded = await self.db.get_flood_wait_until(account_id)
+        await self.db.set_flood_wait_until(account_id, finish_at)
         if already_flooded and already_flooded > now_moscow():
             return
 
@@ -1297,7 +1303,7 @@ class MailingService:
                         await asyncio.sleep(60)
                         continue
 
-                    flood_until = self._flood_until.get(mailing.account_id)
+                    flood_until = await self.db.get_flood_wait_until(mailing.account_id)
                     if flood_until:
                         now_check = now_moscow()
                         if now_check < flood_until:
@@ -1309,7 +1315,7 @@ class MailingService:
                             # stays responsive to stop_mailing()/cancellation.
                             await asyncio.sleep(min((flood_until - now_check).total_seconds(), 60))
                             continue
-                        del self._flood_until[mailing.account_id]
+                        await self.db.set_flood_wait_until(mailing.account_id, None)
 
                     messages = await self.db.get_mailing_messages(mailing_id)
                     targets = await self.db.get_mailing_targets(mailing_id)
@@ -1524,7 +1530,7 @@ class MailingService:
                                 sent_any = True
                             else:
                                 self._mark_target_not_working(mailing_id, target_obj.id)
-                                if self._flood_until.get(current_account_id):
+                                if await self.db.get_flood_wait_until(current_account_id):
                                     # _try_join_and_send hit a FloodWait internally —
                                     # same reasoning as the main FloodWaitError
                                     # handler: stop hammering remaining targets
@@ -1547,15 +1553,15 @@ class MailingService:
                             await asyncio.sleep(min(e.seconds, 60))
                         except FloodWaitError as e:
                             self._clear_working_targets(mailing_id)
-                            # _notify_flood_wait sets _flood_until (account_id ->
-                            # expiry) and notifies once — the gate at the top of
-                            # this loop is what actually waits it out on
-                            # subsequent cycles. Do NOT also sleep in place here:
-                            # that used to sleep out the (capped) wait fully
-                            # within this same cycle, so by the time the next
-                            # cycle's gate check ran, _flood_until already looked
-                            # expired and got deleted — right before Telegram's
-                            # next FloodWaitError (with an updated, still-nonzero
+                            # _notify_flood_wait sets accounts.flood_wait_until
+                            # and notifies once — the gate at the top of this
+                            # loop is what actually waits it out on subsequent
+                            # cycles. Do NOT also sleep in place here: that used
+                            # to sleep out the (capped) wait fully within this
+                            # same cycle, so by the time the next cycle's gate
+                            # check ran, flood_wait_until already looked expired
+                            # and got cleared — right before Telegram's next
+                            # FloodWaitError (with an updated, still-nonzero
                             # remaining count) was treated as a brand new episode
                             # and re-notified, causing duplicate alerts.
                             await self._notify_flood_wait(mailing_user, current_account_id, e.seconds)
@@ -1640,7 +1646,7 @@ class MailingService:
                                     sent_any = True
                                 else:
                                     self._mark_target_not_working(mailing_id, target_obj.id)
-                                    if self._flood_until.get(current_account_id):
+                                    if await self.db.get_flood_wait_until(current_account_id):
                                         break
                             elif type(e).__name__.startswith("ChatSend") and type(e).__name__.endswith("ForbiddenError"):
                                 # Telegram's per-media-type send restrictions
@@ -1890,7 +1896,7 @@ class MailingService:
                 )
                 user = await self.db.get_user_by_id(mailing.user_id)
                 await self._notify_flood_wait(user, account_id, e.seconds)
-            # No in-place sleep — _notify_flood_wait already set _flood_until,
+            # No in-place sleep — _notify_flood_wait already set flood_wait_until,
             # which the mailing loop's top-of-cycle gate waits out (see the
             # comment on the main FloodWaitError handler for why sleeping
             # here too caused duplicate notifications).
@@ -1942,7 +1948,7 @@ class MailingService:
                 )
                 user = await self.db.get_user_by_id(mailing.user_id)
                 await self._notify_flood_wait(user, account_id, e.seconds)
-            # No in-place sleep — _notify_flood_wait already set _flood_until,
+            # No in-place sleep — _notify_flood_wait already set flood_wait_until,
             # which the mailing loop's top-of-cycle gate waits out (see the
             # comment on the main FloodWaitError handler for why sleeping
             # here too caused duplicate notifications).

@@ -288,6 +288,7 @@ class Database:
         await _add_col("accounts", "auto_subscribe_sponsors",      "BOOLEAN DEFAULT FALSE")
         await _add_col("accounts", "proxy_pool_id",                "INTEGER DEFAULT NULL")
         await _add_col("accounts", "proxy_problem_notified",       "INTEGER DEFAULT 0")
+        await _add_col("accounts", "flood_wait_until",             "TEXT DEFAULT NULL")
         await self._conn.execute("""
             CREATE TABLE IF NOT EXISTS proxy_pool (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -757,6 +758,20 @@ class Database:
     async def clear_proxy_problem_notified(self, account_id: int):
         await self._conn.execute(
             "UPDATE accounts SET proxy_problem_notified = 0 WHERE id = ? AND proxy_problem_notified = 1", (account_id,)
+        )
+        await self._conn.commit()
+
+    async def get_flood_wait_until(self, account_id: int) -> Optional[datetime]:
+        async with self._conn.execute(
+            "SELECT flood_wait_until FROM accounts WHERE id = ?", (account_id,)
+        ) as cur:
+            row = await cur.fetchone()
+            return self._parse_datetime(row["flood_wait_until"]) if row else None
+
+    async def set_flood_wait_until(self, account_id: int, finish_at: Optional[datetime]):
+        await self._conn.execute(
+            "UPDATE accounts SET flood_wait_until = ? WHERE id = ?",
+            (finish_at.isoformat() if finish_at else None, account_id),
         )
         await self._conn.commit()
 
