@@ -1590,6 +1590,27 @@ class MailingService:
                                     self._mark_target_not_working(mailing_id, target_obj.id)
                                     if self._flood_until.get(current_account_id):
                                         break
+                            elif type(e).__name__.startswith("ChatSend") and type(e).__name__.endswith("ForbiddenError"):
+                                # Telegram's per-media-type send restrictions
+                                # (photos/videos/docs/voices/stickers/gifs/
+                                # polls/...). Telethon doesn't hardcode every
+                                # one of these as an importable class (some,
+                                # like ChatSendPhotosForbiddenError, only
+                                # exist in newer Telethon releases than may be
+                                # installed here) — matching by class name
+                                # instead of isinstance() catches all of them
+                                # regardless of the exact installed version,
+                                # same treatment as the known ChatSendMediaForbiddenError.
+                                self._mark_target_not_working(mailing_id, target_obj.id)
+                                await self.db.add_error_log(
+                                    user_id=mailing.user_id,
+                                    error_type=type(e).__name__,
+                                    error_text=err_str[:300],
+                                    account_id=current_account_id,
+                                    mailing_id=mailing_id,
+                                    chat_identifier=target,
+                                )
+                                logger.warning(f"Mailing {mailing_id}: send forbidden in '{target}' ({type(e).__name__}) — chat restricts this message type, skipping")
                             elif isinstance(e, ValueError) and "Could not find the input entity" in err_str:
                                 self._mark_target_not_working(mailing_id, target_obj.id)
                                 cycle_errors += 1
