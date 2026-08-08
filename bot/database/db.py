@@ -1,5 +1,6 @@
 import asyncio
 import json
+import logging
 import os
 import secrets
 import time
@@ -10,6 +11,8 @@ from dataclasses import dataclass, field
 
 from .models import SCHEMA
 from ..utils.time_utils import now_moscow
+
+logger = logging.getLogger(__name__)
 
 _SETTINGS_TTL = 60      # seconds — settings/prices
 _CHANNELS_TTL = 300     # seconds — required channels list
@@ -405,7 +408,16 @@ class Database:
             return None
         if isinstance(value, datetime):
             return value
-        return datetime.fromisoformat(value)
+        try:
+            return datetime.fromisoformat(value)
+        except (ValueError, TypeError) as e:
+            # A single malformed timestamp in the DB (legacy data from an
+            # older code path, manual edit, etc.) must not crash every
+            # handler that happens to read the row it's in — treat it as
+            # unset instead of raising, but log it since silently losing a
+            # subscription_end/etc. is itself worth noticing and fixing.
+            logger.warning(f"Failed to parse datetime value {value!r}: {e}")
+            return None
 
     def _row_to_user(self, row) -> "User":
         keys = row.keys()
