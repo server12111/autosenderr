@@ -287,6 +287,7 @@ class Database:
         await _add_col("accounts", "proxy",                        "TEXT")
         await _add_col("accounts", "auto_subscribe_sponsors",      "BOOLEAN DEFAULT FALSE")
         await _add_col("accounts", "proxy_pool_id",                "INTEGER DEFAULT NULL")
+        await _add_col("accounts", "proxy_problem_notified",       "INTEGER DEFAULT 0")
         await self._conn.execute("""
             CREATE TABLE IF NOT EXISTS proxy_pool (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -737,6 +738,25 @@ class Database:
     async def update_account_proxy(self, account_id: int, proxy: Optional[str], proxy_pool_id: Optional[int] = None):
         await self._conn.execute(
             "UPDATE accounts SET proxy = ?, proxy_pool_id = ? WHERE id = ?", (proxy, proxy_pool_id, account_id)
+        )
+        await self._conn.commit()
+
+    async def is_proxy_problem_notified(self, account_id: int) -> bool:
+        async with self._conn.execute(
+            "SELECT proxy_problem_notified FROM accounts WHERE id = ?", (account_id,)
+        ) as cur:
+            row = await cur.fetchone()
+            return bool(row["proxy_problem_notified"]) if row else False
+
+    async def mark_proxy_problem_notified(self, account_id: int):
+        await self._conn.execute(
+            "UPDATE accounts SET proxy_problem_notified = 1 WHERE id = ?", (account_id,)
+        )
+        await self._conn.commit()
+
+    async def clear_proxy_problem_notified(self, account_id: int):
+        await self._conn.execute(
+            "UPDATE accounts SET proxy_problem_notified = 0 WHERE id = ? AND proxy_problem_notified = 1", (account_id,)
         )
         await self._conn.commit()
 

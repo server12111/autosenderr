@@ -1240,6 +1240,7 @@ async def process_set_proxy(message: Message, state: FSMContext, db: Database, u
 
     if text.lower() in ("удалить", "remove", "delete"):
         await db.update_account_proxy(account_id, None)
+        await db.clear_proxy_problem_notified(account_id)
         await state.clear()
         account = await db.get_account_for_user(account_id, message.from_user.id)
         # Restart client without proxy
@@ -1290,6 +1291,10 @@ async def process_set_proxy(message: Message, state: FSMContext, db: Database, u
         return
 
     await db.update_account_proxy(account_id, text)
+    # A previously-notified proxy problem was about the OLD proxy — if this
+    # new one also turns out to be broken, that's a distinct failure the
+    # owner should be told about too, not silently suppressed by the old flag.
+    await db.clear_proxy_problem_notified(account_id)
     await state.clear()
 
     account = await db.get_account_for_user(account_id, message.from_user.id)

@@ -91,7 +91,6 @@ class UserbotManager:
         self._sponsor_check_handler: Optional[Callable] = None
         self._client_locks: dict[int, asyncio.Lock] = {}
         self._proxy_failure_lock = asyncio.Lock()
-        self._proxy_problem_notified: set[int] = set()  # account_ids already notified for their current own-proxy failure
         self._account_proxy_failure_callback: Optional[Callable] = None
 
     def set_message_handler(self, handler: Callable):
@@ -166,7 +165,7 @@ class UserbotManager:
             me = await client.get_me()
             self._me_ids[account.id] = me.id
             self._clients[account.id] = client
-            self._proxy_problem_notified.discard(account.id)
+            await self.db.clear_proxy_problem_notified(account.id)
 
             fresh_session = client.session.save()
             if fresh_session != account.session_string:
@@ -245,10 +244,13 @@ class UserbotManager:
         # get_client() would otherwise keep retrying every cycle forever —
         # notify once, stop the mailing(s) using this account, and wait for
         # the owner to fix the proxy and restart manually instead of
-        # spamming the same message on every retry.
-        if account.id in self._proxy_problem_notified:
+        # spamming the same message on every retry. Persisted in the DB
+        # (not just in-memory) — a bot restart, which happens on every
+        # deploy, must not forget this account was already notified and
+        # re-send the same alert again on the very next reconnect attempt.
+        if await self.db.is_proxy_problem_notified(account.id):
             return
-        self._proxy_problem_notified.add(account.id)
+        await self.db.mark_proxy_problem_notified(account.id)
 
         if self._account_proxy_failure_callback:
             try:
