@@ -1,3 +1,4 @@
+import asyncio
 import json
 import html
 import re
@@ -1109,7 +1110,9 @@ async def process_edit_folder(
     loading_msg = await message.answer(pe("⏳ Загружаем чаты из папки..."), parse_mode="HTML")
     try:
         from telethon.tl.functions.chatlists import CheckChatlistInviteRequest
-        result = await client(CheckChatlistInviteRequest(slug=slug))
+        # Unbounded before — a slow/unresponsive Telegram RPC (or a flaky
+        # proxy) left this hanging forever on "Загружаем чаты из папки...".
+        result = await asyncio.wait_for(client(CheckChatlistInviteRequest(slug=slug)), timeout=30)
 
         chats = getattr(result, 'chats', [])
         if not chats:
@@ -2030,7 +2033,9 @@ async def process_create_folder(
     loading_msg = await message.answer(pe("⏳ Загружаем чаты из папки..."), parse_mode="HTML")
     try:
         from telethon.tl.functions.chatlists import CheckChatlistInviteRequest
-        result = await client(CheckChatlistInviteRequest(slug=slug))
+        # Unbounded before — a slow/unresponsive Telegram RPC (or a flaky
+        # proxy) left this hanging forever on "Загружаем чаты из папки...".
+        result = await asyncio.wait_for(client(CheckChatlistInviteRequest(slug=slug)), timeout=30)
 
         chats = getattr(result, 'chats', [])
         if not chats:
@@ -2487,17 +2492,17 @@ async def _is_real_forum(client, target) -> bool:
     """True only if the chat has actual custom topics (not just General). Requires membership."""
     try:
         from telethon.tl.functions.channels import GetForumTopicsRequest
-        entity = await client.get_entity(target)
+        entity = await asyncio.wait_for(client.get_entity(target), timeout=10)
         if not getattr(entity, 'forum', False):
             return False
-        result = await client(GetForumTopicsRequest(
+        result = await asyncio.wait_for(client(GetForumTopicsRequest(
             channel=entity,
             q='',
             offset_date=0,
             offset_id=0,
             offset_topic=0,
             limit=10,
-        ))
+        )), timeout=10)
         custom_topics = [t for t in result.topics if t.id != 1]
         return len(custom_topics) > 0
     except Exception:
@@ -2507,7 +2512,7 @@ async def _is_real_forum(client, target) -> bool:
 async def _has_forum_flag(client, target) -> bool:
     """Lightweight check — only entity.forum flag, works without membership."""
     try:
-        entity = await client.get_entity(target)
+        entity = await asyncio.wait_for(client.get_entity(target), timeout=10)
         return bool(getattr(entity, 'forum', False))
     except Exception:
         return False

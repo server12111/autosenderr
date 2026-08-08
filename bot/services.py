@@ -860,6 +860,7 @@ class MailingService:
         self._mailing_locks: dict[int, asyncio.Lock] = {}
         self._working_targets: dict[int, set[int]] = {}
         self._message_rotation: dict[int, int] = {}  # mailing_id -> next message index (round-robin, not random)
+        self._flood_until: dict[int, datetime] = {}  # account_id -> when its current FloodWait expires
 
     async def start(self):
         self._running = True
@@ -897,7 +898,16 @@ class MailingService:
         task = self._tasks.pop(mailing_id, None)
         if task and task is not asyncio.current_task():
             task.cancel()
-            await asyncio.gather(task, return_exceptions=True)
+            try:
+                # is_active is already False in the DB above, so even in the
+                # worst case where the loop task is stuck on some unbounded
+                # Telethon call and doesn't finish cancelling in time, giving
+                # up on waiting here is safe — it'll not be found on the next
+                # get_mailing() check whenever it does unwind, and the user
+                # isn't left staring at a callback that never responds.
+                await asyncio.wait_for(asyncio.gather(task, return_exceptions=True), timeout=10)
+            except asyncio.TimeoutError:
+                logger.warning(f"Mailing {mailing_id}: task didn't finish cancelling within 10s, proceeding anyway")
         self._stagger_until.pop(mailing_id, None)
         self._working_targets.pop(mailing_id, None)
         self._message_rotation.pop(mailing_id, None)
@@ -905,6 +915,18 @@ class MailingService:
     async def stop_user_mailings(self, user_id: int):
         """Stop all active mailings for a user (called when subscription expires)."""
         mailings = await self.db.get_user_active_mailings(user_id)
+        for m in mailings:
+            await self.stop_mailing(m.id)
+        return len(mailings)
+
+    async def stop_mailings_for_account(self, account_id: int):
+        """Stop every active mailing using this account — called when its
+        own (not pool) proxy fails. Unlike a flood wait, a dead proxy has
+        no known end time, so retrying every cycle forever would just keep
+        generating failed connection attempts and re-notifying; stopping
+        outright and letting the owner restart once they've fixed the
+        proxy is the safer default."""
+        mailings = await self.db.get_active_mailings_by_account(account_id)
         for m in mailings:
             await self.stop_mailing(m.id)
         return len(mailings)
@@ -1015,12 +1037,21 @@ class MailingService:
         return sent
 
     async def _notify_flood_wait(self, user, account_id: int, seconds: int):
+        finish_at = now_moscow() + timedelta(seconds=seconds)
+        # Only notify once per flood-wait episode — the mailing loop checks
+        # _flood_until itself and skips this account entirely until it
+        # expires, so retrying (and re-notifying) every cycle would just
+        # spam the same alert until the wait is actually over.
+        already_flooded = self._flood_until.get(account_id)
+        self._flood_until[account_id] = finish_at
+        if already_flooded and already_flooded > now_moscow():
+            return
+
         notify = getattr(self.userbot_manager, '_bot_notify_callback', None)
         if not notify or not user:
             return
         try:
             account_obj = await self.db.get_account(account_id)
-            finish_at = now_moscow() + timedelta(seconds=seconds)
             await notify(
                 user.telegram_id,
                 pe(
@@ -1028,7 +1059,7 @@ class MailingService:
                     f"Аккаунт: <b>{html.escape(str(account_obj.display_name if account_obj else account_id))}</b>\n"
                     f"Длительность: <b>{seconds} сек.</b>\n"
                     f"Окончание (МСК): <b>{finish_at.strftime('%d.%m.%Y %H:%M:%S')}</b>\n\n"
-                    "Рекомендуется сменить аккаунт."
+                    "Рассылка с этого аккаунта возобновится автоматически, когда ограничение снимется."
                 ),
             )
         except Exception:
@@ -1234,6 +1265,20 @@ class MailingService:
                         self._clear_working_targets(mailing_id)
                         await asyncio.sleep(60)
                         continue
+
+                    flood_until = self._flood_until.get(mailing.account_id)
+                    if flood_until:
+                        now_check = now_moscow()
+                        if now_check < flood_until:
+                            self._clear_working_targets(mailing_id)
+                            # Don't even attempt to connect/send until the
+                            # known FloodWait expires — check back
+                            # periodically rather than sleeping the whole
+                            # remaining duration in one shot, so the loop
+                            # stays responsive to stop_mailing()/cancellation.
+                            await asyncio.sleep(min((flood_until - now_check).total_seconds(), 60))
+                            continue
+                        del self._flood_until[mailing.account_id]
 
                     messages = await self.db.get_mailing_messages(mailing_id)
                     targets = await self.db.get_mailing_targets(mailing_id)

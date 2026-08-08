@@ -182,6 +182,7 @@ async def main():
     userbot_manager.set_group_reply_handler(autoresponder_service.handle_group_reply)
     userbot_manager.set_sponsor_check_handler(autoresponder_service.handle_sponsor_check)
     userbot_manager.set_bot_notify_callback(notify_user)
+    userbot_manager.set_account_proxy_failure_callback(mailing_service.stop_mailings_for_account)
 
     dp = Dispatcher(storage=MemoryStorage())
 

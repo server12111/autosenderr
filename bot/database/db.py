@@ -1129,6 +1129,13 @@ class Database:
             rows = await cur.fetchall()
             return [self._row_to_mailing(r) for r in rows]
 
+    async def get_active_mailings_by_account(self, account_id: int) -> list[Mailing]:
+        async with self._conn.execute(
+            "SELECT * FROM mailings WHERE account_id = ? AND is_active = 1", (account_id,)
+        ) as cur:
+            rows = await cur.fetchall()
+            return [self._row_to_mailing(r) for r in rows]
+
     async def get_user_active_mailings(self, user_id: int) -> list[Mailing]:
         async with self._conn.execute(
             "SELECT * FROM mailings WHERE user_id = ? AND is_active = 1", (user_id,)

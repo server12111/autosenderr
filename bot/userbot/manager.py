@@ -91,6 +91,8 @@ class UserbotManager:
         self._sponsor_check_handler: Optional[Callable] = None
         self._client_locks: dict[int, asyncio.Lock] = {}
         self._proxy_failure_lock = asyncio.Lock()
+        self._proxy_problem_notified: set[int] = set()  # account_ids already notified for their current own-proxy failure
+        self._account_proxy_failure_callback: Optional[Callable] = None
 
     def set_message_handler(self, handler: Callable):
         self._message_handler = handler
@@ -100,6 +102,11 @@ class UserbotManager:
 
     def set_bot_notify_callback(self, callback: Callable):
         self._bot_notify_callback = callback
+
+    def set_account_proxy_failure_callback(self, callback: Callable):
+        """callback(account_id) is awaited once (not on every retry) the
+        first time an account's own proxy fails to connect."""
+        self._account_proxy_failure_callback = callback
 
     def set_sponsor_check_handler(self, handler: Callable):
         self._sponsor_check_handler = handler
@@ -159,6 +166,7 @@ class UserbotManager:
             me = await client.get_me()
             self._me_ids[account.id] = me.id
             self._clients[account.id] = client
+            self._proxy_problem_notified.discard(account.id)
 
             fresh_session = client.session.save()
             if fresh_session != account.session_string:
@@ -233,6 +241,21 @@ class UserbotManager:
             return None
 
     async def _notify_proxy_problem(self, account: Account, error_text: str):
+        # A dead own-proxy has no known end time (unlike a FloodWait), so
+        # get_client() would otherwise keep retrying every cycle forever —
+        # notify once, stop the mailing(s) using this account, and wait for
+        # the owner to fix the proxy and restart manually instead of
+        # spamming the same message on every retry.
+        if account.id in self._proxy_problem_notified:
+            return
+        self._proxy_problem_notified.add(account.id)
+
+        if self._account_proxy_failure_callback:
+            try:
+                await self._account_proxy_failure_callback(account.id)
+            except Exception as e:
+                logger.error(f"Account proxy failure callback failed for account {account.id}: {e}")
+
         if not self._bot_notify_callback:
             return
         try:
@@ -251,11 +274,11 @@ class UserbotManager:
                     f"⚠️ <b>Проблема с прокси!</b>\n\n"
                     f"📱 Аккаунт: <b>{html.escape(account.display_name)}</b>\n"
                     f"❌ Не удалось подключиться через прокси <code>{html.escape(proxy_display)}</code>.\n\n"
-                    f"Аккаунт временно недоступен — рассылки через него не работают.\n\n"
+                    f"Рассылка через этот аккаунт остановлена.\n\n"
                     f"Чтобы возобновить работу:\n"
                     f"1. Зайдите в раздел «Аккаунты»\n"
                     f"2. Откройте аккаунт и установите рабочий прокси\n"
-                    f"3. Перезапустите бота"
+                    f"3. Запустите рассылку заново"
                 ),
             )
         except Exception as ne:
@@ -348,31 +371,47 @@ class UserbotManager:
                 logger.info(f"Stopped client for account {account_id}")
 
     async def logout_and_stop(self, account):
-        lock = self._client_locks.setdefault(account.id, asyncio.Lock())
-        async with lock:
-            if account.id in self._clients:
-                client = self._clients[account.id]
-                try:
-                    await client.log_out()
-                except Exception:
-                    pass
-                await client.disconnect()
-                del self._clients[account.id]
-                self._me_ids.pop(account.id, None)
-            else:
-                try:
-                    proxy = _parse_proxy(account.proxy)
-                    client = TelegramClient(
-                        StringSession(account.session_string), account.api_id, account.api_hash,
-                        proxy=proxy,
-                        connection_retries=3,
-                        retry_delay=5,
-                    )
-                    await client.connect()
-                    await client.log_out()
+        async def _do():
+            lock = self._client_locks.setdefault(account.id, asyncio.Lock())
+            async with lock:
+                if account.id in self._clients:
+                    client = self._clients[account.id]
+                    try:
+                        await client.log_out()
+                    except Exception:
+                        pass
                     await client.disconnect()
-                except Exception as e:
-                    logger.warning(f"Failed to log out account {account.id}: {e}")
+                    del self._clients[account.id]
+                    self._me_ids.pop(account.id, None)
+                else:
+                    try:
+                        proxy = _parse_proxy(account.proxy)
+                        client = TelegramClient(
+                            StringSession(account.session_string), account.api_id, account.api_hash,
+                            proxy=proxy,
+                            connection_retries=3,
+                            retry_delay=5,
+                        )
+                        await client.connect()
+                        await client.log_out()
+                        await client.disconnect()
+                    except Exception as e:
+                        logger.warning(f"Failed to log out account {account.id}: {e}")
+
+        try:
+            # The account lock can be held for a long time by the daily
+            # DeadAccountCleanupService sweep verifying this same account
+            # against a slow/dead proxy (up to ~5 connection retries).
+            # Without a bound here, a user deleting that exact account
+            # would just hang — the DB-side deletion (delete_account) still
+            # proceeds regardless of the outcome here, so it's safe to give
+            # up on the Telegram-side logout rather than block on it.
+            await asyncio.wait_for(_do(), timeout=20)
+        except asyncio.TimeoutError:
+            logger.warning(
+                f"logout_and_stop: timed out waiting for account {account.id} "
+                f"(likely busy with a background check) — proceeding without confirmed Telegram-side logout"
+            )
 
     async def get_client(self, account_id: int) -> Optional[TelegramClient]:
         if account_id in self._clients:
