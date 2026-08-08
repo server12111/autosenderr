@@ -1129,6 +1129,7 @@ class MailingService:
         reply_to=None,
         add_signature: bool = False,
         hidden_tag_user_ids: Optional[list[int]] = None,
+        force_text_only: bool = False,
     ) -> None:
         """Send one mailing message to target (forward / text / photo)."""
         if msg.is_forward:
@@ -1201,6 +1202,16 @@ class MailingService:
                 text = base_text + ("\u2063" * len(hidden_entities))
                 entities = (entities or []) + hidden_entities
         eff_pm = None if entities else ("html" if dice_emoji else pm)
+        if force_text_only:
+            # Used as a fallback when the chat rejected this specific media
+            # type (e.g. ChatSendPhotosForbiddenError) but plain text is
+            # still likely allowed — send just the caption/text instead of
+            # skipping the target entirely.
+            if not text and not entities:
+                raise ValueError("Mailing message has no text to fall back to")
+            await client.send_message(target, text or "", parse_mode=eff_pm,
+                                      formatting_entities=entities, reply_to=reply_to)
+            return
         if dice_emoji:
             from telethon.tl.types import InputMediaDice
 
@@ -1226,6 +1237,26 @@ class MailingService:
                 raise ValueError(f"Mailing message has no text and no photos")
             await client.send_message(target, text or "", parse_mode=eff_pm,
                                       formatting_entities=entities, reply_to=reply_to)
+
+    async def _retry_as_text_only(
+        self, client, target, msg, pm, reply_to, add_signature, hidden_tag_user_ids
+    ) -> bool:
+        """After a chat rejects a specific media type, try sending just the
+        text/caption instead of giving up on the target entirely — many
+        chats (especially ones applying anti-spam restrictions to
+        newly-joined accounts) still allow plain text even when
+        photos/videos/docs are blocked. Returns False (no exception raised)
+        if there's nothing to fall back to or the text send also fails."""
+        try:
+            await self._send_msg(
+                client, target, msg, pm,
+                reply_to=reply_to, add_signature=add_signature,
+                hidden_tag_user_ids=hidden_tag_user_ids,
+                force_text_only=True,
+            )
+            return True
+        except Exception:
+            return False
 
     async def _start_mailing_task(self, mailing_id: int):
         lock = self._mailing_locks.setdefault(mailing_id, asyncio.Lock())
@@ -1551,16 +1582,37 @@ class MailingService:
                             # gate handles the actual waiting from here.
                             break
                         except (ChatSendMediaForbiddenError, ChatGuestSendForbiddenError, RightForbiddenError, ChatAdminRequiredError) as e:
-                            self._mark_target_not_working(mailing_id, target_obj.id)
-                            await self.db.add_error_log(
-                                user_id=mailing.user_id,
-                                error_type=type(e).__name__,
-                                error_text=str(e)[:300],
-                                account_id=current_account_id,
-                                mailing_id=mailing_id,
-                                chat_identifier=target,
-                            )
-                            logger.warning(f"Mailing {mailing_id}: send forbidden in '{target}' ({type(e).__name__}) — chat restricts this message type, skipping")
+                            # ChatSendMediaForbiddenError specifically means the
+                            # chat rejected the PHOTO/VIDEO, not the account's
+                            # right to post at all — plain text is often still
+                            # allowed (common for anti-spam restrictions on
+                            # newly-joined accounts), so try that instead of
+                            # skipping the target outright. The other three
+                            # errors here mean broader restrictions (no send
+                            # rights at all / guest / admin required) where a
+                            # text-only retry would just fail the same way.
+                            fallback_sent = False
+                            if isinstance(e, ChatSendMediaForbiddenError):
+                                fallback_sent = await self._retry_as_text_only(
+                                    target_client, target, msg, pm,
+                                    reply_to_id, add_sig, hidden_tag_user_ids,
+                                )
+                            if fallback_sent:
+                                await self.db.update_target_last_sent(target_obj.id, current_account_id)
+                                self._mark_target_working(mailing_id, target_obj.id)
+                                sent_any = True
+                                logger.info(f"Mailing {mailing_id}: media forbidden in '{target}', sent text-only fallback instead")
+                            else:
+                                self._mark_target_not_working(mailing_id, target_obj.id)
+                                await self.db.add_error_log(
+                                    user_id=mailing.user_id,
+                                    error_type=type(e).__name__,
+                                    error_text=str(e)[:300],
+                                    account_id=current_account_id,
+                                    mailing_id=mailing_id,
+                                    chat_identifier=target,
+                                )
+                                logger.warning(f"Mailing {mailing_id}: send forbidden in '{target}' ({type(e).__name__}) — chat restricts this message type, skipping")
                         except Exception as e:
                             err_str = str(e)
                             if isinstance(e, ValueError) and isinstance(target, str) and "t.me/+" in target and "not part of" in err_str:
@@ -1601,16 +1653,29 @@ class MailingService:
                                 # instead of isinstance() catches all of them
                                 # regardless of the exact installed version,
                                 # same treatment as the known ChatSendMediaForbiddenError.
-                                self._mark_target_not_working(mailing_id, target_obj.id)
-                                await self.db.add_error_log(
-                                    user_id=mailing.user_id,
-                                    error_type=type(e).__name__,
-                                    error_text=err_str[:300],
-                                    account_id=current_account_id,
-                                    mailing_id=mailing_id,
-                                    chat_identifier=target,
+                                # Try a text-only fallback first — see the
+                                # comment on the ChatSendMediaForbiddenError
+                                # branch above for why.
+                                fallback_sent = await self._retry_as_text_only(
+                                    target_client, target, msg, pm,
+                                    reply_to_id, add_sig, hidden_tag_user_ids,
                                 )
-                                logger.warning(f"Mailing {mailing_id}: send forbidden in '{target}' ({type(e).__name__}) — chat restricts this message type, skipping")
+                                if fallback_sent:
+                                    await self.db.update_target_last_sent(target_obj.id, current_account_id)
+                                    self._mark_target_working(mailing_id, target_obj.id)
+                                    sent_any = True
+                                    logger.info(f"Mailing {mailing_id}: {type(e).__name__} in '{target}', sent text-only fallback instead")
+                                else:
+                                    self._mark_target_not_working(mailing_id, target_obj.id)
+                                    await self.db.add_error_log(
+                                        user_id=mailing.user_id,
+                                        error_type=type(e).__name__,
+                                        error_text=err_str[:300],
+                                        account_id=current_account_id,
+                                        mailing_id=mailing_id,
+                                        chat_identifier=target,
+                                    )
+                                    logger.warning(f"Mailing {mailing_id}: send forbidden in '{target}' ({type(e).__name__}) — chat restricts this message type, skipping")
                             elif isinstance(e, ValueError) and "Could not find the input entity" in err_str:
                                 self._mark_target_not_working(mailing_id, target_obj.id)
                                 cycle_errors += 1
