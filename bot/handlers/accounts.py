@@ -783,6 +783,48 @@ async def process_code(message: Message, state: FSMContext, db: Database):
     await _confirm_code(message, state, db)
 
 
+async def _persist_new_account(
+    db: Database,
+    telegram_user_id: int,
+    phone: str,
+    api_id: int,
+    api_hash: str,
+    session_string: str,
+    proxy_str: Optional[str],
+    auto_proxy: Optional[str],
+    auto_proxy_pool_id: Optional[int],
+):
+    """Save the account row after a successful Telethon sign_in.
+
+    By this point the Telegram session is already live — discarding it on a
+    transient DB hiccup (e.g. SQLite busy under load from 260+ concurrently
+    writing accounts) would strand a session the bot has no record of and no
+    way to recover. Retry a few times before giving up.
+    """
+    last_exc = None
+    for attempt in range(3):
+        try:
+            user = await db.get_user(telegram_user_id)
+            account_id = await db.create_account(
+                user_id=user.id,
+                phone=phone,
+                api_id=api_id,
+                api_hash=api_hash,
+                session_string=session_string,
+            )
+            if account_id:
+                if proxy_str:
+                    await db.update_account_proxy(account_id, proxy_str)
+                else:
+                    await db.update_account_proxy(account_id, auto_proxy, proxy_pool_id=auto_proxy_pool_id)
+            return user, account_id
+        except Exception as e:
+            last_exc = e
+            if attempt < 2:
+                await asyncio.sleep(1 + attempt)
+    raise last_exc
+
+
 @router.message(AddAccountStates.waiting_password)
 async def process_password(message: Message, state: FSMContext, db: Database):
     if not message.text:
@@ -817,28 +859,18 @@ async def process_password(message: Message, state: FSMContext, db: Database):
         session_string = client.session.save()
         await client.disconnect()
 
-        user = await db.get_user(message.from_user.id)
-        account_id = await db.create_account(
-            user_id=user.id,
-            phone=data["phone"],
-            api_id=data["api_id"],
-            api_hash=data["api_hash"],
-            session_string=session_string,
+        user, account_id = await _persist_new_account(
+            db,
+            message.from_user.id,
+            data["phone"],
+            data["api_id"],
+            data["api_hash"],
+            session_string,
+            data.get("proxy"),
+            data.get("auto_proxy"),
+            data.get("auto_proxy_pool_id"),
         )
-        proxy_str = data.get("proxy")
-        if account_id:
-            if proxy_str:
-                await db.update_account_proxy(account_id, proxy_str)
-            else:
-                # Reuse the exact proxy already picked (and connected
-                # through) in _connect_and_send_code — re-picking here could
-                # land on a different pool proxy than the one actually used
-                # for the login itself.
-                await db.update_account_proxy(
-                    account_id, data.get("auto_proxy"), proxy_pool_id=data.get("auto_proxy_pool_id")
-                )
 
-        user = await db.get_user(message.from_user.id)
         accounts = await db.get_user_accounts(user.id)
         await message.answer(
             pe(f"✅ Аккаунт {html.escape(data['phone'])} успешно добавлен!"),
@@ -1025,28 +1057,18 @@ async def _confirm_code(event, state: FSMContext, db: Database):
         session_string = client.session.save()
         await client.disconnect()
 
-        user = await db.get_user(user_id)
-        account_id = await db.create_account(
-            user_id=user.id,
-            phone=data["phone"],
-            api_id=data["api_id"],
-            api_hash=data["api_hash"],
-            session_string=session_string,
+        user, account_id = await _persist_new_account(
+            db,
+            user_id,
+            data["phone"],
+            data["api_id"],
+            data["api_hash"],
+            session_string,
+            data.get("proxy"),
+            data.get("auto_proxy"),
+            data.get("auto_proxy_pool_id"),
         )
-        proxy_str = data.get("proxy")
-        if account_id:
-            if proxy_str:
-                await db.update_account_proxy(account_id, proxy_str)
-            else:
-                # Reuse the exact proxy already picked (and connected
-                # through) in _connect_and_send_code — re-picking here could
-                # land on a different pool proxy than the one actually used
-                # for the login itself.
-                await db.update_account_proxy(
-                    account_id, data.get("auto_proxy"), proxy_pool_id=data.get("auto_proxy_pool_id")
-                )
 
-        user = await db.get_user(user_id)
         accounts = await db.get_user_accounts(user.id)
         await _edit_code_message(event, state,
             pe(f"✅ Аккаунт {html.escape(data['phone'])} успешно добавлен!"),
@@ -1129,7 +1151,19 @@ async def callback_confirm_delete_account(
             await mailing_service.stop_mailing(mailing.id)
 
     await userbot_manager.logout_and_stop(account)
-    await db.delete_account(account_id)
+    # logout_and_stop already tore down the live Telegram session — retry the
+    # DB write a few times instead of leaving a stranded account row (still
+    # is_active=1, session dead) behind a transient DB error.
+    for attempt in range(3):
+        try:
+            await db.delete_account(account_id)
+            break
+        except Exception as e:
+            if attempt < 2:
+                logger.warning(f"delete_account({account_id}) failed, retrying: {e}")
+                await asyncio.sleep(0.5 * (attempt + 1))
+            else:
+                logger.error(f"delete_account({account_id}) failed after retries: {e}", exc_info=True)
 
     user = await db.get_user(callback.from_user.id)
     accounts = await db.get_user_accounts(user.id)
