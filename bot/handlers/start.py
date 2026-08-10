@@ -1,3 +1,4 @@
+import asyncio
 import html
 import os
 
@@ -19,6 +20,25 @@ from ..config import config
 from ..utils.premium_emoji import pe
 
 router = Router()
+
+
+async def _call_with_db_retry(coro_fn, retries: int = 2):
+    """Retry a read/idempotent DB call a couple of times on a transient
+    failure (e.g. "database is locked" under write contention from 260+
+    concurrently-active userbot accounts) before giving up. /start is the
+    single most-hit path in the whole bot — every user's very first
+    interaction goes through it — so unlike most handlers it's worth this
+    extra resilience even though the busy_timeout on the connection itself
+    already covers the common case."""
+    last_exc = None
+    for attempt in range(retries + 1):
+        try:
+            return await coro_fn()
+        except Exception as e:
+            last_exc = e
+            if attempt < retries:
+                await asyncio.sleep(0.5 + attempt * 0.5)
+    raise last_exc
 
 
 async def check_channels_subscription(bot, user_id: int, channels) -> list:
@@ -63,8 +83,8 @@ async def cmd_start(message: Message, db: Database, state: FSMContext):
         if param.startswith("ref_"):
             ref_code = param[4:]
 
-    user, is_new = await db.get_or_create_user(
-        message.from_user.id, message.from_user.username
+    user, is_new = await _call_with_db_retry(
+        lambda: db.get_or_create_user(message.from_user.id, message.from_user.username)
     )
 
     # Set referral if first join and ref_code valid
@@ -74,7 +94,7 @@ async def cmd_start(message: Message, db: Database, state: FSMContext):
             await db.set_referred_by(user.id, referrer.id)
 
     # Check required channel subscriptions
-    channels = await db.get_required_channels()
+    channels = await _call_with_db_retry(lambda: db.get_required_channels())
     if channels:
         not_subscribed = await check_channels_subscription(message.bot, message.from_user.id, channels)
         if not_subscribed:
