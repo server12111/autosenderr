@@ -863,13 +863,19 @@ async def _persist_new_account(
     # NewMessage handler registered at all) until the next full bot restart,
     # an admin manually restarting clients, or the user happening to touch
     # the proxy setting — best-effort only, a failure here doesn't undo the
-    # account creation that already succeeded.
-    account = await db.get_account(account_id)
-    if account:
-        try:
+    # account creation that already succeeded. Both the lookup and the
+    # start are inside ONE try/except: the account row is already saved by
+    # this point, so nothing from here on should be able to bubble up and
+    # make an already-successful creation look like it failed (that
+    # exact bug — get_account() itself hitting a transient DB error with
+    # no protection — was reported as "session appeared but bot said
+    # error" right after this block was first added).
+    try:
+        account = await db.get_account(account_id)
+        if account:
             await asyncio.wait_for(userbot_manager.start_client(account), timeout=30)
-        except Exception as e:
-            logger.warning(f"Failed to start client for newly added account {account_id}: {e}")
+    except Exception as e:
+        logger.warning(f"Failed to start client for newly added account {account_id}: {e}")
 
     return user, account_id
 
