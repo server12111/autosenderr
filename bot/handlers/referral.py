@@ -8,6 +8,7 @@ from aiogram.fsm.state import State, StatesGroup
 from ..database.db import Database
 from ..keyboards.inline import referral_keyboard, withdraw_wallet_keyboard, main_menu_keyboard
 from ..utils.premium_emoji import pe
+from ..utils.tg import safe_edit
 
 router = Router()
 
@@ -46,7 +47,7 @@ async def callback_referral(callback: CallbackQuery, db: Database, state: FSMCon
         "Вы получаете процент от каждой покупки подписки вашими рефералами!"
     )
 
-    await callback.message.edit_text(pe(text), parse_mode="HTML", reply_markup=referral_keyboard(can_withdraw))
+    await safe_edit(callback.message, pe(text), parse_mode="HTML", reply_markup=referral_keyboard(can_withdraw))
     await callback.answer()
 
 
@@ -63,7 +64,8 @@ async def callback_withdraw(callback: CallbackQuery, state: FSMContext, db: Data
         return
 
     await state.set_state(ReferralStates.waiting_wallet)
-    await callback.message.edit_text(
+    await safe_edit(
+        callback.message,
         pe(f"💸 Вывод реферального баланса\n\n"
         f"Сумма к выводу: <b>{user.ref_balance:.2f} USDT</b>\n\n"
         "Введите адрес USDT кошелька (TRC20):"),

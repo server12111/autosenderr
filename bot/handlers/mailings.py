@@ -31,6 +31,7 @@ from ..keyboards.inline import (
     mailing_messages_keyboard,
     mailing_targets_keyboard,
     TARGETS_PAGE_SIZE,
+    LIST_PAGE_SIZE,
     select_account_keyboard,
     mailing_creation_messages_keyboard,
     mailing_creation_targets_keyboard,
@@ -207,6 +208,48 @@ class EditMailingStates(StatesGroup):
     waiting_thread_id_for_target = State()
 
 
+def _mailings_list_text(mailings: list, page: int, header: str, empty_text: str) -> str:
+    """Per-page mailing listing — capped to LIST_PAGE_SIZE lines so a large
+    campaign list can't exceed Telegram's ~4096-char message text limit,
+    matching the keyboard's own pagination."""
+    total_pages = max(1, (len(mailings) + LIST_PAGE_SIZE - 1) // LIST_PAGE_SIZE)
+    page = max(0, min(page, total_pages - 1))
+    page_mailings = mailings[page * LIST_PAGE_SIZE:(page + 1) * LIST_PAGE_SIZE]
+
+    text = f"{header}\n\n"
+    if page_mailings:
+        for m in page_mailings:
+            status = "🟢 Активна" if m.is_active else "🔴 Остановлена"
+            text += f"• {html.escape(m.name)} - {status}\n"
+    else:
+        text += f"{empty_text}\n"
+    if total_pages > 1:
+        text += f"\nСтраница {page + 1}/{total_pages}."
+    text += "\nВыберите рассылку или создайте новую:"
+    return text
+
+
+@router.callback_query(F.data.startswith("account_mailings_page:"))
+async def callback_account_mailings_page(callback: CallbackQuery, db: Database):
+    _, account_id_str, page_str = callback.data.split(":")
+    account_id = int(account_id_str)
+    page = int(page_str)
+    user = await db.get_user(callback.from_user.id)
+    all_mailings = await db.get_user_mailings(user.id)
+    mailings = [m for m in all_mailings if m.account_id == account_id]
+
+    account = await db.get_account_for_user(account_id, callback.from_user.id)
+    name = html.escape(account.display_name) if account else "аккаунт"
+
+    await safe_edit(
+        callback.message,
+        pe(_mailings_list_text(mailings, page, f"📋 Рассылки аккаунта {name}:", "Рассылок для этого аккаунта нет.")),
+        parse_mode="HTML",
+        reply_markup=mailings_keyboard(mailings, page=page),
+    )
+    await callback.answer()
+
+
 @router.callback_query(F.data.startswith("account_mailings:"))
 async def callback_account_mailings(callback: CallbackQuery, db: Database):
     """Show mailings for a specific account."""
@@ -218,16 +261,25 @@ async def callback_account_mailings(callback: CallbackQuery, db: Database):
     account = await db.get_account_for_user(account_id, callback.from_user.id)
     name = html.escape(account.display_name) if account else "аккаунт"
 
-    text = f"📋 Рассылки аккаунта {name}:\n\n"
-    if mailings:
-        for m in mailings:
-            status = "🟢 Активна" if m.is_active else "🔴 Остановлена"
-            text += f"• {html.escape(m.name)} - {status}\n"
-    else:
-        text += "Рассылок для этого аккаунта нет.\n"
+    await callback.message.edit_text(
+        pe(_mailings_list_text(mailings, 0, f"📋 Рассылки аккаунта {name}:", "Рассылок для этого аккаунта нет.")),
+        parse_mode="HTML",
+        reply_markup=mailings_keyboard(mailings, page=0),
+    )
+    await callback.answer()
 
-    text += "\nВыберите рассылку или создайте новую:"
-    await callback.message.edit_text(pe(text), parse_mode="HTML", reply_markup=mailings_keyboard(mailings))
+
+@router.callback_query(F.data.startswith("mailings_page:"))
+async def callback_mailings_page(callback: CallbackQuery, db: Database):
+    page = int(callback.data.split(":")[1])
+    user = await db.get_user(callback.from_user.id)
+    mailings = await db.get_user_mailings(user.id)
+    await safe_edit(
+        callback.message,
+        pe(_mailings_list_text(mailings, page, "📋 Ваши рассылки:", "У вас пока нет рассылок.")),
+        parse_mode="HTML",
+        reply_markup=mailings_keyboard(mailings, page=page),
+    )
     await callback.answer()
 
 
@@ -242,17 +294,11 @@ async def callback_mailings(callback: CallbackQuery, db: Database, state: FSMCon
     user = await db.get_user(callback.from_user.id)
     mailings = await db.get_user_mailings(user.id)
 
-    text = "📋 Ваши рассылки:\n\n"
-    if mailings:
-        for m in mailings:
-            status = "🟢 Активна" if m.is_active else "🔴 Остановлена"
-            text += f"• {html.escape(m.name)} - {status}\n"
-    else:
-        text += "У вас пока нет рассылок.\n"
-
-    text += "\nВыберите рассылку или создайте новую:"
-
-    await callback.message.edit_text(pe(text), parse_mode="HTML", reply_markup=mailings_keyboard(mailings))
+    await callback.message.edit_text(
+        pe(_mailings_list_text(mailings, 0, "📋 Ваши рассылки:", "У вас пока нет рассылок.")),
+        parse_mode="HTML",
+        reply_markup=mailings_keyboard(mailings, page=0),
+    )
     await callback.answer()
 
 
@@ -412,6 +458,45 @@ async def callback_toggle_hidden_tag(callback: CallbackQuery, db: Database):
 
 
 # === Mailing Messages ===
+def _mailing_messages_text(messages: list, page: int, show_parse_mode: bool = False) -> str:
+    """Per-page message listing — capped to LIST_PAGE_SIZE lines so a large
+    set of message variants can't exceed Telegram's ~4096-char message text
+    limit, matching the keyboard's own pagination."""
+    total_pages = max(1, (len(messages) + LIST_PAGE_SIZE - 1) // LIST_PAGE_SIZE)
+    page = max(0, min(page, total_pages - 1))
+    page_messages = messages[page * LIST_PAGE_SIZE:(page + 1) * LIST_PAGE_SIZE]
+
+    text = f"📝 Сообщения рассылки ({len(messages)} шт.):\n\n"
+    if page_messages:
+        start_num = page * LIST_PAGE_SIZE + 1
+        for i, msg in enumerate(page_messages, start_num):
+            fmt = f"[{msg.parse_mode or 'html'}] " if show_parse_mode else ""
+            text += f"{i}. {fmt}{html.escape(message_preview(msg))}\n"
+    else:
+        text += "Сообщений пока нет.\n"
+    if total_pages > 1:
+        text += f"\nСтраница {page + 1}/{total_pages}."
+    return text
+
+
+@router.callback_query(F.data.startswith("mailing_messages_page:"))
+async def callback_mailing_messages_page(callback: CallbackQuery, db: Database):
+    _, mailing_id_str, page_str = callback.data.split(":")
+    mailing_id = int(mailing_id_str)
+    page = int(page_str)
+    if not await db.get_mailing_for_user(mailing_id, callback.from_user.id):
+        await callback.answer("⛔ Нет доступа", show_alert=True)
+        return
+    messages = await db.get_mailing_messages(mailing_id)
+    await safe_edit(
+        callback.message,
+        pe(_mailing_messages_text(messages, page) + "\nНажмите на сообщение, чтобы удалить его:"),
+        parse_mode="HTML",
+        reply_markup=mailing_messages_keyboard(mailing_id, messages, page=page),
+    )
+    await callback.answer()
+
+
 @router.callback_query(F.data.startswith("mailing_messages:"))
 async def callback_mailing_messages(callback: CallbackQuery, db: Database):
     mailing_id = int(callback.data.split(":")[1])
@@ -420,17 +505,11 @@ async def callback_mailing_messages(callback: CallbackQuery, db: Database):
         return
     messages = await db.get_mailing_messages(mailing_id)
 
-    text = f"📝 Сообщения рассылки ({len(messages)} шт.):\n\n"
-    if messages:
-        for i, msg in enumerate(messages, 1):
-            text += f"{i}. {html.escape(message_preview(msg))}\n"
-    else:
-        text += "Сообщений пока нет.\n"
-
-    text += "\nНажмите на сообщение, чтобы удалить его:"
-
     await safe_edit(
-        callback.message, pe(text), parse_mode="HTML", reply_markup=mailing_messages_keyboard(mailing_id, messages)
+        callback.message,
+        pe(_mailing_messages_text(messages, 0) + "\nНажмите на сообщение, чтобы удалить его:"),
+        parse_mode="HTML",
+        reply_markup=mailing_messages_keyboard(mailing_id, messages, page=0),
     )
     await callback.answer()
 
@@ -775,15 +854,9 @@ async def callback_delete_message(callback: CallbackQuery, db: Database):
 
     await callback.answer("Сообщение удалено")
 
-    text = f"📝 Сообщения рассылки ({len(messages)} шт.):\n\n"
-    if messages:
-        for i, msg in enumerate(messages, 1):
-            text += f"{i}. {html.escape(message_preview(msg))}\n"
-    else:
-        text += "Сообщений пока нет.\n"
-
     await safe_edit(
-        callback.message, pe(text), parse_mode="HTML", reply_markup=mailing_messages_keyboard(mailing_id, messages)
+        callback.message, pe(_mailing_messages_text(messages, 0)), parse_mode="HTML",
+        reply_markup=mailing_messages_keyboard(mailing_id, messages, page=0)
     )
 
 
@@ -1747,7 +1820,7 @@ async def process_create_message_video(message: Message, state: FSMContext, db: 
     caption = (message.caption or "").strip()
     caption_entities_json = serialize_entities(message.caption_entities)
     await db.add_mailing_message(mailing_id, caption, video_path=video_path, entities_json=caption_entities_json)
-    await state.clear()
+    await state.set_state(CreateMailingStates.adding_messages)
     messages = await db.get_mailing_messages(mailing_id)
     await message.answer(
         pe(f"✅ Видео добавлено! Всего сообщений: {len(messages)}\n\nДобавьте ещё или нажмите «Готово»:"),
@@ -2038,6 +2111,24 @@ async def callback_create_targets_page(callback: CallbackQuery, db: Database):
     await safe_edit_markup(
         callback.message,
         reply_markup=mailing_creation_targets_keyboard(mailing_id, targets, page=page),
+    )
+    await callback.answer()
+
+
+@router.callback_query(
+    CreateMailingStates.adding_messages, F.data.startswith("create_messages_page:")
+)
+async def callback_create_messages_page(callback: CallbackQuery, db: Database):
+    _, mailing_id_str, page_str = callback.data.split(":")
+    mailing_id = int(mailing_id_str)
+    page = int(page_str)
+    if not await db.get_mailing_for_user(mailing_id, callback.from_user.id):
+        await callback.answer("⛔ Нет доступа", show_alert=True)
+        return
+    messages = await db.get_mailing_messages(mailing_id)
+    await safe_edit_markup(
+        callback.message,
+        reply_markup=mailing_creation_messages_keyboard(mailing_id, messages, page=page),
     )
     await callback.answer()
 
@@ -2507,16 +2598,9 @@ async def callback_set_parse_mode(callback: CallbackQuery, db: Database):
 
     messages = await db.get_mailing_messages(mailing_id)
 
-    text = f"📝 Сообщения рассылки ({len(messages)} шт.):\n\n"
-    if messages:
-        for i, msg in enumerate(messages, 1):
-            fmt = f"[{msg.parse_mode or 'html'}]"
-            text += f"{i}. {fmt} {html.escape(message_preview(msg))}\n"
-    else:
-        text += "Сообщений пока нет.\n"
-
     await callback.message.edit_text(
-        text, reply_markup=mailing_messages_keyboard(mailing_id, messages)
+        _mailing_messages_text(messages, 0, show_parse_mode=True),
+        reply_markup=mailing_messages_keyboard(mailing_id, messages, page=0)
     )
 
 

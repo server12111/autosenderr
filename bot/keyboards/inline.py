@@ -17,6 +17,22 @@ def _strip_html(text: str) -> str:
 # Sorted longest-first so "⚡️" matches before "⚡"
 _SORTED_EMOJI = sorted(EMOJI_MAP.keys(), key=len, reverse=True)
 
+LIST_PAGE_SIZE = 20  # same reasoning as TARGETS_PAGE_SIZE below — keeps
+# accounts/mailings/messages list keyboards well under Telegram's
+# ~100-button cap regardless of how many a user has.
+
+
+def _paginate_nav_row(builder: InlineKeyboardBuilder, page: int, total_pages: int, callback_prefix: str):
+    if total_pages <= 1:
+        return
+    nav = []
+    if page > 0:
+        nav.append(_btn("◀️", callback_data=f"{callback_prefix}:{page - 1}", style="primary"))
+    nav.append(_btn(f"{page + 1}/{total_pages}", callback_data="noop", style="primary"))
+    if page < total_pages - 1:
+        nav.append(_btn("▶️", callback_data=f"{callback_prefix}:{page + 1}", style="primary"))
+    builder.row(*nav)
+
 
 def _btn(text: str, **kwargs) -> InlineKeyboardButton:
     """Create InlineKeyboardButton with premium animated emoji icon if text starts with a mapped emoji."""
@@ -89,11 +105,14 @@ def skip_thread_keyboard(mailing_id: int) -> InlineKeyboardMarkup:
 
 
 # === Accounts ===
-def accounts_keyboard(accounts: list[Account]) -> InlineKeyboardMarkup:
+def accounts_keyboard(accounts: list[Account], page: int = 0) -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
-    for acc in accounts:
+    total_pages = max(1, (len(accounts) + LIST_PAGE_SIZE - 1) // LIST_PAGE_SIZE)
+    page = max(0, min(page, total_pages - 1))
+    for acc in accounts[page * LIST_PAGE_SIZE:(page + 1) * LIST_PAGE_SIZE]:
         status = "🟢" if acc.is_active else "🔴"
         builder.row(_btn(f"{status} {acc.display_name}", callback_data=f"account:{acc.id}", style="primary"))
+    _paginate_nav_row(builder, page, total_pages, "accounts_page")
     builder.row(
         _btn("➕ Добавить аккаунт", callback_data="add_account", style="success"),
         _btn("◀️ Главное меню", callback_data="main_menu", style="primary"),
@@ -226,11 +245,14 @@ def group_autoresponder_keyboard(account_id: int, enabled: bool) -> InlineKeyboa
 
 
 # === Mailings ===
-def mailings_keyboard(mailings: list[Mailing]) -> InlineKeyboardMarkup:
+def mailings_keyboard(mailings: list[Mailing], page: int = 0) -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
-    for m in mailings:
+    total_pages = max(1, (len(mailings) + LIST_PAGE_SIZE - 1) // LIST_PAGE_SIZE)
+    page = max(0, min(page, total_pages - 1))
+    for m in mailings[page * LIST_PAGE_SIZE:(page + 1) * LIST_PAGE_SIZE]:
         status = "🟢" if m.is_active else "🔴"
         builder.row(_btn(f"{status} {m.name}", callback_data=f"mailing:{m.id}", style="primary"))
+    _paginate_nav_row(builder, page, total_pages, "mailings_page")
     builder.row(
         _btn("➕ Создать рассылку", callback_data="create_mailing", style="success"),
         _btn("◀️ Главное меню", callback_data="main_menu", style="primary"),
@@ -347,11 +369,14 @@ def _msg_button_preview(msg: MailingMessage) -> str:
     return f"{prefix}{preview}" if (prefix or preview) else "[Фото]"
 
 
-def mailing_messages_keyboard(mailing_id: int, messages: list[MailingMessage]) -> InlineKeyboardMarkup:
+def mailing_messages_keyboard(mailing_id: int, messages: list[MailingMessage], page: int = 0) -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
-    for msg in messages:
+    total_pages = max(1, (len(messages) + LIST_PAGE_SIZE - 1) // LIST_PAGE_SIZE)
+    page = max(0, min(page, total_pages - 1))
+    for msg in messages[page * LIST_PAGE_SIZE:(page + 1) * LIST_PAGE_SIZE]:
         preview = _msg_button_preview(msg)
         builder.row(_btn(f"🗑️ {preview}", callback_data=f"confirm_delete_msg:{msg.id}", style="danger"))
+    _paginate_nav_row(builder, page, total_pages, f"mailing_messages_page:{mailing_id}")
     builder.row(
         _btn("➕ Текст/фото/видео/эмодзи", callback_data=f"add_mailing_message:{mailing_id}", style="primary"),
         _btn("📨 Переслать", callback_data=f"add_mailing_forward:{mailing_id}", style="primary"),
@@ -454,11 +479,14 @@ def select_account_for_mailing_keyboard(accounts: list[Account], mailing_id: int
     return builder.as_markup()
 
 
-def mailing_creation_messages_keyboard(mailing_id: int, messages: list[MailingMessage]) -> InlineKeyboardMarkup:
+def mailing_creation_messages_keyboard(mailing_id: int, messages: list[MailingMessage], page: int = 0) -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
-    for msg in messages:
+    total_pages = max(1, (len(messages) + LIST_PAGE_SIZE - 1) // LIST_PAGE_SIZE)
+    page = max(0, min(page, total_pages - 1))
+    for msg in messages[page * LIST_PAGE_SIZE:(page + 1) * LIST_PAGE_SIZE]:
         preview = _msg_button_preview(msg)
         builder.row(_btn(f"🗑️ {preview}", callback_data=f"create_delete_msg:{msg.id}", style="danger"))
+    _paginate_nav_row(builder, page, total_pages, f"create_messages_page:{mailing_id}")
     builder.row(
         _btn("➕ Текст/фото/видео/эмодзи", callback_data=f"create_add_message:{mailing_id}", style="primary"),
         _btn("📨 Переслать", callback_data=f"create_add_forward:{mailing_id}", style="primary"),

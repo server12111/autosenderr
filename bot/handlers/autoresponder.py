@@ -222,7 +222,14 @@ async def process_autoresponder_text(message: Message, state: FSMContext, db: Da
         return
 
     text = None
-    photo_path = None
+    # Default to keeping whatever photo is already set — this handler also
+    # runs for a plain-text-only edit (e.g. fixing a typo), and there's no
+    # separate "remove photo" action anywhere in this UI, so treating "no
+    # new photo attached to this message" as "clear the photo" silently
+    # deleted an already-configured photo autoresponder on a routine text
+    # edit. Only a message that actually includes a new photo should
+    # replace it.
+    photo_path = account_before.autoresponder_photo
 
     if message.photo:
         os.makedirs("data/autoresponder_photos", exist_ok=True)
@@ -390,7 +397,9 @@ async def process_group_autoresponder_text(message: Message, state: FSMContext, 
         return
 
     text = None
-    photo_path = None
+    # Same reasoning as process_autoresponder_text above — preserve the
+    # existing photo unless this message actually attaches a new one.
+    photo_path = account_before.group_autoresponder_photo
 
     if message.photo:
         os.makedirs("data/autoresponder_photos", exist_ok=True)

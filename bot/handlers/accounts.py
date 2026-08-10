@@ -111,6 +111,42 @@ class AddAccountStates(StatesGroup):
     waiting_password = State()   # 2FA
 
 
+def _accounts_list_text(accounts: list, page: int) -> str:
+    """Per-page account listing — capped to LIST_PAGE_SIZE lines so a large
+    account list can't exceed Telegram's ~4096-char message text limit,
+    matching the keyboard's own pagination."""
+    from ..keyboards.inline import LIST_PAGE_SIZE
+    total_pages = max(1, (len(accounts) + LIST_PAGE_SIZE - 1) // LIST_PAGE_SIZE)
+    page = max(0, min(page, total_pages - 1))
+    page_accounts = accounts[page * LIST_PAGE_SIZE:(page + 1) * LIST_PAGE_SIZE]
+
+    text = "👤 Ваши аккаунты:\n\n"
+    if page_accounts:
+        for acc in page_accounts:
+            status = "🟢" if acc.is_active else "🔴"
+            ar = "✅" if acc.autoresponder_enabled else "❌"
+            gr = "✅" if acc.group_autoresponder_enabled else "❌"
+            text += f"{status} {html.escape(acc.display_name)}\n  └ Личный автоответ: {ar}  Групповой: {gr}\n"
+    else:
+        text += "У вас пока нет добавленных аккаунтов.\n"
+    if total_pages > 1:
+        text += f"\nСтраница {page + 1}/{total_pages}."
+    text += "\nВыберите аккаунт или добавьте новый:"
+    return text
+
+
+@router.callback_query(F.data.startswith("accounts_page:"))
+async def callback_accounts_page(callback: CallbackQuery, db: Database):
+    page = int(callback.data.split(":")[1])
+    user = await db.get_user(callback.from_user.id)
+    accounts = await db.get_user_accounts(user.id)
+    await safe_edit(
+        callback.message, pe(_accounts_list_text(accounts, page)), parse_mode="HTML",
+        reply_markup=accounts_keyboard(accounts, page=page),
+    )
+    await callback.answer()
+
+
 @router.callback_query(F.data == "accounts")
 async def callback_accounts(callback: CallbackQuery, db: Database, state: FSMContext):
     # Always-reachable nav button — without clearing state, a stray text
@@ -122,19 +158,10 @@ async def callback_accounts(callback: CallbackQuery, db: Database, state: FSMCon
     user = await db.get_user(callback.from_user.id)
     accounts = await db.get_user_accounts(user.id)
 
-    text = "👤 Ваши аккаунты:\n\n"
-    if accounts:
-        for acc in accounts:
-            status = "🟢" if acc.is_active else "🔴"
-            ar = "✅" if acc.autoresponder_enabled else "❌"
-            gr = "✅" if acc.group_autoresponder_enabled else "❌"
-            text += f"{status} {html.escape(acc.display_name)}\n  └ Личный автоответ: {ar}  Групповой: {gr}\n"
-    else:
-        text += "У вас пока нет добавленных аккаунтов.\n"
-
-    text += "\nВыберите аккаунт или добавьте новый:"
-
-    await callback.message.edit_text(pe(text), parse_mode="HTML", reply_markup=accounts_keyboard(accounts))
+    await callback.message.edit_text(
+        pe(_accounts_list_text(accounts, 0)), parse_mode="HTML",
+        reply_markup=accounts_keyboard(accounts, page=0),
+    )
     await callback.answer()
 
 
@@ -170,7 +197,7 @@ async def callback_account_menu(callback: CallbackQuery, db: Database):
 
 
 @router.callback_query(F.data == "account_payment_methods")
-async def callback_account_payment_methods(callback: CallbackQuery, db: Database):
+async def callback_account_payment_methods(callback: CallbackQuery, db: Database, state: FSMContext):
     if config.TON_WALLET_ADDRESS:
         ton_service_instance = TonPaymentService(config.TON_WALLET_ADDRESS, config.TONCENTER_API_KEY)
         ton_amount = await ton_service_instance.calculate_ton_amount(config.EXTRA_ACCOUNT_PRICE)
@@ -191,7 +218,7 @@ async def callback_account_payment_methods(callback: CallbackQuery, db: Database
         )
         await callback.answer()
     else:
-        await callback_accounts(callback, db)
+        await callback_accounts(callback, db, state)
 
 
 @router.callback_query(F.data == "add_account")

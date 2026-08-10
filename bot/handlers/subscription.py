@@ -488,7 +488,7 @@ async def callback_activate_free_tier(callback: CallbackQuery, db: Database):
 
 
 @router.callback_query(F.data == "activate_free_tier_confirm")
-async def callback_activate_free_tier_confirm(callback: CallbackQuery, db: Database):
+async def callback_activate_free_tier_confirm(callback: CallbackQuery, db: Database, state: FSMContext):
     user = await db.get_user(callback.from_user.id)
     if not user:
         await callback.answer()
@@ -505,7 +505,7 @@ async def callback_activate_free_tier_confirm(callback: CallbackQuery, db: Datab
 
     await db.activate_free_tier(user.id)
     await callback.answer("✅ Бесплатный тариф активирован!", show_alert=True)
-    await callback_subscription(callback, db)
+    await callback_subscription(callback, db, state)
 
 
 @router.callback_query(F.data == "enter_promocode")
