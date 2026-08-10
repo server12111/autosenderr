@@ -1177,27 +1177,24 @@ async def process_edit_folder(
         await state.clear()
         targets = await db.get_mailing_targets(mailing_id)
 
-        forum_hint = ""
+        await loading_msg.delete()
+        await message.answer(
+            pe(f"✅ Добавлено {added} чатов из папки! Всего чатов: {len(targets)}"),
+            parse_mode="HTML",
+            reply_markup=mailing_targets_keyboard(mailing_id, targets),
+        )
+
+        # Forum-topic detection runs after the user already has their
+        # result — it's a nice-to-have hint, not worth making anyone wait
+        # for it (it can take a while over a degraded proxy even with its
+        # own internal cap). Sends a small follow-up only if it finds any.
         added_identifiers = [
             f"@{getattr(e, 'username')}" if getattr(e, 'username', None) else str(int(f"-100{e.id}"))
             for e in chats
             if hasattr(e, 'id') and type(e).__name__ not in ('ChannelForbidden', 'ChatForbidden')
         ]
         new_targets = [t for t in targets if t.chat_identifier in added_identifiers]
-        forums = await _find_forum_targets(client, new_targets)
-        if forums:
-            for t in new_targets:
-                if t.chat_identifier in forums:
-                    await db.update_target_is_forum(t.id, True)
-            targets = await db.get_mailing_targets(mailing_id)
-            forum_hint = pe(f"\n\n🧵 Найдено {len(forums)} форум-чатов с темами: {', '.join(forums[:5])}{'...' if len(forums) > 5 else ''}\nНастройте тему через кнопку 🧵 в списке чатов.")
-
-        await loading_msg.delete()
-        await message.answer(
-            pe(f"✅ Добавлено {added} чатов из папки! Всего чатов: {len(targets)}") + forum_hint,
-            parse_mode="HTML",
-            reply_markup=mailing_targets_keyboard(mailing_id, targets),
-        )
+        asyncio.create_task(_check_forums_background(client, db, mailing_id, message, new_targets))
 
     except Exception as e:
         logger.error(f"Error resolving folder {slug}: {e}")
@@ -1298,25 +1295,18 @@ async def process_edit_txt_file(message: Message, state: FSMContext, db: Databas
     await state.clear()
     targets = await db.get_mailing_targets(mailing_id)
 
-    forum_hint = ""
+    await message.answer(
+        pe(f"✅ Добавлено {added} чатов из файла! Всего чатов: {len(targets)}"),
+        parse_mode="HTML",
+        reply_markup=mailing_targets_keyboard(mailing_id, targets),
+    )
+
     mailing = await db.get_mailing_for_user(mailing_id, message.from_user.id)
     if mailing:
         client = await userbot_manager.get_client(mailing.account_id)
         if client:
             new_targets = [t for t in targets if t.chat_identifier in identifiers]
-            forums = await _find_forum_targets(client, new_targets)
-            if forums:
-                for t in new_targets:
-                    if t.chat_identifier in forums:
-                        await db.update_target_is_forum(t.id, True)
-                targets = await db.get_mailing_targets(mailing_id)
-                forum_hint = pe(f"\n\n🧵 Найдено {len(forums)} форум-чатов с темами: {', '.join(forums[:5])}{'...' if len(forums) > 5 else ''}\nНастройте тему через кнопку 🧵 в списке чатов.")
-
-    await message.answer(
-        pe(f"✅ Добавлено {added} чатов из файла! Всего чатов: {len(targets)}") + forum_hint,
-        parse_mode="HTML",
-        reply_markup=mailing_targets_keyboard(mailing_id, targets),
-    )
+            asyncio.create_task(_check_forums_background(client, db, mailing_id, message, new_targets))
 
 
 @router.message(EditMailingStates.waiting_txt_file)
@@ -2134,27 +2124,20 @@ async def process_create_folder(
         await state.set_state(CreateMailingStates.adding_targets)
         targets = await db.get_mailing_targets(mailing_id)
 
-        forum_hint = ""
+        await loading_msg.delete()
+        await message.answer(
+            pe(f"✅ Добавлено {added} чатов из папки! Всего чатов: {len(targets)}\n\nДобавьте ещё или нажмите «Готово»:"),
+            parse_mode="HTML",
+            reply_markup=mailing_creation_targets_keyboard(mailing_id, targets),
+        )
+
         added_identifiers = [
             f"@{getattr(e, 'username')}" if getattr(e, 'username', None) else str(int(f"-100{e.id}"))
             for e in chats
             if hasattr(e, 'id') and type(e).__name__ not in ('ChannelForbidden', 'ChatForbidden')
         ]
         new_targets = [t for t in targets if t.chat_identifier in added_identifiers]
-        forums = await _find_forum_targets(client, new_targets)
-        if forums:
-            for t in new_targets:
-                if t.chat_identifier in forums:
-                    await db.update_target_is_forum(t.id, True)
-            targets = await db.get_mailing_targets(mailing_id)
-            forum_hint = pe(f"\n\n🧵 Найдено {len(forums)} форум-чатов с темами: {', '.join(forums[:5])}{'...' if len(forums) > 5 else ''}\nНастройте тему через кнопку 🧵 в списке чатов.")
-
-        await loading_msg.delete()
-        await message.answer(
-            pe(f"✅ Добавлено {added} чатов из папки! Всего чатов: {len(targets)}\n\nДобавьте ещё или нажмите «Готово»:") + forum_hint,
-            parse_mode="HTML",
-            reply_markup=mailing_creation_targets_keyboard(mailing_id, targets),
-        )
+        asyncio.create_task(_check_forums_background(client, db, mailing_id, message, new_targets))
 
     except Exception as e:
         logger.error(f"Error resolving folder {slug}: {e}")
@@ -2257,25 +2240,18 @@ async def process_create_txt_file(message: Message, state: FSMContext, db: Datab
     await state.set_state(CreateMailingStates.adding_targets)
     targets = await db.get_mailing_targets(mailing_id)
 
-    forum_hint = ""
+    await message.answer(
+        pe(f"✅ Добавлено {added} чатов из файла! Всего чатов: {len(targets)}\n\nДобавьте ещё или нажмите «Готово»:"),
+        parse_mode="HTML",
+        reply_markup=mailing_creation_targets_keyboard(mailing_id, targets),
+    )
+
     mailing = await db.get_mailing_for_user(mailing_id, message.from_user.id)
     if mailing:
         client = await userbot_manager.get_client(mailing.account_id)
         if client:
             new_targets = [t for t in targets if t.chat_identifier in identifiers]
-            forums = await _find_forum_targets(client, new_targets)
-            if forums:
-                for t in new_targets:
-                    if t.chat_identifier in forums:
-                        await db.update_target_is_forum(t.id, True)
-                targets = await db.get_mailing_targets(mailing_id)
-                forum_hint = pe(f"\n\n🧵 Найдено {len(forums)} форум-чатов с темами: {', '.join(forums[:5])}{'...' if len(forums) > 5 else ''}\nНастройте тему через кнопку 🧵 в списке чатов.")
-
-    await message.answer(
-        pe(f"✅ Добавлено {added} чатов из файла! Всего чатов: {len(targets)}\n\nДобавьте ещё или нажмите «Готово»:") + forum_hint,
-        parse_mode="HTML",
-        reply_markup=mailing_creation_targets_keyboard(mailing_id, targets),
-    )
+            asyncio.create_task(_check_forums_background(client, db, mailing_id, message, new_targets))
 
 
 @router.message(CreateMailingStates.waiting_txt_file)
@@ -2633,6 +2609,34 @@ async def _find_forum_targets(client, targets: list) -> list[str]:
         logger.warning(f"_find_forum_targets timed out checking {len(targets)} targets, skipping forum hint")
         return []
     return [r for r in results if r]
+
+
+async def _check_forums_background(client, db: Database, mailing_id: int, message: Message, new_targets: list):
+    """Runs forum-topic detection AFTER the caller has already told the user
+    their chats were added — this used to run inline and block that
+    response, which for a large import (over a degraded proxy) meant
+    staring at "Загружаем чаты..." for minutes even though the chats were
+    already saved. Purely best-effort: sends one small follow-up message
+    only if it actually finds forum chats, silent otherwise."""
+    if not new_targets:
+        return
+    try:
+        forums = await _find_forum_targets(client, new_targets)
+    except Exception as e:
+        logger.warning(f"Background forum check failed for mailing {mailing_id}: {e}")
+        return
+    if not forums:
+        return
+    try:
+        for t in new_targets:
+            if t.chat_identifier in forums:
+                await db.update_target_is_forum(t.id, True)
+        await message.answer(
+            pe(f"🧵 Найдено {len(forums)} форум-чатов с темами: {', '.join(forums[:5])}{'...' if len(forums) > 5 else ''}\nНастройте тему через кнопку 🧵 в списке чатов."),
+            parse_mode="HTML",
+        )
+    except Exception as e:
+        logger.warning(f"Failed to send forum-hint follow-up for mailing {mailing_id}: {e}")
 
 
 # === Keep Targets Toggle ===

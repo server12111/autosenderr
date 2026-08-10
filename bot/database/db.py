@@ -1401,8 +1401,21 @@ class Database:
         await self._conn.commit()
 
     async def update_all_target_intervals(self, mailing_id: int, interval_seconds: int):
+        # Also updates the mailing's own base interval_seconds — without
+        # this, "apply to all" only touched per-target overrides while the
+        # mailing's own interval (shown on its main info screen, and used
+        # as the fallback for any target added later with no override of
+        # its own) stayed frozen at whatever was set at creation. Users
+        # doing "change the interval for the whole mailing" via this
+        # button would see the change take effect on actual sends but the
+        # overview screen's displayed interval never move, looking exactly
+        # like the change didn't apply.
         await self._conn.execute(
             "UPDATE mailing_targets SET interval_seconds = ? WHERE mailing_id = ?",
+            (interval_seconds, mailing_id),
+        )
+        await self._conn.execute(
+            "UPDATE mailings SET interval_seconds = ? WHERE id = ?",
             (interval_seconds, mailing_id),
         )
         await self._conn.commit()
