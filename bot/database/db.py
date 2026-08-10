@@ -249,12 +249,17 @@ class Database:
         # moment as a BEGIN IMMEDIATE transaction on one of the separate
         # short-lived connections below (create_account, payment/promo/
         # withdrawal handling) raises "database is locked" immediately
-        # instead of waiting a couple seconds for the lock to clear — with
-        # 260+ accounts constantly writing (session updates, target
-        # last_sent, error logs), that collision is common enough to
-        # surface as random, unexplained "Произошла ошибка" on unrelated
-        # actions (creating a mailing, admin cleanup, etc.).
-        await self._conn.execute("PRAGMA busy_timeout = 5000")
+        # instead of waiting for the lock to clear — with 260+ accounts
+        # constantly writing (session updates, target last_sent, error
+        # logs), that collision is common enough to surface as random,
+        # unexplained "Произошла ошибка" on unrelated actions (creating a
+        # mailing, admin cleanup, admin promo code create/delete, etc.).
+        # 5s wasn't always enough under real write load — reports of the
+        # same generic error recurring specifically on admin promo actions
+        # pointed at this still being too short, not fully fixed. Raised to
+        # 15s: still bounded (can't hang forever), just more patient before
+        # giving up.
+        await self._conn.execute("PRAGMA busy_timeout = 15000")
         await self._conn.executescript(SCHEMA)
         await self._run_migrations()
         await self._conn.execute("CREATE INDEX IF NOT EXISTS idx_users_created_at ON users (created_at)")
@@ -643,7 +648,7 @@ class Database:
             async with aiosqlite.connect(self.db_path) as conn:
                 conn.row_factory = aiosqlite.Row
                 await conn.execute("PRAGMA foreign_keys = ON")
-                await conn.execute("PRAGMA busy_timeout = 5000")
+                await conn.execute("PRAGMA busy_timeout = 15000")
                 await conn.execute("BEGIN IMMEDIATE")
                 try:
                     async with conn.execute(
@@ -1586,7 +1591,7 @@ class Database:
             async with aiosqlite.connect(self.db_path) as conn:
                 conn.row_factory = aiosqlite.Row
                 await conn.execute("PRAGMA foreign_keys = ON")
-                await conn.execute("PRAGMA busy_timeout = 5000")
+                await conn.execute("PRAGMA busy_timeout = 15000")
                 await conn.execute("BEGIN IMMEDIATE")
                 try:
                     async with conn.execute(
@@ -1929,7 +1934,7 @@ class Database:
             async with aiosqlite.connect(self.db_path) as conn:
                 conn.row_factory = aiosqlite.Row
                 await conn.execute("PRAGMA foreign_keys = ON")
-                await conn.execute("PRAGMA busy_timeout = 5000")
+                await conn.execute("PRAGMA busy_timeout = 15000")
                 await conn.execute("BEGIN IMMEDIATE")
                 try:
                     async with conn.execute(
@@ -2044,7 +2049,7 @@ class Database:
         async with self._transaction_lock:
             async with aiosqlite.connect(self.db_path) as conn:
                 await conn.execute("PRAGMA foreign_keys = ON")
-                await conn.execute("PRAGMA busy_timeout = 5000")
+                await conn.execute("PRAGMA busy_timeout = 15000")
                 await conn.execute("BEGIN IMMEDIATE")
                 try:
                     async with conn.execute(
@@ -2096,7 +2101,7 @@ class Database:
             async with aiosqlite.connect(self.db_path) as conn:
                 conn.row_factory = aiosqlite.Row
                 await conn.execute("PRAGMA foreign_keys = ON")
-                await conn.execute("PRAGMA busy_timeout = 5000")
+                await conn.execute("PRAGMA busy_timeout = 15000")
                 await conn.execute("BEGIN IMMEDIATE")
                 try:
                     async with conn.execute(
