@@ -132,7 +132,7 @@ class UserbotManager:
         except Exception as e:
             logger.error(f"Invalid proxy for account {account.phone}: {e}")
             if account.proxy_pool_id:
-                await self._handle_pool_proxy_failure(account, str(e))
+                await self._handle_pool_proxy_failure(account.proxy_pool_id, str(e))
             else:
                 await self._notify_proxy_problem(account, str(e))
             return None
@@ -223,7 +223,7 @@ class UserbotManager:
             except Exception:
                 pass
             if account.proxy_pool_id:
-                await self._handle_pool_proxy_failure(account, str(e))
+                await self._handle_pool_proxy_failure(account.proxy_pool_id, str(e))
             elif account.proxy:
                 await self._notify_proxy_problem(account, str(e))
             return None
@@ -286,7 +286,7 @@ class UserbotManager:
         except Exception as ne:
             logger.error(f"Failed to notify about proxy error for account {account.id}: {ne}")
 
-    async def _handle_pool_proxy_failure(self, account: Account, error_text: str):
+    async def _handle_pool_proxy_failure(self, dead_pool_id: int, error_text: str):
         """A pool-assigned proxy died. Unlike a user's own proxy, the account
         owner must never learn their account rides on a shared pool proxy — so
         this notifies the admins instead, marks the proxy dead, reassigns
@@ -295,6 +295,14 @@ class UserbotManager:
         the dead proxy until each independently hits the same error), and
         forces those accounts to reconnect right away instead of waiting for
         their own next natural reconnect attempt.
+
+        Takes the pool proxy id directly (not an Account) so it can also be
+        called during onboarding, before the new account even has a DB row —
+        without this, a brand-new account that happened to get assigned a
+        proxy that's dead but not yet detected as such would just time out
+        during signup with no reassignment happening, and the very next
+        signup attempt would likely land on that same still-"active" dead
+        proxy again (nothing else would have marked it dead in the meantime).
 
         Serialized via _proxy_failure_lock: several accounts sharing the
         same dead proxy can all discover the failure at nearly the same
@@ -306,7 +314,6 @@ class UserbotManager:
         concurrency-5 stagger. The lock makes only the first caller for a
         given dead proxy actually do the work; the rest see was_active=False
         and skip — that work is already in flight."""
-        dead_pool_id = account.proxy_pool_id
         async with self._proxy_failure_lock:
             try:
                 was_active = await self.db.deactivate_pool_proxy(dead_pool_id)
@@ -466,7 +473,7 @@ class UserbotManager:
                             account = await self.db.get_account(account_id)
                             if account:
                                 if account.proxy_pool_id:
-                                    await self._handle_pool_proxy_failure(account, str(e))
+                                    await self._handle_pool_proxy_failure(account.proxy_pool_id, str(e))
                                 elif account.proxy:
                                     await self._notify_proxy_problem(account, str(e))
                         except Exception as e:

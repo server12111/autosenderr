@@ -30,6 +30,7 @@ from ..config import config
 from ..services import CryptoBotService, TonPaymentService, MailingService
 from ..utils.errors import friendly_error
 from ..utils.time_utils import now_moscow
+from ..utils.tg import safe_edit
 
 
 async def _test_proxy_connection(host: str, port: int) -> bool:
@@ -575,7 +576,7 @@ async def process_api_id(message: Message, state: FSMContext):
 
 
 @router.message(AddAccountStates.waiting_api_hash)
-async def process_api_hash(message: Message, state: FSMContext, db: Database):
+async def process_api_hash(message: Message, state: FSMContext, db: Database, userbot_manager: UserbotManager):
     if not message.text:
         await message.answer(pe("❌ Введите API Hash текстом."), parse_mode="HTML", reply_markup=cancel_keyboard())
         return
@@ -590,7 +591,7 @@ async def process_api_hash(message: Message, state: FSMContext, db: Database):
 
     if data.get("phone"):
         # Phone is already known (retry after API credentials error) — connect immediately
-        await _connect_and_send_code(message, state, data, db)
+        await _connect_and_send_code(message, state, data, db, userbot_manager)
     else:
         await message.answer(
             pe("➕ Добавление аккаунта\n\n"
@@ -603,7 +604,7 @@ async def process_api_hash(message: Message, state: FSMContext, db: Database):
         await state.set_state(AddAccountStates.waiting_phone)
 
 
-async def _connect_and_send_code(message: Message, state: FSMContext, data: dict, db: Database):
+async def _connect_and_send_code(message: Message, state: FSMContext, data: dict, db: Database, userbot_manager: UserbotManager):
     """Connect to Telegram and request login code. On API credentials error, asks for new ones."""
     from telethon import TelegramClient
     from telethon.sessions import StringSession
@@ -677,6 +678,13 @@ async def _connect_and_send_code(message: Message, state: FSMContext, data: dict
         if client:
             await client.disconnect()
         await status_msg.delete()
+        if auto_proxy_pool_id:
+            # A brand-new account has no DB row yet to route through the
+            # normal dead-proxy-detection path — without this, the proxy
+            # never gets marked dead, and the very next signup attempt
+            # would likely land on this same "active" but actually-dead
+            # proxy again (pick_proxy_for_new_account has no way to know).
+            asyncio.create_task(userbot_manager._handle_pool_proxy_failure(auto_proxy_pool_id, "onboarding connect timeout"))
         # Pool-assigned proxies must stay invisible even in error messages —
         # only mention "прокси" if the user set one themselves.
         hint = "или прокси " if data.get("proxy") else ""
@@ -692,6 +700,9 @@ async def _connect_and_send_code(message: Message, state: FSMContext, data: dict
         if client:
             await client.disconnect()
         await status_msg.delete()
+        if auto_proxy_pool_id and isinstance(e, (OSError, ConnectionError)):
+            # Same reasoning as the TimeoutError branch above.
+            asyncio.create_task(userbot_manager._handle_pool_proxy_failure(auto_proxy_pool_id, str(e)))
         err = str(e)
         if "Connection to Telegram failed" in err or "ConnectionError" in type(e).__name__:
             proxy_hint = "• Telegram заблокирован — попробуйте добавить прокси\n\n" if data.get("proxy") else ""
@@ -755,7 +766,7 @@ async def process_phone(
     await state.update_data(phone=phone, connecting=True)
     data = await state.get_data()
     try:
-        await _connect_and_send_code(message, state, data, db)
+        await _connect_and_send_code(message, state, data, db, userbot_manager)
     finally:
         try:
             await state.update_data(connecting=False)
@@ -1122,7 +1133,12 @@ async def callback_confirm_delete_account(
 
     user = await db.get_user(callback.from_user.id)
     accounts = await db.get_user_accounts(user.id)
-    await callback.message.edit_text(
+    # The account is already gone at this point regardless of what happens
+    # next — use safe_edit so a transient network blip rendering this
+    # confirmation doesn't surface as a scary "Произошла ошибка" for an
+    # action that actually already succeeded.
+    await safe_edit(
+        callback.message,
         pe("✅ Аккаунт удалён"),
         parse_mode="HTML",
         reply_markup=accounts_keyboard(accounts),

@@ -48,6 +48,7 @@ from ..keyboards.inline import (
     skip_thread_keyboard,
 )
 from ..utils.time_utils import format_active_hours, parse_time_range, create_active_hours_json, now_moscow
+from ..utils.tg import safe_edit
 from ..services import MailingService
 from ..userbot.manager import UserbotManager
 from ..utils.errors import friendly_error
@@ -1401,7 +1402,12 @@ async def callback_confirm_delete_mailing(
     await mailing_service.delete_mailing(mailing_id)
 
     mailings = await db.get_user_mailings(user.id)
-    await callback.message.edit_text(
+    # The mailing is already gone at this point regardless of what happens
+    # next — use safe_edit so a transient network blip rendering this
+    # confirmation doesn't surface as a scary "Произошла ошибка" for an
+    # action that actually already succeeded.
+    await safe_edit(
+        callback.message,
         pe("✅ Рассылка удалена"),
         parse_mode="HTML",
         reply_markup=mailings_keyboard(mailings),
