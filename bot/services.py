@@ -1076,17 +1076,23 @@ class MailingService:
         # FloodWaitError within the same instant, and without the lock both
         # could read "not yet flooded" before either write lands, sending a
         # duplicate alert for what's really one episode.
-        lock = self._flood_notify_locks.setdefault(account_id, asyncio.Lock())
-        async with lock:
-            already_flooded = await self.db.get_flood_wait_until(account_id)
-            await self.db.set_flood_wait_until(account_id, finish_at)
-            if already_flooded and already_flooded > now_moscow():
-                return
-
-        notify = getattr(self.userbot_manager, '_bot_notify_callback', None)
-        if not notify or not user:
-            return
+        # Wrapped end to end — this is called from inside the mailing loop's
+        # FloodWaitError handler, and a transient DB hiccup in here (the
+        # same lock-contention class of issue already fixed elsewhere
+        # today) shouldn't crash that cycle and force the loop's 30s
+        # fatal-error auto-restart when this is fundamentally just a
+        # best-effort notification side effect.
         try:
+            lock = self._flood_notify_locks.setdefault(account_id, asyncio.Lock())
+            async with lock:
+                already_flooded = await self.db.get_flood_wait_until(account_id)
+                await self.db.set_flood_wait_until(account_id, finish_at)
+                if already_flooded and already_flooded > now_moscow():
+                    return
+
+            notify = getattr(self.userbot_manager, '_bot_notify_callback', None)
+            if not notify or not user:
+                return
             account_obj = await self.db.get_account(account_id)
             await notify(
                 user.telegram_id,

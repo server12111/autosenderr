@@ -248,18 +248,24 @@ class UserbotManager:
         # (not just in-memory) — a bot restart, which happens on every
         # deploy, must not forget this account was already notified and
         # re-send the same alert again on the very next reconnect attempt.
-        if await self.db.is_proxy_problem_notified(account.id):
-            return
-
-        if self._account_proxy_failure_callback:
-            try:
-                await self._account_proxy_failure_callback(account.id)
-            except Exception as e:
-                logger.error(f"Account proxy failure callback failed for account {account.id}: {e}")
-
-        if not self._bot_notify_callback:
-            return
+        #
+        # Everything in this function is wrapped — this runs from inside
+        # _start_client_unlocked's own exception handlers, and a caller
+        # (start_client, the monitor loop, a batch reconnect) shouldn't
+        # have its own error handling short-circuited by a failure in what
+        # is fundamentally just a best-effort notification side effect.
         try:
+            if await self.db.is_proxy_problem_notified(account.id):
+                return
+
+            if self._account_proxy_failure_callback:
+                try:
+                    await self._account_proxy_failure_callback(account.id)
+                except Exception as e:
+                    logger.error(f"Account proxy failure callback failed for account {account.id}: {e}")
+
+            if not self._bot_notify_callback:
+                return
             user = await self.db.get_user_by_id(account.user_id)
             if not user:
                 return
