@@ -50,7 +50,7 @@ from ..keyboards.inline import (
     skip_thread_keyboard,
 )
 from ..utils.time_utils import format_active_hours, parse_time_range, create_active_hours_json, now_moscow
-from ..utils.tg import safe_edit, safe_edit_markup
+from ..utils.tg import safe_edit
 from ..services import MailingService
 from ..userbot.manager import UserbotManager
 from ..utils.errors import friendly_error
@@ -1608,7 +1608,12 @@ async def callback_select_account_page(callback: CallbackQuery, db: Database):
     page = int(callback.data.split(":")[1])
     user = await db.get_user(callback.from_user.id)
     accounts = await db.get_user_accounts(user.id)
-    await safe_edit_markup(callback.message, reply_markup=select_account_keyboard(accounts, page=page), retries=0)
+    await safe_edit(
+        callback.message,
+        callback.message.text or "",
+        reply_markup=select_account_keyboard(accounts, page=page),
+        retries=0,
+    )
     await callback.answer()
 
 
@@ -2132,8 +2137,9 @@ async def callback_create_targets_page(callback: CallbackQuery, db: Database):
         await callback.answer("⛔ Нет доступа", show_alert=True)
         return
     targets = await db.get_mailing_targets(mailing_id)
-    await safe_edit_markup(
+    await safe_edit(
         callback.message,
+        callback.message.text or "",
         reply_markup=mailing_creation_targets_keyboard(mailing_id, targets, page=page),
         retries=0,
     )
@@ -2151,8 +2157,9 @@ async def callback_create_messages_page(callback: CallbackQuery, db: Database):
         await callback.answer("⛔ Нет доступа", show_alert=True)
         return
     messages = await db.get_mailing_messages(mailing_id)
-    await safe_edit_markup(
+    await safe_edit(
         callback.message,
+        callback.message.text or "",
         reply_markup=mailing_creation_messages_keyboard(mailing_id, messages, page=page),
         retries=0,
     )
@@ -2567,8 +2574,9 @@ async def callback_set_mailing_account_page(callback: CallbackQuery, db: Databas
         return
     user = await db.get_user(callback.from_user.id)
     accounts = await db.get_user_accounts(user.id)
-    await safe_edit_markup(
+    await safe_edit(
         callback.message,
+        callback.message.text or "",
         reply_markup=select_account_for_mailing_keyboard(accounts, mailing_id, page=page),
         retries=0,
     )

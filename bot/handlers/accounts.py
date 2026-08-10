@@ -1,6 +1,8 @@
 import asyncio
 import html
+import ipaddress
 import logging
+import socket
 import time
 from datetime import datetime
 from typing import Optional
@@ -18,6 +20,7 @@ from ..keyboards.inline import (
     cancel_keyboard,
     main_menu_keyboard,
     add_account_proxy_keyboard,
+    retry_or_skip_proxy_keyboard,
     add_account_api_keyboard,
     account_payment_keyboard,
     account_payment_method_keyboard,
@@ -33,9 +36,48 @@ from ..utils.time_utils import now_moscow
 from ..utils.tg import safe_edit
 
 
-async def _test_proxy_connection(host: str, port: int) -> bool:
+def _is_blocked_proxy_address(address: str) -> bool:
+    """Return True for IP ranges that must never be probed as a user proxy."""
+    ip = ipaddress.ip_address(address)
+    return (
+        ip.is_private
+        or ip.is_loopback
+        or ip.is_link_local
+        or ip.is_reserved
+        or ip.is_multicast
+        or ip.is_unspecified
+    )
+
+
+async def _resolve_public_proxy_host(host: str) -> str | None:
+    """Resolve *host* and fail closed unless every result is publicly routable.
+
+    Validation is performed on resolved addresses rather than the hostname so
+    names such as ``internal.example`` cannot bypass the proxy SSRF guard.
+    Rejecting a mixed public/private answer also prevents a resolver from
+    choosing an internal address after a superficially safe validation.
+    """
     try:
-        _, writer = await asyncio.wait_for(asyncio.open_connection(host, port), timeout=5)
+        infos = await asyncio.get_running_loop().getaddrinfo(
+            host, None, type=socket.SOCK_STREAM
+        )
+        addresses = {info[4][0] for info in infos}
+        if not addresses or any(_is_blocked_proxy_address(address) for address in addresses):
+            return None
+        return next(iter(addresses))
+    except (OSError, ValueError):
+        return None
+
+
+async def _test_proxy_connection(host: str, port: int) -> bool:
+    address = await _resolve_public_proxy_host(host)
+    if not address:
+        return False
+    try:
+        # Use the checked numeric address, not the original hostname, so a
+        # DNS rebind between validation and connect cannot reach an internal
+        # service.
+        _, writer = await asyncio.wait_for(asyncio.open_connection(address, port), timeout=5)
         writer.close()
         await writer.wait_closed()
         return True
@@ -540,7 +582,7 @@ async def process_proxy(message: Message, state: FSMContext):
             "❌ Неверный формат. Введите прокси:\n"
             "<code>socks5://host:port</code>\n"
             "или <code>socks5://user:pass@host:port</code>",
-            reply_markup=cancel_keyboard(),
+            reply_markup=retry_or_skip_proxy_keyboard(),
         )
         return
 
@@ -564,7 +606,7 @@ async def process_proxy(message: Message, state: FSMContext):
             f"• Что прокси рабочий и не заблокирован\n\n"
             f"Введите другой прокси или нажмите «Пропустить»:"),
             parse_mode="HTML",
-            reply_markup=cancel_keyboard(),
+            reply_markup=retry_or_skip_proxy_keyboard(),
         )
         return
 

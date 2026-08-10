@@ -57,11 +57,16 @@ def _parse_proxy(proxy_str: Optional[str]) -> Optional[tuple]:
     import socks
     p = urlparse(proxy_str)
     host = p.hostname
-    port = p.port
+    try:
+        port = p.port
+    except ValueError as exc:
+        raise ValueError("invalid proxy string (invalid port)") from None
     username = p.username or None
     password = p.password or None
     if not host or not port:
-        raise ValueError(f"invalid proxy string (missing host/port): {proxy_str!r}")
+        # This error is logged by callers, so never include proxy_str: it may
+        # contain SOCKS credentials.
+        raise ValueError("invalid proxy string (missing host/port)")
     if username and password:
         return (socks.SOCKS5, host, port, True, username, password)
     return (socks.SOCKS5, host, port)

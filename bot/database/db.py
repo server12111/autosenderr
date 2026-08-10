@@ -19,6 +19,35 @@ _SETTINGS_TTL = 60      # seconds — settings/prices
 _CHANNELS_TTL = 300     # seconds — required channels list
 POOL_PROXY_ACCOUNT_CAP = 50   # max active accounts per pool proxy
 
+# SQLite cannot bind table/column identifiers.  Keep the only dynamic DDL in
+# migrations behind this exact allowlist so no caller can turn _add_col() into
+# an SQL-injection primitive.
+_ALLOWED_MIGRATION_COLUMNS = frozenset({
+    ('accounts', 'notify_messages', 'BOOLEAN DEFAULT FALSE'), ('accounts', 'name', 'TEXT'),
+    ('accounts', 'group_autoresponder_enabled', 'BOOLEAN DEFAULT FALSE'), ('accounts', 'group_autoresponder_text', 'TEXT'),
+    ('accounts', 'autoresponder_photo', 'TEXT'), ('accounts', 'group_autoresponder_photo', 'TEXT'),
+    ('accounts', 'proxy', 'TEXT'), ('accounts', 'auto_subscribe_sponsors', 'BOOLEAN DEFAULT FALSE'),
+    ('accounts', 'proxy_pool_id', 'INTEGER DEFAULT NULL'), ('accounts', 'proxy_problem_notified', 'INTEGER DEFAULT 0'),
+    ('accounts', 'flood_wait_until', 'TEXT DEFAULT NULL'), ('mailing_messages', 'photo_path', 'TEXT'),
+    ('mailing_messages', 'video_path', 'TEXT'), ('mailing_messages', 'parse_mode', "TEXT DEFAULT 'html'"),
+    ('mailing_messages', 'entities_json', 'TEXT'), ('mailing_messages', 'forward_peer', 'TEXT'),
+    ('mailing_messages', 'forward_msg_id', 'INTEGER'), ('mailing_targets', 'interval_seconds', 'INTEGER'),
+    ('mailing_targets', 'last_sent_at', 'DATETIME'), ('mailings', 'reply_mode', 'TEXT DEFAULT NULL'),
+    ('mailings', 'reply_offset', 'INTEGER DEFAULT 1'), ('mailings', 'reply_random_min', 'INTEGER DEFAULT 1'),
+    ('mailings', 'reply_random_max', 'INTEGER DEFAULT 5'), ('payments', 'payment_method', "TEXT DEFAULT 'cryptobot'"),
+    ('payments', 'plan_days', 'INTEGER DEFAULT 30'), ('payments', 'price_usdt', 'REAL DEFAULT NULL'),
+    ('promocodes', 'max_uses', 'INTEGER NOT NULL DEFAULT 1'), ('promocodes', 'uses_count', 'INTEGER NOT NULL DEFAULT 0'),
+    ('promocodes', 'is_subscription', 'INTEGER DEFAULT 0'), ('mailing_targets', 'thread_id', 'INTEGER DEFAULT NULL'),
+    ('mailing_targets', 'is_forum', 'INTEGER DEFAULT 0'), ('mailing_targets', 'last_account_id', 'INTEGER DEFAULT NULL'),
+    ('mailings', 'keep_targets_on_ban', 'INTEGER DEFAULT 0'), ('mailings', 'account_rotation_mode', "TEXT DEFAULT 'per_target'"),
+    ('mailings', 'batch_size', 'INTEGER DEFAULT NULL'), ('mailings', 'batch_pause', 'INTEGER DEFAULT 10'),
+    ('mailings', 'hidden_tag_enabled', 'INTEGER DEFAULT 0'), ('users', 'ref_code', 'TEXT'),
+    ('users', 'referred_by', 'INTEGER'), ('users', 'ref_balance', 'REAL DEFAULT 0'), ('users', 'last_activity', 'DATETIME'),
+    ('users', 'subscription_expired_notified_at', 'DATETIME DEFAULT NULL'), ('users', 'reminder_3d_sent_at', 'DATETIME DEFAULT NULL'),
+    ('users', 'reminder_1d_sent_at', 'DATETIME DEFAULT NULL'), ('users', 'welcome_pin_msg_id', 'INTEGER DEFAULT NULL'),
+    ('users', 'subscription_type', 'TEXT DEFAULT NULL'),
+})
+
 
 def is_safe_media_path(path: str) -> bool:
     try:
@@ -278,6 +307,8 @@ class Database:
     async def _run_migrations(self):
         """Run database migrations for new columns."""
         async def _add_col(table, col, definition):
+            if (table, col, definition) not in _ALLOWED_MIGRATION_COLUMNS:
+                raise ValueError("Attempted to run an unapproved schema migration")
             async with self._conn.execute(f"PRAGMA table_info({table})") as cur:
                 cols = [r["name"] for r in await cur.fetchall()]
             if col not in cols:

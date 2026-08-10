@@ -175,6 +175,19 @@ def add_account_proxy_keyboard() -> InlineKeyboardMarkup:
     return builder.as_markup()
 
 
+def retry_or_skip_proxy_keyboard() -> InlineKeyboardMarkup:
+    """Keep an escape route after a proxy validation failure.
+
+    The add-account flow is already authorized at this point, so reusing its
+    normal skip callback is safe and lets the user continue without losing
+    the partially completed FSM flow.
+    """
+    builder = InlineKeyboardBuilder()
+    builder.row(_btn("➡️ Продолжить без прокси", callback_data="add_account_skip_proxy", style="primary"))
+    builder.row(_btn("◀️ Назад", callback_data="accounts", style="primary"))
+    return builder.as_markup()
+
+
 def add_account_api_keyboard() -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
     builder.row(
