@@ -2609,6 +2609,15 @@ async def _find_forum_targets(client, targets: list) -> list[str]:
     import (dozens+ of chats) sequentially checking each one at up to 10s
     could take minutes; a handful of concurrent checks keeps that bounded
     without firing so many requests at once that Telegram flood-waits it.
+
+    Bounding concurrency alone still leaves the TOTAL time unbounded for a
+    large enough target list (ceil(N/8) * up to 10s each) — for a big
+    folder over a degraded proxy where every check hits its own timeout,
+    this alone stretched out to many minutes with the caller's "Загружаем
+    чаты из папки..." message just sitting there with no feedback. This is
+    a best-effort hint (targets are already saved before this runs in
+    every caller), so it's safe to give up on the whole batch after a
+    fixed ceiling rather than let it run arbitrarily long.
     """
     semaphore = asyncio.Semaphore(8)
 
@@ -2616,7 +2625,13 @@ async def _find_forum_targets(client, targets: list) -> list[str]:
         async with semaphore:
             return t.chat_identifier if await _has_forum_flag(client, t.chat_identifier) else None
 
-    results = await asyncio.gather(*(_check(t) for t in targets))
+    try:
+        results = await asyncio.wait_for(
+            asyncio.gather(*(_check(t) for t in targets)), timeout=60
+        )
+    except asyncio.TimeoutError:
+        logger.warning(f"_find_forum_targets timed out checking {len(targets)} targets, skipping forum hint")
+        return []
     return [r for r in results if r]
 
 
