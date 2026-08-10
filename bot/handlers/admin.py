@@ -1625,9 +1625,12 @@ async def callback_admin_subscriptions(callback: CallbackQuery, db: Database, bo
 
     for row in chunk:
         sub_end = row.get("subscription_end")
-        if sub_end:
-            if isinstance(sub_end, str):
+        if sub_end and isinstance(sub_end, str):
+            try:
                 sub_end = datetime.fromisoformat(sub_end)
+            except (ValueError, TypeError):
+                sub_end = None
+        if sub_end:
             is_active = sub_end > now
             days_left = (sub_end - now).days if is_active else 0
             status = f"✅ активна, {days_left}д" if is_active else "❌ истекла"
@@ -1638,9 +1641,12 @@ async def callback_admin_subscriptions(callback: CallbackQuery, db: Database, bo
 
         purchase_count = row.get("purchase_count") or 0
         last_paid = row.get("last_paid_at")
-        if last_paid:
-            if isinstance(last_paid, str):
+        if last_paid and isinstance(last_paid, str):
+            try:
                 last_paid = datetime.fromisoformat(last_paid)
+            except (ValueError, TypeError):
+                last_paid = None
+        if last_paid:
             paid_str = last_paid.strftime("%d.%m.%Y")
         else:
             paid_str = "—"

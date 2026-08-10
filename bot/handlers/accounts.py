@@ -729,12 +729,16 @@ async def _connect_and_send_code(message: Message, state: FSMContext, data: dict
             )
             await state.set_state(AddAccountStates.waiting_api_id)
         elif "phone" in err.lower() or "invalid" in err.lower():
+            # Same reasoning as the api_id/api_hash branch above — keep
+            # proxy/API credentials in state and just re-ask for the phone,
+            # instead of wiping the whole wizard over a typo.
+            await state.update_data(phone=None)
             await message.answer(
-                pe(f"❌ Неверный номер телефона.\n\nПроверьте формат: +380991234567"),
+                pe("❌ Неверный номер телефона.\n\nПроверьте формат: +380991234567\n\nВведите номер снова:"),
                 parse_mode="HTML",
-                reply_markup=main_menu_keyboard(),
+                reply_markup=cancel_keyboard(),
             )
-            await state.clear()
+            await state.set_state(AddAccountStates.waiting_phone)
         else:
             await message.answer(
                 pe(friendly_error(e, default="❌ Не удалось отправить код. Попробуйте снова позже.")),
@@ -775,16 +779,17 @@ async def process_phone(
 
 
 @router.message(AddAccountStates.waiting_code)
-async def process_code(message: Message, state: FSMContext, db: Database):
+async def process_code(message: Message, state: FSMContext, db: Database, userbot_manager: UserbotManager):
     code = (message.text or "").strip()
     if not code.isdigit() or len(code) < 5:
         return
     await state.update_data(entered_code=code)
-    await _confirm_code(message, state, db)
+    await _confirm_code(message, state, db, userbot_manager)
 
 
 async def _persist_new_account(
     db: Database,
+    userbot_manager: UserbotManager,
     telegram_user_id: int,
     phone: str,
     api_id: int,
@@ -817,16 +822,33 @@ async def _persist_new_account(
                     await db.update_account_proxy(account_id, proxy_str)
                 else:
                     await db.update_account_proxy(account_id, auto_proxy, proxy_pool_id=auto_proxy_pool_id)
-            return user, account_id
+            break
         except Exception as e:
             last_exc = e
             if attempt < 2:
                 await asyncio.sleep(1 + attempt)
-    raise last_exc
+            else:
+                raise last_exc
+
+    # The DB row exists now — start the real (non-onboarding) Telethon client
+    # so autoresponder/mailing event handlers are registered immediately.
+    # Without this, a freshly added account sat completely idle (no
+    # NewMessage handler registered at all) until the next full bot restart,
+    # an admin manually restarting clients, or the user happening to touch
+    # the proxy setting — best-effort only, a failure here doesn't undo the
+    # account creation that already succeeded.
+    account = await db.get_account(account_id)
+    if account:
+        try:
+            await asyncio.wait_for(userbot_manager.start_client(account), timeout=30)
+        except Exception as e:
+            logger.warning(f"Failed to start client for newly added account {account_id}: {e}")
+
+    return user, account_id
 
 
 @router.message(AddAccountStates.waiting_password)
-async def process_password(message: Message, state: FSMContext, db: Database):
+async def process_password(message: Message, state: FSMContext, db: Database, userbot_manager: UserbotManager):
     if not message.text:
         await message.answer(pe("❌ Введите пароль текстом."), parse_mode="HTML", reply_markup=cancel_keyboard())
         return
@@ -854,13 +876,18 @@ async def process_password(message: Message, state: FSMContext, db: Database):
     await state.update_data(confirming=True)
 
     try:
-        await client.sign_in(password=password)
+        # Wrapped like the connect()/send_code_request() calls earlier in
+        # this same wizard — if the proxy dies between the code being sent
+        # and the user actually typing the password, this could otherwise
+        # hang forever with no feedback.
+        await asyncio.wait_for(client.sign_in(password=password), timeout=30)
 
         session_string = client.session.save()
         await client.disconnect()
 
         user, account_id = await _persist_new_account(
             db,
+            userbot_manager,
             message.from_user.id,
             data["phone"],
             data["api_id"],
@@ -1002,11 +1029,11 @@ async def _edit_code_message(event, state: FSMContext, text: str, **kwargs):
 
 
 @router.callback_query(F.data == "code_confirm")
-async def callback_code_confirm(callback: CallbackQuery, state: FSMContext, db: Database):
-    await _confirm_code(callback, state, db)
+async def callback_code_confirm(callback: CallbackQuery, state: FSMContext, db: Database, userbot_manager: UserbotManager):
+    await _confirm_code(callback, state, db, userbot_manager)
 
 
-async def _confirm_code(event, state: FSMContext, db: Database):
+async def _confirm_code(event, state: FSMContext, db: Database, userbot_manager: UserbotManager):
     user_id = event.from_user.id
     current_state = await state.get_state()
     valid_states = [AddAccountStates.waiting_code.state]
@@ -1052,13 +1079,14 @@ async def _confirm_code(event, state: FSMContext, db: Database):
     await _edit_code_message(event, state, pe("⏳ Проверяем код..."), parse_mode="HTML")
 
     try:
-        await client.sign_in(data["phone"], code)
+        await asyncio.wait_for(client.sign_in(data["phone"], code), timeout=30)
 
         session_string = client.session.save()
         await client.disconnect()
 
         user, account_id = await _persist_new_account(
             db,
+            userbot_manager,
             user_id,
             data["phone"],
             data["api_id"],

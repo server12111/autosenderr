@@ -1762,11 +1762,15 @@ class Database:
         await self._conn.commit()
 
     async def set_user_reminder_sent(self, user_id: int, days: int):
-        col = "reminder_3d_sent_at" if days == 3 else "reminder_1d_sent_at"
-        await self._conn.execute(
-            f"UPDATE users SET {col} = ? WHERE id = ?",
-            (now_moscow().isoformat(), user_id)
-        )
+        # Two literal queries instead of splicing a column name into SQL
+        # text — avoids that pattern turning into an injection hole if a
+        # future caller ever passes `days` through from something less
+        # tightly controlled than this hardcoded 3-vs-1 ternary.
+        if days == 3:
+            query = "UPDATE users SET reminder_3d_sent_at = ? WHERE id = ?"
+        else:
+            query = "UPDATE users SET reminder_1d_sent_at = ? WHERE id = ?"
+        await self._conn.execute(query, (now_moscow().isoformat(), user_id))
         await self._conn.commit()
 
     async def update_mailing_keep_targets(self, mailing_id: int, value: bool):
@@ -2018,15 +2022,6 @@ class Database:
         await self._conn.commit()
 
     # === Withdrawal Requests ===
-    async def create_withdrawal_request(self, user_id: int, amount: float, wallet: Optional[str] = None) -> int:
-        cursor = await self._conn.execute(
-            "INSERT INTO withdrawal_requests "
-            "(user_id, amount, wallet, created_at) VALUES (?, ?, ?, ?)",
-            (user_id, amount, wallet, now_moscow().isoformat()),
-        )
-        await self._conn.commit()
-        return cursor.lastrowid
-
     async def create_withdrawal_from_balance(
         self,
         user_id: int,

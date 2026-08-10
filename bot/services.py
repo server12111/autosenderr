@@ -584,6 +584,16 @@ class AutoresponderService:
         if not account.autoresponder_enabled or not account.autoresponder_text:
             return
 
+        # Shares the mailing loop's flood-wait gate (bot/services.py's
+        # MailingService) — a FloodWaitError from Telegram applies to the
+        # whole account, not just mailings. Without this check, every new
+        # DM during an active wait triggers another blind send attempt that
+        # is guaranteed to fail, each one risking extending the wait or
+        # escalating toward a ban.
+        flood_until = await self.db.get_flood_wait_until(account.id)
+        if flood_until and flood_until > now_moscow():
+            return
+
         claimed = await self.db.claim_autoresponder_history(account.id, sender_id, event.text)
         if not claimed:
             return
@@ -604,6 +614,10 @@ class AutoresponderService:
             else:
                 await event.respond(ar_text or "")
             logger.info(f"Autoresponder sent to {sender_id} from {account.phone}")
+        except FloodWaitError as e:
+            await self.db.set_flood_wait_until(account.id, now_moscow() + timedelta(seconds=e.seconds))
+            await self.db.clear_autoresponder_history_for_sender(account.id, sender_id)
+            logger.warning(f"Autoresponder hit FloodWait ({e.seconds}s) for account {account.id}")
         except Exception as e:
             # Allow a retry if sending failed after the atomic claim.
             await self.db.clear_autoresponder_history_for_sender(account.id, sender_id)
@@ -618,6 +632,10 @@ class AutoresponderService:
             return
 
         if not account.group_autoresponder_enabled or not account.group_autoresponder_text:
+            return
+
+        flood_until = await self.db.get_flood_wait_until(account.id)
+        if flood_until and flood_until > now_moscow():
             return
 
         sender_id = None
@@ -653,6 +671,11 @@ class AutoresponderService:
             else:
                 await event.reply(gr_text or "")
             logger.info(f"Group autoresponder replied to {sender_id} from {account.phone}")
+        except FloodWaitError as e:
+            await self.db.set_flood_wait_until(account.id, now_moscow() + timedelta(seconds=e.seconds))
+            if sender_id is not None:
+                await self.db.clear_autoresponder_history_for_sender(account.id, sender_id)
+            logger.warning(f"Group autoresponder hit FloodWait ({e.seconds}s) for account {account.id}")
         except Exception as e:
             if sender_id is not None:
                 await self.db.clear_autoresponder_history_for_sender(account.id, sender_id)
@@ -860,6 +883,7 @@ class MailingService:
         self._mailing_locks: dict[int, asyncio.Lock] = {}
         self._working_targets: dict[int, set[int]] = {}
         self._message_rotation: dict[int, int] = {}  # mailing_id -> next message index (round-robin, not random)
+        self._flood_notify_locks: dict[int, asyncio.Lock] = {}  # account_id -> lock, serializes _notify_flood_wait
         # Flood-wait expiry is persisted in accounts.flood_wait_until (DB), not
         # kept here in memory — a bot restart (which happens on every deploy)
         # must not forget an account is still in an active flood window and
@@ -1048,10 +1072,16 @@ class MailingService:
         # Persisted in the DB (not in-memory) — a bot restart between
         # notifications, which happens on every deploy, must not forget an
         # account is still in the SAME flood episode and re-notify about it.
-        already_flooded = await self.db.get_flood_wait_until(account_id)
-        await self.db.set_flood_wait_until(account_id, finish_at)
-        if already_flooded and already_flooded > now_moscow():
-            return
+        # Locked per-account: two mailings sharing one account can hit
+        # FloodWaitError within the same instant, and without the lock both
+        # could read "not yet flooded" before either write lands, sending a
+        # duplicate alert for what's really one episode.
+        lock = self._flood_notify_locks.setdefault(account_id, asyncio.Lock())
+        async with lock:
+            already_flooded = await self.db.get_flood_wait_until(account_id)
+            await self.db.set_flood_wait_until(account_id, finish_at)
+            if already_flooded and already_flooded > now_moscow():
+                return
 
         notify = getattr(self.userbot_manager, '_bot_notify_callback', None)
         if not notify or not user:
@@ -1074,30 +1104,6 @@ class MailingService:
     async def delete_mailing(self, mailing_id: int):
         await self.stop_mailing(mailing_id)
         await self.db.delete_mailing(mailing_id)
-
-    async def _has_chat_activity(self, client, target: str, since: datetime, my_id: int) -> bool:
-        """Повертає True якщо хтось (крім бота) писав у чат після since."""
-        try:
-            msgs = await client.get_messages(target, limit=10)
-            for m in msgs:
-                msg_time = m.date.replace(tzinfo=None) if m.date.tzinfo else m.date
-                if msg_time > since and m.sender_id != my_id:
-                    return True
-            return False
-        except Exception:
-            return True  # якщо не можемо перевірити — дозволяємо відправку
-
-    async def _has_new_activity_after_account_message(self, client, target: str, my_id: int) -> bool:
-        """Check whether another participant sent the latest message."""
-        try:
-            messages = await client.get_messages(target, limit=1)
-            for message in messages:
-                return not bool(
-                    getattr(message, "out", getattr(message, "sender_id", None) == my_id)
-                )
-            return True
-        except Exception:
-            return True
 
     async def _get_recent_user_ids(self, client, target: str, my_id: int) -> list:
         try:
@@ -1406,12 +1412,6 @@ class MailingService:
                             pass
                         elif not target.startswith('@'):
                             target = f"@{target}"
-
-                        if target_obj.last_sent_at is not None and not await self._has_new_activity_after_account_message(
-                            target_client, target, target_me.id
-                        ):
-                            self._mark_target_not_working(mailing_id, target_obj.id)
-                            continue
 
                         hidden_tag_user_ids = []
                         if mailing.hidden_tag_enabled and not add_sig:

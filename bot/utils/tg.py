@@ -14,6 +14,17 @@ async def safe_edit(message, text: str, **kwargs):
         raise
 
 
+async def safe_edit_markup(message, **kwargs):
+    """Edit message reply markup only, silently ignoring 'message not found/not modified' errors."""
+    try:
+        await message.edit_reply_markup(**kwargs)
+    except TelegramBadRequest as e:
+        msg = str(e).lower()
+        if "not found" in msg or "not modified" in msg or "message to edit not found" in msg:
+            return
+        raise
+
+
 async def _retry_network(coro_fn, retries: int):
     """Run coro_fn() up to `retries` extra times on TelegramNetworkError (transient
     connectivity blips), with a short backoff. Raises the last error if still failing."""

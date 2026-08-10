@@ -250,7 +250,6 @@ class UserbotManager:
         # re-send the same alert again on the very next reconnect attempt.
         if await self.db.is_proxy_problem_notified(account.id):
             return
-        await self.db.mark_proxy_problem_notified(account.id)
 
         if self._account_proxy_failure_callback:
             try:
@@ -283,6 +282,12 @@ class UserbotManager:
                     f"3. Запустите рассылку заново"
                 ),
             )
+            # Only mark as notified once the alert actually went out — a
+            # failed send here (transient network blip) must not
+            # permanently silence every future notification attempt for
+            # this account, unlike the dedup check above which is meant to
+            # stop *repeat* alerts once one has actually landed.
+            await self.db.mark_proxy_problem_notified(account.id)
         except Exception as ne:
             logger.error(f"Failed to notify about proxy error for account {account.id}: {ne}")
 

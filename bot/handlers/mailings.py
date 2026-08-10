@@ -30,6 +30,7 @@ from ..keyboards.inline import (
     hidden_tag_keyboard,
     mailing_messages_keyboard,
     mailing_targets_keyboard,
+    TARGETS_PAGE_SIZE,
     select_account_keyboard,
     mailing_creation_messages_keyboard,
     mailing_creation_targets_keyboard,
@@ -48,7 +49,7 @@ from ..keyboards.inline import (
     skip_thread_keyboard,
 )
 from ..utils.time_utils import format_active_hours, parse_time_range, create_active_hours_json, now_moscow
-from ..utils.tg import safe_edit
+from ..utils.tg import safe_edit, safe_edit_markup
 from ..services import MailingService
 from ..userbot.manager import UserbotManager
 from ..utils.errors import friendly_error
@@ -148,6 +149,12 @@ def parse_folder_slug(text: str) -> str | None:
     if m:
         return m.group(1)
     return None
+
+
+MAX_TXT_IMPORT_TARGETS = 2000  # each one is a sequential DB round-trip on the
+# shared connection, plus a forum-flag Telethon RPC — an unbounded import
+# from a crafted/huge .txt file could otherwise stall the whole bot for
+# every user for minutes.
 
 
 def _parse_txt_targets(content: str) -> list:
@@ -342,7 +349,7 @@ async def callback_toggle_mailing(
         "Выберите действие:"
     )
 
-    await callback.message.edit_text(text, parse_mode="HTML", reply_markup=mailing_menu_keyboard(mailing))
+    await safe_edit(callback.message, text, parse_mode="HTML", reply_markup=mailing_menu_keyboard(mailing))
 
 
 @router.callback_query(F.data.startswith("hidden_tag:"))
@@ -422,8 +429,8 @@ async def callback_mailing_messages(callback: CallbackQuery, db: Database):
 
     text += "\nНажмите на сообщение, чтобы удалить его:"
 
-    await callback.message.edit_text(
-        pe(text), parse_mode="HTML", reply_markup=mailing_messages_keyboard(mailing_id, messages)
+    await safe_edit(
+        callback.message, pe(text), parse_mode="HTML", reply_markup=mailing_messages_keyboard(mailing_id, messages)
     )
     await callback.answer()
 
@@ -775,37 +782,66 @@ async def callback_delete_message(callback: CallbackQuery, db: Database):
     else:
         text += "Сообщений пока нет.\n"
 
-    await callback.message.edit_text(
-        pe(text), parse_mode="HTML", reply_markup=mailing_messages_keyboard(mailing_id, messages)
+    await safe_edit(
+        callback.message, pe(text), parse_mode="HTML", reply_markup=mailing_messages_keyboard(mailing_id, messages)
     )
 
 
 # === Mailing Targets ===
-@router.callback_query(F.data.startswith("mailing_targets:"))
-async def callback_mailing_targets(callback: CallbackQuery, db: Database):
-    mailing_id = int(callback.data.split(":")[1])
+def _mailing_targets_text(targets: list, page: int) -> str:
+    """Per-page target listing — capped to TARGETS_PAGE_SIZE lines so a large
+    target list can't exceed Telegram's ~4096-char message text limit."""
+    total_pages = max(1, (len(targets) + TARGETS_PAGE_SIZE - 1) // TARGETS_PAGE_SIZE)
+    page = max(0, min(page, total_pages - 1))
+    page_targets = targets[page * TARGETS_PAGE_SIZE:(page + 1) * TARGETS_PAGE_SIZE]
+
+    text = f"🎯 Целевые чаты ({len(targets)} шт.):\n\n"
+    if page_targets:
+        start_num = page * TARGETS_PAGE_SIZE + 1
+        for i, target in enumerate(page_targets, start_num):
+            thread_info = f" [тема #{target.thread_id}]" if target.thread_id else ""
+            text += f"{i}. {html.escape(target.chat_identifier)}{thread_info}\n"
+    else:
+        text += "Целевых чатов пока нет.\n"
+    if total_pages > 1:
+        text += f"\nСтраница {page + 1}/{total_pages}."
+    text += "\nНажмите на чат, чтобы удалить его:"
+    return text
+
+
+@router.callback_query(F.data.startswith("mailing_targets_page:"))
+async def callback_mailing_targets_page(callback: CallbackQuery, db: Database):
+    _, mailing_id_str, page_str = callback.data.split(":")
+    mailing_id = int(mailing_id_str)
+    page = int(page_str)
     if not await db.get_mailing_for_user(mailing_id, callback.from_user.id):
         await callback.answer("⛔ Нет доступа", show_alert=True)
         return
+    targets = await db.get_mailing_targets(mailing_id)
+    await safe_edit(
+        callback.message, pe(_mailing_targets_text(targets, page)), parse_mode="HTML",
+        reply_markup=mailing_targets_keyboard(mailing_id, targets, page=page),
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data == "noop")
+async def callback_noop(callback: CallbackQuery):
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("mailing_targets:"))
+async def callback_mailing_targets(callback: CallbackQuery, db: Database):
+    mailing_id = int(callback.data.split(":")[1])
     mailing = await db.get_mailing_for_user(mailing_id, callback.from_user.id)
     if not mailing:
         await callback.answer("⛔ Нет доступа", show_alert=True)
         return
     targets = await db.get_mailing_targets(mailing_id)
 
-    text = f"🎯 Целевые чаты ({len(targets)} шт.):\n\n"
-    if targets:
-        for i, target in enumerate(targets, 1):
-            thread_info = f" [тема #{target.thread_id}]" if target.thread_id else ""
-            text += f"{i}. {html.escape(target.chat_identifier)}{thread_info}\n"
-    else:
-        text += "Целевых чатов пока нет.\n"
-
-    text += "\nНажмите на чат, чтобы удалить его:"
-
     await callback.message.edit_text(
-        pe(text), parse_mode="HTML",
-        reply_markup=mailing_targets_keyboard(mailing_id, targets)
+        pe(_mailing_targets_text(targets, 0)), parse_mode="HTML",
+        reply_markup=mailing_targets_keyboard(mailing_id, targets, page=0)
     )
     await callback.answer()
 
@@ -935,15 +971,9 @@ async def callback_delete_target(callback: CallbackQuery, db: Database, mailing_
 
     await callback.answer("Чат удалён")
 
-    text = f"🎯 Целевые чаты ({len(targets)} шт.):\n\n"
-    if targets:
-        for i, target in enumerate(targets, 1):
-            text += f"{i}. {html.escape(target.chat_identifier)}\n"
-    else:
-        text += "Целевых чатов пока нет.\n"
-
-    await callback.message.edit_text(
-        pe(text), parse_mode="HTML", reply_markup=mailing_targets_keyboard(mailing_id, targets)
+    await safe_edit(
+        callback.message, pe(_mailing_targets_text(targets, 0)), parse_mode="HTML",
+        reply_markup=mailing_targets_keyboard(mailing_id, targets, page=0)
     )
 
 
@@ -1236,6 +1266,14 @@ async def process_edit_txt_file(message: Message, state: FSMContext, db: Databas
     if not identifiers:
         await message.answer(
             pe("❌ В файле не найдено ни одного чата."),
+            parse_mode="HTML",
+            reply_markup=cancel_keyboard(),
+        )
+        return
+    if len(identifiers) > MAX_TXT_IMPORT_TARGETS:
+        await message.answer(
+            pe(f"❌ В файле {len(identifiers)} чатов — максимум за раз {MAX_TXT_IMPORT_TARGETS}. "
+               "Разделите файл на несколько частей и загрузите по очереди."),
             parse_mode="HTML",
             reply_markup=cancel_keyboard(),
         )
@@ -1989,6 +2027,24 @@ async def callback_create_delete_target(callback: CallbackQuery, state: FSMConte
 
 
 @router.callback_query(
+    CreateMailingStates.adding_targets, F.data.startswith("create_targets_page:")
+)
+async def callback_create_targets_page(callback: CallbackQuery, db: Database):
+    _, mailing_id_str, page_str = callback.data.split(":")
+    mailing_id = int(mailing_id_str)
+    page = int(page_str)
+    if not await db.get_mailing_for_user(mailing_id, callback.from_user.id):
+        await callback.answer("⛔ Нет доступа", show_alert=True)
+        return
+    targets = await db.get_mailing_targets(mailing_id)
+    await safe_edit_markup(
+        callback.message,
+        reply_markup=mailing_creation_targets_keyboard(mailing_id, targets, page=page),
+    )
+    await callback.answer()
+
+
+@router.callback_query(
     CreateMailingStates.adding_targets, F.data.startswith("create_add_folder:")
 )
 async def callback_create_add_folder(callback: CallbackQuery, state: FSMContext):
@@ -2169,6 +2225,14 @@ async def process_create_txt_file(message: Message, state: FSMContext, db: Datab
     if not identifiers:
         await message.answer(
             pe("❌ В файле не найдено ни одного чата."),
+            parse_mode="HTML",
+            reply_markup=cancel_keyboard(),
+        )
+        return
+    if len(identifiers) > MAX_TXT_IMPORT_TARGETS:
+        await message.answer(
+            pe(f"❌ В файле {len(identifiers)} чатов — максимум за раз {MAX_TXT_IMPORT_TARGETS}. "
+               "Разделите файл на несколько частей и загрузите по очереди."),
             parse_mode="HTML",
             reply_markup=cancel_keyboard(),
         )
@@ -2411,7 +2475,7 @@ async def callback_set_mailing_account(callback: CallbackQuery, db: Database):
         "Выберите действие:"
     )
 
-    await callback.message.edit_text(text, parse_mode="HTML", reply_markup=mailing_menu_keyboard(mailing))
+    await safe_edit(callback.message, text, parse_mode="HTML", reply_markup=mailing_menu_keyboard(mailing))
 
 
 @router.callback_query(F.data.startswith("change_msg_format:"))
@@ -2562,17 +2626,9 @@ async def callback_toggle_keep_targets(callback: CallbackQuery, db: Database):
     await callback.answer(f"Настройка {status}")
 
     targets = await db.get_mailing_targets(mailing_id)
-    text = f"🎯 Целевые чаты ({len(targets)} шт.):\n\n"
-    if targets:
-        for i, target in enumerate(targets, 1):
-            thread_info = f" [тема #{target.thread_id}]" if target.thread_id else ""
-            text += f"{i}. {html.escape(target.chat_identifier)}{thread_info}\n"
-    else:
-        text += "Целевых чатов пока нет.\n"
-    text += "\nНажмите на чат, чтобы удалить его:"
-    await callback.message.edit_text(
-        pe(text), parse_mode="HTML",
-        reply_markup=mailing_targets_keyboard(mailing_id, targets)
+    await safe_edit(
+        callback.message, pe(_mailing_targets_text(targets, 0)), parse_mode="HTML",
+        reply_markup=mailing_targets_keyboard(mailing_id, targets, page=0)
     )
 
 
@@ -2757,7 +2813,7 @@ async def callback_mailing_reply_mode(callback: CallbackQuery, db: Database):
             f"Последняя отправка: {last_sent}\n\n"
             "Выберите действие:"
         )
-        await callback.message.edit_text(text, parse_mode="HTML", reply_markup=mailing_menu_keyboard(mailing))
+        await safe_edit(callback.message, text, parse_mode="HTML", reply_markup=mailing_menu_keyboard(mailing))
 
     await callback.answer()
 
@@ -2790,7 +2846,7 @@ async def callback_reply_mode_last(callback: CallbackQuery, db: Database):
         f"Последняя отправка: {last_sent}\n\n"
         "Выберите действие:"
     )
-    await callback.message.edit_text(text, parse_mode="HTML", reply_markup=mailing_menu_keyboard(mailing))
+    await safe_edit(callback.message, text, parse_mode="HTML", reply_markup=mailing_menu_keyboard(mailing))
     await callback.answer("✅ Режим: на последнее сообщение")
 
 
@@ -2838,7 +2894,7 @@ async def callback_reply_mode_fixed_pos(callback: CallbackQuery, db: Database):
         f"Последняя отправка: {last_sent}\n\n"
         "Выберите действие:"
     )
-    await callback.message.edit_text(text, parse_mode="HTML", reply_markup=mailing_menu_keyboard(mailing))
+    await safe_edit(callback.message, text, parse_mode="HTML", reply_markup=mailing_menu_keyboard(mailing))
     await callback.answer(f"✅ Режим: {n}-е с конца")
 
 

@@ -393,10 +393,16 @@ def _format_target_interval(target: MailingTarget) -> str:
     return f"⏱️ {secs}с"
 
 
-def mailing_targets_keyboard(mailing_id: int, targets: list[MailingTarget]) -> InlineKeyboardMarkup:
+TARGETS_PAGE_SIZE = 20  # keeps total inline buttons well under Telegram's ~100-button cap
+
+
+def mailing_targets_keyboard(mailing_id: int, targets: list[MailingTarget], page: int = 0) -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
     builder.row(_btn("Изменить КД", callback_data=f"change_all_target_interval:{mailing_id}", style="success"))
-    for target in targets:
+    total_pages = max(1, (len(targets) + TARGETS_PAGE_SIZE - 1) // TARGETS_PAGE_SIZE)
+    page = max(0, min(page, total_pages - 1))
+    page_targets = targets[page * TARGETS_PAGE_SIZE:(page + 1) * TARGETS_PAGE_SIZE]
+    for target in page_targets:
         iv_text = _format_target_interval(target)
         if target.is_forum or target.thread_id:
             thread_text = f"🧵#{target.thread_id}" if target.thread_id else "🧵"
@@ -410,6 +416,14 @@ def mailing_targets_keyboard(mailing_id: int, targets: list[MailingTarget]) -> I
                 _btn(f"🗑️ {target.chat_identifier}", callback_data=f"confirm_delete_target:{target.id}", style="danger"),
                 _btn(iv_text, callback_data=f"edit_target_interval:{target.id}:{mailing_id}", style="primary"),
             )
+    if total_pages > 1:
+        nav = []
+        if page > 0:
+            nav.append(_btn("◀️", callback_data=f"mailing_targets_page:{mailing_id}:{page - 1}", style="primary"))
+        nav.append(_btn(f"{page + 1}/{total_pages}", callback_data="noop", style="primary"))
+        if page < total_pages - 1:
+            nav.append(_btn("▶️", callback_data=f"mailing_targets_page:{mailing_id}:{page + 1}", style="primary"))
+        builder.row(*nav)
     builder.row(
         _btn("➕ Добавить чат", callback_data=f"add_mailing_target:{mailing_id}", style="primary"),
         _btn("📁 Добавить папку", callback_data=f"add_folder_target:{mailing_id}", style="primary"),
@@ -455,10 +469,21 @@ def mailing_creation_messages_keyboard(mailing_id: int, messages: list[MailingMe
     return builder.as_markup()
 
 
-def mailing_creation_targets_keyboard(mailing_id: int, targets: list[MailingTarget]) -> InlineKeyboardMarkup:
+def mailing_creation_targets_keyboard(mailing_id: int, targets: list[MailingTarget], page: int = 0) -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
-    for target in targets:
+    total_pages = max(1, (len(targets) + TARGETS_PAGE_SIZE - 1) // TARGETS_PAGE_SIZE)
+    page = max(0, min(page, total_pages - 1))
+    page_targets = targets[page * TARGETS_PAGE_SIZE:(page + 1) * TARGETS_PAGE_SIZE]
+    for target in page_targets:
         builder.row(_btn(f"🗑️ {target.chat_identifier}", callback_data=f"create_delete_target:{target.id}", style="danger"))
+    if total_pages > 1:
+        nav = []
+        if page > 0:
+            nav.append(_btn("◀️", callback_data=f"create_targets_page:{mailing_id}:{page - 1}", style="primary"))
+        nav.append(_btn(f"{page + 1}/{total_pages}", callback_data="noop", style="primary"))
+        if page < total_pages - 1:
+            nav.append(_btn("▶️", callback_data=f"create_targets_page:{mailing_id}:{page + 1}", style="primary"))
+        builder.row(*nav)
     builder.row(
         _btn("➕ Добавить чат", callback_data=f"create_add_target:{mailing_id}", style="primary"),
         _btn("📁 Добавить папку", callback_data=f"create_add_folder:{mailing_id}", style="primary"),
