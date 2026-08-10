@@ -71,7 +71,7 @@ async def callback_autoresponder(callback: CallbackQuery, db: Database):
         "📬 Уведомления — получайте сообщения о каждом входящем ЛС."
     )
 
-    await safe_edit(callback.message, pe(text), parse_mode="HTML", reply_markup=autoresponder_keyboard(account_id, account.autoresponder_enabled, account.notify_messages))
+    await safe_edit(callback.message, pe(text), parse_mode="HTML", reply_markup=autoresponder_keyboard(account_id, account.autoresponder_enabled, account.notify_messages), retries=0)
     await callback.answer()
 
 
@@ -138,7 +138,7 @@ async def callback_toggle_autoresponder(callback: CallbackQuery, db: Database, u
         f"📬 Уведомления — получайте сообщения о каждом входящем ЛС.{ad_note}"
     )
 
-    await safe_edit(callback.message, pe(text), parse_mode="HTML", reply_markup=autoresponder_keyboard(account_id, account.autoresponder_enabled, account.notify_messages))
+    await safe_edit(callback.message, pe(text), parse_mode="HTML", reply_markup=autoresponder_keyboard(account_id, account.autoresponder_enabled, account.notify_messages), retries=0)
 
 
 @router.callback_query(F.data.startswith("toggle_notify:"))
@@ -180,7 +180,7 @@ async def callback_toggle_notify(callback: CallbackQuery, db: Database, userbot_
         "📬 Уведомления — получайте сообщения о каждом входящем ЛС."
     )
 
-    await safe_edit(callback.message, pe(text), parse_mode="HTML", reply_markup=autoresponder_keyboard(account_id, account.autoresponder_enabled, account.notify_messages))
+    await safe_edit(callback.message, pe(text), parse_mode="HTML", reply_markup=autoresponder_keyboard(account_id, account.autoresponder_enabled, account.notify_messages), retries=0)
 
 
 @router.callback_query(F.data.startswith("edit_autoresponder_text:"))
@@ -203,6 +203,7 @@ async def callback_edit_autoresponder_text(
         "✏️ Введите текст автоответа или отправьте фото с подписью:\n\n"
         "Этот текст/фото будет отправляться в ответ на входящие личные сообщения.",
         reply_markup=cancel_keyboard(),
+        retries=0,
     )
     await callback.answer()
 
@@ -292,7 +293,7 @@ async def callback_group_autoresponder(callback: CallbackQuery, db: Database):
         "Каждому пользователю отвечает только один раз."
     )
 
-    await safe_edit(callback.message, pe(text), parse_mode="HTML", reply_markup=group_autoresponder_keyboard(account_id, account.group_autoresponder_enabled))
+    await safe_edit(callback.message, pe(text), parse_mode="HTML", reply_markup=group_autoresponder_keyboard(account_id, account.group_autoresponder_enabled), retries=0)
     await callback.answer()
 
 
@@ -355,6 +356,7 @@ async def callback_toggle_group_autoresponder(callback: CallbackQuery, db: Datab
         f"Каждому пользователю отвечает только один раз.{ad_note}"),
         parse_mode="HTML",
         reply_markup=group_autoresponder_keyboard(account_id, account.group_autoresponder_enabled),
+        retries=0,
     )
 
 
@@ -377,6 +379,7 @@ async def callback_edit_group_autoresponder_text(
         "✏️ Введите текст автоответа для групп или отправьте фото с подписью:\n\n"
         "Это будет отправляться, когда кто-то ответит на сообщение аккаунта в группе.",
         reply_markup=cancel_keyboard(),
+        retries=0,
     )
     await callback.answer()
 

@@ -3,10 +3,11 @@ import asyncio
 from aiogram.exceptions import TelegramBadRequest, TelegramNetworkError
 
 
-async def safe_edit(message, text: str, **kwargs):
-    """Edit message text, silently ignoring 'message not found/not modified' errors."""
+async def safe_edit(message, text: str, retries: int = 2, **kwargs):
+    """Edit message text, retrying transient network failures and silently
+    ignoring only the harmless 'message not found/not modified' responses."""
     try:
-        await message.edit_text(text, **kwargs)
+        await _retry_network(lambda: message.edit_text(text, **kwargs), retries)
     except TelegramBadRequest as e:
         msg = str(e).lower()
         if "not found" in msg or "not modified" in msg or "message to edit not found" in msg:
@@ -14,15 +15,21 @@ async def safe_edit(message, text: str, **kwargs):
         raise
 
 
-async def safe_edit_markup(message, **kwargs):
-    """Edit message reply markup only, silently ignoring 'message not found/not modified' errors."""
+async def safe_edit_markup(message, retries: int = 2, **kwargs):
+    """Edit reply markup, retrying transient network failures and silently
+    ignoring only the harmless 'message not found/not modified' responses."""
     try:
-        await message.edit_reply_markup(**kwargs)
+        await _retry_network(lambda: message.edit_reply_markup(**kwargs), retries)
     except TelegramBadRequest as e:
         msg = str(e).lower()
         if "not found" in msg or "not modified" in msg or "message to edit not found" in msg:
             return
         raise
+
+
+async def safe_answer(message, text: str, retries: int = 2, **kwargs):
+    """Send a message with the same transient-network retry policy as edits."""
+    return await _retry_network(lambda: message.answer(text, **kwargs), retries)
 
 
 async def _retry_network(coro_fn, retries: int):

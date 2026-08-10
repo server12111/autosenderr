@@ -10,6 +10,7 @@ from typing import Optional
 from dataclasses import dataclass, field
 
 from .models import SCHEMA
+from ..utils.delivery_journal import DeliveryJournal
 from ..utils.time_utils import now_moscow
 
 logger = logging.getLogger(__name__)
@@ -161,6 +162,7 @@ class Payment:
     invoice_id: Optional[str]
     amount: float
     currency: str
+    payment_method: str
     status: str
     plan_days: int
     created_at: datetime
@@ -643,7 +645,15 @@ class Database:
             row = await cur.fetchone()
             return row["cnt"] if row else 0
 
-    async def create_account(self, user_id: int, phone: str, api_id: int, api_hash: str, session_string: str) -> int:
+    async def create_account(
+        self,
+        user_id: int,
+        phone: str,
+        api_id: int,
+        api_hash: str,
+        session_string: str,
+        account_payment_invoice: Optional[str] = None,
+    ) -> int:
         async with self._transaction_lock:
             async with aiosqlite.connect(self.db_path) as conn:
                 conn.row_factory = aiosqlite.Row
@@ -662,6 +672,10 @@ class Database:
                             "UPDATE accounts SET api_id=?, api_hash=?, session_string=?, is_active=1 WHERE id=?",
                             (api_id, api_hash, session_string, existing["id"]),
                         )
+                        # Re-authorizing an already known phone does not add
+                        # an account.  Keep a fresh paid entitlement intact;
+                        # an already consumed invoice is simply an idempotent
+                        # retry of the successful original save.
                         await conn.commit()
                         return existing["id"]
                     cursor = await conn.execute(
@@ -670,11 +684,39 @@ class Database:
                         "VALUES (?, ?, ?, ?, ?, ?)",
                         (user_id, phone, api_id, api_hash, session_string, now_moscow().isoformat()),
                     )
+                    if account_payment_invoice:
+                        await self._consume_extra_account_payment(
+                            conn, account_payment_invoice, user_id, existing_account=False,
+                        )
                     await conn.commit()
                     return cursor.lastrowid
                 except BaseException:
                     await conn.rollback()
                     raise
+
+    @staticmethod
+    async def _consume_extra_account_payment(conn, invoice_id: str, user_id: int, *, existing_account: bool):
+        """Consume one durable extra-account entitlement in the same transaction
+        that creates the account.  ``account_setup`` may safely be resumed after
+        an FSM/UI failure; ``account_used`` is accepted only for an idempotent
+        retry that re-saves the same already-existing phone."""
+        async with conn.execute(
+            "UPDATE payments SET status = 'account_used' "
+            "WHERE invoice_id = ? AND user_id = ? AND status = 'account_setup'",
+            (invoice_id, user_id),
+        ) as cur:
+            consumed = cur.rowcount > 0
+        if consumed:
+            return
+        if existing_account:
+            async with conn.execute(
+                "SELECT status FROM payments WHERE invoice_id = ? AND user_id = ?",
+                (invoice_id, user_id),
+            ) as cur:
+                payment = await cur.fetchone()
+            if payment and payment["status"] == "account_used":
+                return
+        raise ValueError("Оплата дополнительного аккаунта уже использована или не подтверждена")
 
     async def update_account_session(self, account_id: int, session_string: str):
         await self._conn.execute(
@@ -765,6 +807,13 @@ class Database:
             "UPDATE accounts SET proxy_problem_notified = 0 WHERE id = ? AND proxy_problem_notified = 1", (account_id,)
         )
         await self._conn.commit()
+        # A successful reconnect or proxy replacement starts a new proxy
+        # lifecycle.  A delivery-retry marker from the old broken proxy must
+        # not suppress the next genuinely new failure notification.
+        try:
+            await DeliveryJournal(self.db_path).forget(f"proxy-problem:{account_id}")
+        except Exception as exc:
+            logger.warning("Could not clear proxy delivery journal for account %s: %s", account_id, exc)
 
     async def get_flood_wait_until(self, account_id: int) -> Optional[datetime]:
         async with self._conn.execute(
@@ -1562,7 +1611,9 @@ class Database:
                 keys = row.keys()
                 return Payment(
                     id=row["id"], user_id=row["user_id"], invoice_id=row["invoice_id"],
-                    amount=row["amount"], currency=row["currency"], status=row["status"],
+                    amount=row["amount"], currency=row["currency"],
+                    payment_method=row["payment_method"] if "payment_method" in keys else "cryptobot",
+                    status=row["status"],
                     plan_days=row["plan_days"] if "plan_days" in keys and row["plan_days"] else 30,
                     created_at=self._parse_datetime(row["created_at"]),
                     paid_at=self._parse_datetime(row["paid_at"]),
@@ -1599,7 +1650,8 @@ class Database:
                                   u.subscription_end, u.referred_by
                            FROM payments p
                            JOIN users u ON u.id = p.user_id
-                           WHERE p.invoice_id = ?""",
+                           WHERE p.invoice_id = ?
+                             AND p.payment_method IN ('cryptobot', 'ton', 'platega')""",
                         (invoice_id,),
                     ) as cur:
                         row = await cur.fetchone()
@@ -1619,7 +1671,9 @@ class Database:
                     await conn.execute(
                         """UPDATE payments
                            SET status = 'paid', paid_at = ?
-                           WHERE invoice_id = ? AND status != 'paid'""",
+                           WHERE invoice_id = ?
+                             AND payment_method IN ('cryptobot', 'ton', 'platega')
+                             AND status != 'paid'""",
                         (now.isoformat(), invoice_id),
                     )
                     await conn.execute(
@@ -1650,6 +1704,19 @@ class Database:
                             )
 
                     await conn.commit()
+                    # These DB flags are deliberately reset for the renewed
+                    # subscription.  The sidecar is only a handoff journal,
+                    # never a cross-subscription source of truth.
+                    journal = DeliveryJournal(self.db_path)
+                    for key in (
+                        f"subscription-expired:{row['user_id']}",
+                        f"subscription-reminder:{row['user_id']}:3",
+                        f"subscription-reminder:{row['user_id']}:1",
+                    ):
+                        try:
+                            await journal.forget(key)
+                        except Exception as exc:
+                            logger.warning("Could not clear subscription delivery journal %s: %s", key, exc)
                     return new_end
                 except BaseException:
                     await conn.rollback()

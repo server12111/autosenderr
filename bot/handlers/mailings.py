@@ -246,6 +246,7 @@ async def callback_account_mailings_page(callback: CallbackQuery, db: Database):
         pe(_mailings_list_text(mailings, page, f"📋 Рассылки аккаунта {name}:", "Рассылок для этого аккаунта нет.")),
         parse_mode="HTML",
         reply_markup=mailings_keyboard(mailings, page=page),
+        retries=0,
     )
     await callback.answer()
 
@@ -279,6 +280,7 @@ async def callback_mailings_page(callback: CallbackQuery, db: Database):
         pe(_mailings_list_text(mailings, page, "📋 Ваши рассылки:", "У вас пока нет рассылок.")),
         parse_mode="HTML",
         reply_markup=mailings_keyboard(mailings, page=page),
+        retries=0,
     )
     await callback.answer()
 
@@ -395,7 +397,7 @@ async def callback_toggle_mailing(
         "Выберите действие:"
     )
 
-    await safe_edit(callback.message, text, parse_mode="HTML", reply_markup=mailing_menu_keyboard(mailing))
+    await safe_edit(callback.message, text, parse_mode="HTML", reply_markup=mailing_menu_keyboard(mailing), retries=0)
 
 
 @router.callback_query(F.data.startswith("hidden_tag:"))
@@ -493,6 +495,7 @@ async def callback_mailing_messages_page(callback: CallbackQuery, db: Database):
         pe(_mailing_messages_text(messages, page) + "\nНажмите на сообщение, чтобы удалить его:"),
         parse_mode="HTML",
         reply_markup=mailing_messages_keyboard(mailing_id, messages, page=page),
+        retries=0,
     )
     await callback.answer()
 
@@ -510,6 +513,7 @@ async def callback_mailing_messages(callback: CallbackQuery, db: Database):
         pe(_mailing_messages_text(messages, 0) + "\nНажмите на сообщение, чтобы удалить его:"),
         parse_mode="HTML",
         reply_markup=mailing_messages_keyboard(mailing_id, messages, page=0),
+        retries=0,
     )
     await callback.answer()
 
@@ -894,6 +898,7 @@ async def callback_mailing_targets_page(callback: CallbackQuery, db: Database):
     await safe_edit(
         callback.message, pe(_mailing_targets_text(targets, page)), parse_mode="HTML",
         reply_markup=mailing_targets_keyboard(mailing_id, targets, page=page),
+        retries=0,
     )
     await callback.answer()
 
@@ -1046,7 +1051,7 @@ async def callback_delete_target(callback: CallbackQuery, db: Database, mailing_
 
     await safe_edit(
         callback.message, pe(_mailing_targets_text(targets, 0)), parse_mode="HTML",
-        reply_markup=mailing_targets_keyboard(mailing_id, targets, page=0)
+        reply_markup=mailing_targets_keyboard(mailing_id, targets, page=0),
     )
 
 
@@ -1220,6 +1225,7 @@ async def process_edit_folder(
         return
 
     loading_msg = await message.answer(pe("⏳ Загружаем чаты из папки..."), parse_mode="HTML")
+    targets_saved = False
     try:
         from telethon.tl.functions.chatlists import CheckChatlistInviteRequest
         # Unbounded before — a slow/unresponsive Telegram RPC (or a flaky
@@ -1247,6 +1253,9 @@ async def process_edit_folder(
                 logger.warning(f"Failed to add chat from folder: {e}")
                 continue
 
+        # From here on, at least some targets are already durable.  A failed
+        # FSM/UI follow-up must not be reported as a failed folder import.
+        targets_saved = added > 0
         await state.clear()
         targets = await db.get_mailing_targets(mailing_id)
 
@@ -1270,6 +1279,12 @@ async def process_edit_folder(
         asyncio.create_task(_check_forums_background(client, db, mailing_id, message, new_targets))
 
     except Exception as e:
+        if targets_saved:
+            logger.error(
+                "Folder %s targets were saved for mailing %s, but the follow-up failed: %s",
+                slug, mailing_id, e, exc_info=True,
+            )
+            return
         logger.error(f"Error resolving folder {slug}: {e}")
         await loading_msg.delete()
         await message.answer(
@@ -1585,6 +1600,15 @@ async def process_select_account(callback: CallbackQuery, state: FSMContext, db:
         "Например: 300 (это 5 минут)",
         reply_markup=cancel_keyboard(),
     )
+    await callback.answer()
+
+
+@router.callback_query(CreateMailingStates.waiting_account, F.data.startswith("select_account_page:"))
+async def callback_select_account_page(callback: CallbackQuery, db: Database):
+    page = int(callback.data.split(":")[1])
+    user = await db.get_user(callback.from_user.id)
+    accounts = await db.get_user_accounts(user.id)
+    await safe_edit_markup(callback.message, reply_markup=select_account_keyboard(accounts, page=page), retries=0)
     await callback.answer()
 
 
@@ -2111,6 +2135,7 @@ async def callback_create_targets_page(callback: CallbackQuery, db: Database):
     await safe_edit_markup(
         callback.message,
         reply_markup=mailing_creation_targets_keyboard(mailing_id, targets, page=page),
+        retries=0,
     )
     await callback.answer()
 
@@ -2129,6 +2154,7 @@ async def callback_create_messages_page(callback: CallbackQuery, db: Database):
     await safe_edit_markup(
         callback.message,
         reply_markup=mailing_creation_messages_keyboard(mailing_id, messages, page=page),
+        retries=0,
     )
     await callback.answer()
 
@@ -2185,6 +2211,7 @@ async def process_create_folder(
         return
 
     loading_msg = await message.answer(pe("⏳ Загружаем чаты из папки..."), parse_mode="HTML")
+    targets_saved = False
     try:
         from telethon.tl.functions.chatlists import CheckChatlistInviteRequest
         # Unbounded before — a slow/unresponsive Telegram RPC (or a flaky
@@ -2212,6 +2239,9 @@ async def process_create_folder(
                 logger.warning(f"Failed to add chat from folder: {e}")
                 continue
 
+        # The targets are now in SQLite; do not turn a later state/UI error
+        # into a misleading "folder import failed" response.
+        targets_saved = added > 0
         await state.set_state(CreateMailingStates.adding_targets)
         targets = await db.get_mailing_targets(mailing_id)
 
@@ -2231,6 +2261,12 @@ async def process_create_folder(
         asyncio.create_task(_check_forums_background(client, db, mailing_id, message, new_targets))
 
     except Exception as e:
+        if targets_saved:
+            logger.error(
+                "Folder %s targets were saved for mailing %s, but the follow-up failed: %s",
+                slug, mailing_id, e, exc_info=True,
+            )
+            return
         logger.error(f"Error resolving folder {slug}: {e}")
         await loading_msg.delete()
         await message.answer(
@@ -2522,6 +2558,23 @@ async def callback_change_mailing_account(callback: CallbackQuery, db: Database)
     await callback.answer()
 
 
+@router.callback_query(F.data.startswith("set_mailing_account_page:"))
+async def callback_set_mailing_account_page(callback: CallbackQuery, db: Database):
+    _, mailing_id_str, page_str = callback.data.split(":")
+    mailing_id, page = int(mailing_id_str), int(page_str)
+    if not await db.get_mailing_for_user(mailing_id, callback.from_user.id):
+        await callback.answer("⛔ Нет доступа", show_alert=True)
+        return
+    user = await db.get_user(callback.from_user.id)
+    accounts = await db.get_user_accounts(user.id)
+    await safe_edit_markup(
+        callback.message,
+        reply_markup=select_account_for_mailing_keyboard(accounts, mailing_id, page=page),
+        retries=0,
+    )
+    await callback.answer()
+
+
 @router.callback_query(F.data.startswith("set_mailing_account:"))
 async def callback_set_mailing_account(callback: CallbackQuery, db: Database):
     parts = callback.data.split(":")
@@ -2565,7 +2618,7 @@ async def callback_set_mailing_account(callback: CallbackQuery, db: Database):
             "Выберите действие:"
         )
 
-        await safe_edit(callback.message, text, parse_mode="HTML", reply_markup=mailing_menu_keyboard(mailing))
+        await safe_edit(callback.message, text, parse_mode="HTML", reply_markup=mailing_menu_keyboard(mailing), retries=0)
     except Exception as e:
         logger.warning(f"Failed to redraw mailing {mailing_id} after account change: {e}")
 
@@ -2756,7 +2809,8 @@ async def callback_toggle_keep_targets(callback: CallbackQuery, db: Database):
     targets = await db.get_mailing_targets(mailing_id)
     await safe_edit(
         callback.message, pe(_mailing_targets_text(targets, 0)), parse_mode="HTML",
-        reply_markup=mailing_targets_keyboard(mailing_id, targets, page=0)
+        reply_markup=mailing_targets_keyboard(mailing_id, targets, page=0),
+        retries=0,
     )
 
 
@@ -2941,7 +2995,7 @@ async def callback_mailing_reply_mode(callback: CallbackQuery, db: Database):
             f"Последняя отправка: {last_sent}\n\n"
             "Выберите действие:"
         )
-        await safe_edit(callback.message, text, parse_mode="HTML", reply_markup=mailing_menu_keyboard(mailing))
+        await safe_edit(callback.message, text, parse_mode="HTML", reply_markup=mailing_menu_keyboard(mailing), retries=0)
 
     await callback.answer()
 
@@ -2974,7 +3028,7 @@ async def callback_reply_mode_last(callback: CallbackQuery, db: Database):
         f"Последняя отправка: {last_sent}\n\n"
         "Выберите действие:"
     )
-    await safe_edit(callback.message, text, parse_mode="HTML", reply_markup=mailing_menu_keyboard(mailing))
+    await safe_edit(callback.message, text, parse_mode="HTML", reply_markup=mailing_menu_keyboard(mailing), retries=0)
     await callback.answer("✅ Режим: на последнее сообщение")
 
 
@@ -3022,7 +3076,7 @@ async def callback_reply_mode_fixed_pos(callback: CallbackQuery, db: Database):
         f"Последняя отправка: {last_sent}\n\n"
         "Выберите действие:"
     )
-    await safe_edit(callback.message, text, parse_mode="HTML", reply_markup=mailing_menu_keyboard(mailing))
+    await safe_edit(callback.message, text, parse_mode="HTML", reply_markup=mailing_menu_keyboard(mailing), retries=0)
     await callback.answer(f"✅ Режим: {n}-е с конца")
 
 

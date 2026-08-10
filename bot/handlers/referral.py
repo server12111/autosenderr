@@ -1,4 +1,5 @@
 import html
+import logging
 
 from aiogram import Router, F
 from aiogram.types import Message, CallbackQuery
@@ -8,9 +9,10 @@ from aiogram.fsm.state import State, StatesGroup
 from ..database.db import Database
 from ..keyboards.inline import referral_keyboard, withdraw_wallet_keyboard, main_menu_keyboard
 from ..utils.premium_emoji import pe
-from ..utils.tg import safe_edit
+from ..utils.tg import safe_answer, safe_edit
 
 router = Router()
+logger = logging.getLogger(__name__)
 
 
 class ReferralStates(StatesGroup):
@@ -47,7 +49,7 @@ async def callback_referral(callback: CallbackQuery, db: Database, state: FSMCon
         "Вы получаете процент от каждой покупки подписки вашими рефералами!"
     )
 
-    await safe_edit(callback.message, pe(text), parse_mode="HTML", reply_markup=referral_keyboard(can_withdraw))
+    await safe_edit(callback.message, pe(text), parse_mode="HTML", reply_markup=referral_keyboard(can_withdraw), retries=0)
     await callback.answer()
 
 
@@ -71,6 +73,7 @@ async def callback_withdraw(callback: CallbackQuery, state: FSMContext, db: Data
         "Введите адрес USDT кошелька (TRC20):"),
         parse_mode="HTML",
         reply_markup=withdraw_wallet_keyboard(),
+        retries=0,
     )
     await callback.answer()
 
@@ -97,13 +100,22 @@ async def process_wallet(message: Message, state: FSMContext, db: Database):
         await state.clear()
         await message.answer("❌ Баланс уже был изменён. Повторите запрос.", parse_mode="HTML")
         return
-    await state.clear()
+    # The withdrawal row and balance deduction are one committed DB operation.
+    # Follow-up failures must never let a global error handler claim otherwise.
+    try:
+        await state.clear()
+    except Exception:
+        logger.warning("Could not clear withdrawal state after request creation", exc_info=True)
 
-    await message.answer(
-        pe(f"✅ Заявка на вывод создана!\n\n"
-        f"Сумма: <b>{amount:.2f} USDT</b>\n"
-        f"Кошелёк: <code>{html.escape(wallet)}</code>\n\n"
-        "Администратор обработает заявку в ближайшее время."),
-        parse_mode="HTML",
-        reply_markup=main_menu_keyboard(),
-    )
+    try:
+        await safe_answer(
+            message,
+            pe(f"✅ Заявка на вывод создана!\n\n"
+            f"Сумма: <b>{amount:.2f} USDT</b>\n"
+            f"Кошелёк: <code>{html.escape(wallet)}</code>\n\n"
+            "Администратор обработает заявку в ближайшее время."),
+            parse_mode="HTML",
+            reply_markup=main_menu_keyboard(),
+        )
+    except Exception:
+        logger.warning("Withdrawal was created but its confirmation could not be sent", exc_info=True)

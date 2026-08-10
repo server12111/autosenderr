@@ -459,22 +459,28 @@ def mailing_targets_keyboard(mailing_id: int, targets: list[MailingTarget], page
 
 
 # === Mailing creation ===
-def select_account_keyboard(accounts: list[Account]) -> InlineKeyboardMarkup:
+def select_account_keyboard(accounts: list[Account], page: int = 0) -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
-    for acc in accounts:
+    total_pages = max(1, (len(accounts) + LIST_PAGE_SIZE - 1) // LIST_PAGE_SIZE)
+    page = max(0, min(page, total_pages - 1))
+    for acc in accounts[page * LIST_PAGE_SIZE:(page + 1) * LIST_PAGE_SIZE]:
         builder.row(_btn(f"📱 {acc.display_name}", callback_data=f"select_account:{acc.id}", style="primary"))
+    _paginate_nav_row(builder, page, total_pages, "select_account_page")
     builder.row(_btn("◀️ Назад", callback_data="mailings", style="primary"))
     return builder.as_markup()
 
 
-def select_account_for_mailing_keyboard(accounts: list[Account], mailing_id: int) -> InlineKeyboardMarkup:
+def select_account_for_mailing_keyboard(accounts: list[Account], mailing_id: int, page: int = 0) -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
-    for acc in accounts:
+    total_pages = max(1, (len(accounts) + LIST_PAGE_SIZE - 1) // LIST_PAGE_SIZE)
+    page = max(0, min(page, total_pages - 1))
+    for acc in accounts[page * LIST_PAGE_SIZE:(page + 1) * LIST_PAGE_SIZE]:
         builder.row(_btn(
             f"📱 {acc.display_name}",
             callback_data=f"set_mailing_account:{acc.id}:{mailing_id}",
             style="primary",
         ))
+    _paginate_nav_row(builder, page, total_pages, f"set_mailing_account_page:{mailing_id}")
     builder.row(_btn("◀️ Назад", callback_data=f"mailing:{mailing_id}", style="primary"))
     return builder.as_markup()
 
@@ -678,12 +684,15 @@ def withdraw_wallet_keyboard() -> InlineKeyboardMarkup:
 
 
 # === Required channels ===
-def channel_check_keyboard(channels: list[RequiredChannel]) -> InlineKeyboardMarkup:
+def channel_check_keyboard(channels: list[RequiredChannel], page: int = 0) -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
-    for ch in channels:
+    total_pages = max(1, (len(channels) + LIST_PAGE_SIZE - 1) // LIST_PAGE_SIZE)
+    page = max(0, min(page, total_pages - 1))
+    for ch in channels[page * LIST_PAGE_SIZE:(page + 1) * LIST_PAGE_SIZE]:
         url = f"https://t.me/{ch.channel_username}" if ch.channel_username else None
         if url:
             builder.row(_btn(f"📢 {ch.channel_title}", url=url, style="primary"))
+    _paginate_nav_row(builder, page, total_pages, "required_channels_page")
     builder.row(_btn("✅ Я подписался — проверить", callback_data="check_channels", style="success"))
     return builder.as_markup()
 
@@ -794,14 +803,17 @@ def admin_settings_keyboard() -> InlineKeyboardMarkup:
     return builder.as_markup()
 
 
-def admin_channels_keyboard(channels: list[RequiredChannel]) -> InlineKeyboardMarkup:
+def admin_channels_keyboard(channels: list[RequiredChannel], page: int = 0) -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
-    for ch in channels:
+    total_pages = max(1, (len(channels) + LIST_PAGE_SIZE - 1) // LIST_PAGE_SIZE)
+    page = max(0, min(page, total_pages - 1))
+    for ch in channels[page * LIST_PAGE_SIZE:(page + 1) * LIST_PAGE_SIZE]:
         builder.row(_btn(
             f"🗑️ {ch.channel_title}",
             callback_data=f"admin_del_channel:{ch.channel_id}",
             style="danger",
         ))
+    _paginate_nav_row(builder, page, total_pages, "admin_channels_page")
     builder.row(
         _btn("➕ Добавить канал", callback_data="admin_add_channel", style="success"),
         _btn("◀️ Назад", callback_data="admin_back", style="primary"),
@@ -809,9 +821,11 @@ def admin_channels_keyboard(channels: list[RequiredChannel]) -> InlineKeyboardMa
     return builder.as_markup()
 
 
-def admin_withdrawals_keyboard(requests) -> InlineKeyboardMarkup:
+def admin_withdrawals_keyboard(requests, page: int = 0) -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
-    for req in requests:
+    total_pages = max(1, (len(requests) + LIST_PAGE_SIZE - 1) // LIST_PAGE_SIZE)
+    page = max(0, min(page, total_pages - 1))
+    for req in requests[page * LIST_PAGE_SIZE:(page + 1) * LIST_PAGE_SIZE]:
         builder.row(
             _btn(
                 f"✅ #{req.id} ({req.amount} USDT)",
@@ -824,6 +838,7 @@ def admin_withdrawals_keyboard(requests) -> InlineKeyboardMarkup:
                 style="danger",
             ),
         )
+    _paginate_nav_row(builder, page, total_pages, "admin_withdrawals_page")
     builder.row(_btn("◀️ Назад", callback_data="admin_back", style="primary"))
     return builder.as_markup()
 
@@ -848,9 +863,11 @@ def admin_promocodes_keyboard() -> InlineKeyboardMarkup:
     return builder.as_markup()
 
 
-def admin_promo_list_keyboard(promocodes: list[Promocode]) -> InlineKeyboardMarkup:
+def admin_promo_list_keyboard(promocodes: list[Promocode], page: int = 0) -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
-    for promo in promocodes:
+    total_pages = max(1, (len(promocodes) + LIST_PAGE_SIZE - 1) // LIST_PAGE_SIZE)
+    page = max(0, min(page, total_pages - 1))
+    for promo in promocodes[page * LIST_PAGE_SIZE:(page + 1) * LIST_PAGE_SIZE]:
         status = "✅" if promo.uses_count >= promo.max_uses else "🟢"
         builder.row(
             _btn(
@@ -861,20 +878,24 @@ def admin_promo_list_keyboard(promocodes: list[Promocode]) -> InlineKeyboardMark
             _btn("✏️", callback_data=f"admin_edit_promo_uses:{promo.id}", style="primary"),
             _btn("🗑️", callback_data=f"admin_delete_promo:{promo.id}", style="danger"),
         )
+    _paginate_nav_row(builder, page, total_pages, "admin_promo_page")
     builder.row(_btn("◀️ Назад", callback_data="admin_promocodes", style="primary"))
     return builder.as_markup()
 
 
-def admin_proxy_pool_keyboard(proxies: list) -> InlineKeyboardMarkup:
+def admin_proxy_pool_keyboard(proxies: list, page: int = 0) -> InlineKeyboardMarkup:
     """proxies: list of (PoolProxy, account_count) tuples."""
     builder = InlineKeyboardBuilder()
-    for pool_proxy, count in proxies:
+    total_pages = max(1, (len(proxies) + LIST_PAGE_SIZE - 1) // LIST_PAGE_SIZE)
+    page = max(0, min(page, total_pages - 1))
+    for pool_proxy, count in proxies[page * LIST_PAGE_SIZE:(page + 1) * LIST_PAGE_SIZE]:
         status = "🟢" if pool_proxy.is_active else "💀"
         host = pool_proxy.proxy.split("@")[-1] if "@" in pool_proxy.proxy else pool_proxy.proxy.replace("socks5://", "")
         builder.row(
             _btn(f"{status} {host} [{count}]", callback_data=f"admin_proxy_info:{pool_proxy.id}", style="primary"),
             _btn("🗑️", callback_data=f"admin_delete_proxy:{pool_proxy.id}", style="danger"),
         )
+    _paginate_nav_row(builder, page, total_pages, "admin_proxy_pool_page")
     builder.row(_btn("➕ Добавить прокси", callback_data="admin_add_proxy", style="success"))
     builder.row(_btn("◀️ Назад", callback_data="admin_back", style="primary"))
     return builder.as_markup()

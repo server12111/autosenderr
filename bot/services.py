@@ -61,6 +61,7 @@ from .config import config
 from .database.db import Database, is_safe_media_path
 from .keyboards.inline import subscription_expired_keyboard
 from .utils.time_utils import is_within_active_hours, now_moscow
+from .utils.delivery_journal import DeliveryJournal
 from .utils.premium_emoji import pe
 
 logger = logging.getLogger(__name__)
@@ -917,7 +918,26 @@ class MailingService:
         if not client:
             return False
         await self.db.update_mailing_status(mailing_id, True)
-        await self._start_mailing_task(mailing_id)
+        try:
+            await self._start_mailing_task(mailing_id)
+        except Exception:
+            # The active status is already durable at this point.  Do not leave
+            # a mailing marked active if its task could not be created.
+            try:
+                await self.db.update_mailing_status(mailing_id, False)
+            except Exception as rollback_error:
+                logger.error(
+                    "Could not roll back active status for mailing %s: %s",
+                    mailing_id,
+                    rollback_error,
+                    exc_info=True,
+                )
+            logger.error(
+                "Could not start task for mailing %s; status was rolled back",
+                mailing_id,
+                exc_info=True,
+            )
+            return False
         return True
 
     async def stop_mailing(self, mailing_id: int):
@@ -2034,6 +2054,12 @@ class SubscriptionCheckerService:
         self.db = db
         self.mailing_service = mailing_service
         self._task: Optional[asyncio.Task] = None
+        # A Telegram send can succeed just before a transient SQLite failure.
+        # Keep that fact in memory so the next hourly check retries only the
+        # DB marker instead of sending the same notification again.
+        self._pending_reminder_marks: set[tuple[int, int]] = set()
+        self._pending_expired_marks: set[int] = set()
+        self._delivery_journal = DeliveryJournal(db.db_path)
 
     def start(self, bot):
         if self._task and not self._task.done():
@@ -2055,6 +2081,30 @@ class SubscriptionCheckerService:
                 await asyncio.sleep(60)
 
     async def _send_reminder(self, bot, user, days: int):
+        mark_key = (user.id, days)
+        journal_key = f"subscription-reminder:{user.id}:{days}"
+        if mark_key in self._pending_reminder_marks:
+            if await self._retry_notification_mark(
+                lambda: self.db.set_user_reminder_sent(user.id, days),
+                f"{days}d reminder for user {user.id}",
+            ):
+                self._pending_reminder_marks.discard(mark_key)
+                await self._forget_delivery_journal(journal_key)
+            return
+
+        journal_contains = await self._delivery_journal_contains(journal_key)
+        if journal_contains is None:
+            # A corrupt/unreadable journal may be the only evidence that this
+            # reminder already reached Telegram.  Defer instead of duplicating.
+            return
+        if journal_contains:
+            if await self._retry_notification_mark(
+                lambda: self.db.set_user_reminder_sent(user.id, days),
+                f"{days}d reminder for user {user.id}",
+            ):
+                await self._forget_delivery_journal(journal_key)
+            return
+
         from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
         keyboard = InlineKeyboardMarkup(inline_keyboard=[[
             InlineKeyboardButton(text="💳 Продлить подписку", callback_data="subscription")
@@ -2065,9 +2115,60 @@ class SubscriptionCheckerService:
             text = pe("❗️ <b>Подписка заканчивается завтра!</b>\n\nПродлите сейчас, чтобы не потерять доступ к функциям.")
         try:
             await bot.send_message(user.telegram_id, text, parse_mode="HTML", reply_markup=keyboard)
-            await self.db.set_user_reminder_sent(user.id, days)
         except Exception as e:
             logger.warning(f"Failed to send {days}d reminder to {user.telegram_id}: {e}")
+            return
+
+        journal_saved = await self._remember_delivery_journal(journal_key)
+        if not await self._retry_notification_mark(
+            lambda: self.db.set_user_reminder_sent(user.id, days),
+            f"{days}d reminder for user {user.id}",
+        ):
+            self._pending_reminder_marks.add(mark_key)
+            if not journal_saved:
+                logger.critical(
+                    "Delivered %sd subscription reminder for user %s has no durable dedup marker; "
+                    "a restart can duplicate it until storage is repaired",
+                    days,
+                    user.id,
+                )
+        else:
+            await self._forget_delivery_journal(journal_key)
+
+    async def _delivery_journal_contains(self, key: str) -> bool | None:
+        try:
+            return await self._delivery_journal.contains(key)
+        except Exception as exc:
+            logger.error("Could not read notification delivery journal for %s; notification deferred: %s", key, exc)
+            return None
+
+    async def _remember_delivery_journal(self, key: str) -> bool:
+        try:
+            await self._delivery_journal.remember(key)
+            return True
+        except Exception as exc:
+            logger.error("Could not journal delivered notification %s: %s", key, exc)
+            return False
+
+    async def _forget_delivery_journal(self, key: str) -> None:
+        try:
+            await self._delivery_journal.forget(key)
+        except Exception as exc:
+            logger.warning("Could not clean notification delivery journal %s: %s", key, exc)
+
+    async def _retry_notification_mark(self, operation, description: str) -> bool:
+        """Persist a post-send notification marker without re-sending on a
+        transient DB failure.  Delivery and SQLite cannot be one transaction,
+        so failed markers are retried here and remembered by the caller."""
+        for attempt in range(3):
+            try:
+                await operation()
+                return True
+            except Exception as exc:
+                if attempt == 2:
+                    logger.error("Could not persist notification marker for %s: %s", description, exc)
+                    return False
+                await asyncio.sleep(1 + attempt)
 
     async def _check(self, bot):
         users = await self.db.get_users_needing_subscription_check()
@@ -2085,6 +2186,25 @@ class SubscriptionCheckerService:
                 stopped = await self.mailing_service.stop_user_mailings(user.id)
                 await self.db.disable_user_autoresponders(user.id)
                 if not user.subscription_expired_notified_at:
+                    journal_key = f"subscription-expired:{user.id}"
+                    if user.id in self._pending_expired_marks:
+                        if await self._retry_notification_mark(
+                            lambda: self.db.set_subscription_expired_notified(user.id),
+                            f"expired subscription for user {user.id}",
+                        ):
+                            self._pending_expired_marks.discard(user.id)
+                            await self._forget_delivery_journal(journal_key)
+                        continue
+                    journal_contains = await self._delivery_journal_contains(journal_key)
+                    if journal_contains is None:
+                        continue
+                    if journal_contains:
+                        if await self._retry_notification_mark(
+                            lambda: self.db.set_subscription_expired_notified(user.id),
+                            f"expired subscription for user {user.id}",
+                        ):
+                            await self._forget_delivery_journal(journal_key)
+                        continue
                     try:
                         if stopped > 0:
                             msg = pe(f"⚠️ <b>Ваша подписка истекла.</b>\n\n"
@@ -2099,9 +2219,23 @@ class SubscriptionCheckerService:
                                      "для продолжения работы.")
                         await bot.send_message(user.telegram_id, msg, parse_mode="HTML",
                                                reply_markup=subscription_expired_keyboard())
-                        await self.db.set_subscription_expired_notified(user.id)
-                    except Exception:
-                        pass
+                    except Exception as exc:
+                        logger.warning("Failed to send expired-subscription notice to %s: %s", user.telegram_id, exc)
+                    else:
+                        journal_saved = await self._remember_delivery_journal(journal_key)
+                        if not await self._retry_notification_mark(
+                            lambda: self.db.set_subscription_expired_notified(user.id),
+                            f"expired subscription for user {user.id}",
+                        ):
+                            self._pending_expired_marks.add(user.id)
+                            if not journal_saved:
+                                logger.critical(
+                                    "Delivered expiry notice for user %s has no durable dedup marker; "
+                                    "a restart can duplicate it until storage is repaired",
+                                    user.id,
+                                )
+                        else:
+                            await self._forget_delivery_journal(journal_key)
                 continue
 
             # Reminder 3 days before

@@ -1,6 +1,7 @@
 import io
 import asyncio
 import html
+import logging
 import os
 import tempfile
 from datetime import datetime, timedelta
@@ -16,7 +17,7 @@ from aiogram.types import Message, CallbackQuery, FSInputFile, BufferedInputFile
 from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
-from aiogram.exceptions import TelegramBadRequest
+from aiogram.exceptions import TelegramBadRequest, TelegramRetryAfter
 import aiosqlite
 
 from ..database.db import Database
@@ -39,15 +40,17 @@ from ..keyboards.inline import (
     main_menu_keyboard,
     promo_subscription_keyboard,
     _btn,
+    LIST_PAGE_SIZE,
 )
 from ..config import config
 from ..services import MailingService
 from ..utils.premium_emoji import pe
 from ..utils.time_utils import now_moscow
 from .accounts import _test_proxy_connection
-from ..utils.tg import edit_or_answer
+from ..utils.tg import edit_or_answer, safe_answer
 
 router = Router()
+logger = logging.getLogger(__name__)
 
 
 class AdminStates(StatesGroup):
@@ -70,6 +73,46 @@ class AdminStates(StatesGroup):
 
 def is_admin(user_id: int) -> bool:
     return user_id in config.ADMIN_IDS
+
+
+def _page_slice(items, page: int):
+    total_pages = max(1, (len(items) + LIST_PAGE_SIZE - 1) // LIST_PAGE_SIZE)
+    page = max(0, min(page, total_pages - 1))
+    return items[page * LIST_PAGE_SIZE:(page + 1) * LIST_PAGE_SIZE], page, total_pages
+
+
+def _promos_page_text(promocodes, page: int) -> tuple[str, int]:
+    items, page, total = _page_slice(promocodes, page)
+    text = "🎟 Список промокодов:\n\n"
+    for promo in items:
+        status = "✅ Исчерпан" if promo.uses_count >= promo.max_uses else f"🟢 {promo.uses_count}/{promo.max_uses}"
+        text += f"<b>{html.escape(promo.code)}</b> — {promo.duration_days} дн. — {status}\n"
+    if total > 1:
+        text += f"\nСтраница {page + 1}/{total}."
+    return text, page
+
+
+def _channels_page_text(channels, page: int) -> tuple[str, int]:
+    items, page, total = _page_slice(channels, page)
+    text = "📡 Обязательные каналы\n\n"
+    for ch in items:
+        text += f"• {html.escape(ch.channel_title)} (@{html.escape(str(ch.channel_username or ch.channel_id))})\n"
+    if total > 1:
+        text += f"\nСтраница {page + 1}/{total}."
+    text += "\nДобавьте каналы, на которые пользователи должны подписаться."
+    return text, page
+
+
+async def _withdrawals_page_text(db: Database, requests, page: int) -> tuple[str, int]:
+    items, page, total = _page_slice(requests, page)
+    text = "💸 Запросы на вывод\n\n"
+    for req in items:
+        user = await db.get_user_by_id(req.user_id)
+        username = f"@{html.escape(user.username)}" if user and user.username else str(req.user_id)
+        text += f"• {username} — {req.amount:.2f} USDT\n  Кошелёк: <code>{html.escape(req.wallet or '')}</code>\n\n"
+    if total > 1:
+        text += f"Страница {page + 1}/{total}."
+    return text, page
 
 
 _ERROR_LABELS = {
@@ -339,26 +382,54 @@ async def process_broadcast(message: Message, state: FSMContext, db: Database):
     failed = 0
 
     status_msg = await message.answer("⏳ Рассылка...")
+    flood_wait_limit = 60
+    aborted_flood_wait = None
     for user in users:
-        try:
-            if message.photo:
-                await message.bot.send_photo(user.telegram_id, message.photo[-1].file_id, caption=text, parse_mode="HTML")
-            elif message.video:
-                await message.bot.send_video(user.telegram_id, message.video.file_id, caption=text, parse_mode="HTML")
-            elif message.document:
-                await message.bot.send_document(user.telegram_id, message.document.file_id, caption=text, parse_mode="HTML")
-            elif message.animation:
-                await message.bot.send_animation(user.telegram_id, message.animation.file_id, caption=text, parse_mode="HTML")
-            else:
-                await message.bot.send_message(user.telegram_id, text, parse_mode="HTML")
-            sent += 1
-        except Exception:
+        delivered = False
+        # Keep a margin below the Bot API's global rate and, if Telegram still
+        # asks us to wait, retry this exact recipient instead of classifying
+        # the whole remaining audience as failed in one burst.
+        for _attempt in range(3):
+            try:
+                if message.photo:
+                    await message.bot.send_photo(user.telegram_id, message.photo[-1].file_id, caption=text, parse_mode="HTML")
+                elif message.video:
+                    await message.bot.send_video(user.telegram_id, message.video.file_id, caption=text, parse_mode="HTML")
+                elif message.document:
+                    await message.bot.send_document(user.telegram_id, message.document.file_id, caption=text, parse_mode="HTML")
+                elif message.animation:
+                    await message.bot.send_animation(user.telegram_id, message.animation.file_id, caption=text, parse_mode="HTML")
+                else:
+                    await message.bot.send_message(user.telegram_id, text, parse_mode="HTML")
+                sent += 1
+                delivered = True
+                break
+            except TelegramRetryAfter as e:
+                wait_seconds = max(float(e.retry_after), 1)
+                if wait_seconds > flood_wait_limit:
+                    aborted_flood_wait = wait_seconds
+                    logger.warning(
+                        "Admin broadcast stopped after Telegram requested %.1fs FloodWait (limit %ss)",
+                        wait_seconds, flood_wait_limit,
+                    )
+                    break
+                await asyncio.sleep(wait_seconds + 0.5)
+            except Exception:
+                break
+        if not delivered:
             failed += 1
+        if aborted_flood_wait is not None:
+            break
+        await asyncio.sleep(0.05)
 
     await state.clear()
     try:
         await status_msg.edit_text(
-            pe(f"✅ Рассылка завершена\n\nОтправлено: {sent}\nОшибок: {failed}"),
+            pe(
+                f"{'⚠️ Рассылка остановлена из-за большого FloodWait' if aborted_flood_wait else '✅ Рассылка завершена'}"
+                f"\n\nОтправлено: {sent}\nОшибок: {failed}"
+                + (f"\nTelegram запросил ожидание: {aborted_flood_wait:.0f}с." if aborted_flood_wait else "")
+            ),
             parse_mode="HTML",
             reply_markup=admin_keyboard(),
         )
@@ -515,12 +586,8 @@ async def callback_admin_list_promos(callback: CallbackQuery, db: Database):
         await callback.answer()
         return
 
-    text = "🎟 Список промокодов:\n\n"
-    for promo in promocodes:
-        status = "✅ Исчерпан" if promo.uses_count >= promo.max_uses else f"🟢 {promo.uses_count}/{promo.max_uses}"
-        text += f"<b>{html.escape(promo.code)}</b> — {promo.duration_days} дн. — {status}\n"
-
-    await callback.message.edit_text(text, reply_markup=admin_promo_list_keyboard(promocodes))
+    text, _ = _promos_page_text(promocodes, 0)
+    await callback.message.edit_text(text, reply_markup=admin_promo_list_keyboard(promocodes, page=0))
     await callback.answer()
 
 
@@ -541,11 +608,8 @@ async def callback_admin_delete_promo(callback: CallbackQuery, db: Database):
         )
         return
 
-    text = "🎟 Список промокодов:\n\n"
-    for promo in promocodes:
-        status = "✅ Исчерпан" if promo.uses_count >= promo.max_uses else f"🟢 {promo.uses_count}/{promo.max_uses}"
-        text += f"<b>{html.escape(promo.code)}</b> — {promo.duration_days} дн. — {status}\n"
-    await callback.message.edit_text(text, reply_markup=admin_promo_list_keyboard(promocodes))
+    text, _ = _promos_page_text(promocodes, 0)
+    await callback.message.edit_text(text, reply_markup=admin_promo_list_keyboard(promocodes, page=0))
 
 
 @router.callback_query(F.data.startswith("admin_edit_promo_uses:"))
@@ -956,14 +1020,8 @@ async def callback_admin_channels(callback: CallbackQuery, db: Database):
         await callback.answer("Нет доступа", show_alert=True)
         return
     channels = await db.get_required_channels()
-    text = "📡 Обязательные каналы\n\n"
-    if channels:
-        for ch in channels:
-            text += f"• {html.escape(ch.channel_title)} (@{html.escape(str(ch.channel_username or ch.channel_id))})\n"
-    else:
-        text += "Обязательных каналов нет.\n"
-    text += "\nДобавьте каналы, на которые пользователи должны подписаться."
-    await callback.message.edit_text(text, reply_markup=admin_channels_keyboard(channels))
+    text, _ = _channels_page_text(channels, 0)
+    await callback.message.edit_text(text, reply_markup=admin_channels_keyboard(channels, page=0))
     await callback.answer()
 
 
@@ -1062,13 +1120,11 @@ async def callback_admin_del_channel(callback: CallbackQuery, db: Database):
     await db.remove_required_channel(channel_id)
     await callback.answer("✅ Канал удалён")
     channels = await db.get_required_channels()
-    text = "📡 Обязательные каналы\n\n"
-    if channels:
-        for ch in channels:
-            text += f"• {html.escape(ch.channel_title)} (@{html.escape(str(ch.channel_username or ch.channel_id))})\n"
-    else:
-        text += "Обязательных каналов нет.\n"
-    await callback.message.edit_text(text, reply_markup=admin_channels_keyboard(channels))
+    # Deletion intentionally resets to page 0.  Reuse the same capped text
+    # renderer as the initial screen and page callbacks; otherwise a large
+    # channel list can exceed Telegram's 4096-character text limit here.
+    text, _ = _channels_page_text(channels, 0)
+    await callback.message.edit_text(text, reply_markup=admin_channels_keyboard(channels, page=0))
 
 
 # === Withdrawal requests ===
@@ -1079,15 +1135,8 @@ async def callback_admin_withdrawals(callback: CallbackQuery, db: Database):
         await callback.answer("Нет доступа", show_alert=True)
         return
     requests = await db.get_withdrawal_requests("pending")
-    text = "💸 Запросы на вывод\n\n"
-    if requests:
-        for req in requests:
-            user = await db.get_user_by_id(req.user_id)
-            username = f"@{html.escape(user.username)}" if user and user.username else str(req.user_id)
-            text += f"• {username} — {req.amount:.2f} USDT\n  Кошелёк: <code>{html.escape(req.wallet or '')}</code>\n\n"
-    else:
-        text += "Активных запросов нет."
-    await callback.message.edit_text(pe(text), parse_mode="HTML", reply_markup=admin_withdrawals_keyboard(requests))
+    text, _ = await _withdrawals_page_text(db, requests, 0)
+    await callback.message.edit_text(pe(text), parse_mode="HTML", reply_markup=admin_withdrawals_keyboard(requests, page=0))
     await callback.answer()
 
 
@@ -1103,15 +1152,8 @@ async def callback_approve_withdraw(callback: CallbackQuery, db: Database):
         await callback.answer("Заявка уже обработана", show_alert=True)
 
     requests = await db.get_withdrawal_requests("pending")
-    text = "💸 Запросы на вывод\n\n"
-    if requests:
-        for req in requests:
-            user = await db.get_user_by_id(req.user_id)
-            username = f"@{html.escape(user.username)}" if user and user.username else str(req.user_id)
-            text += f"• {username} — {req.amount:.2f} USDT\n  Кошелёк: <code>{html.escape(req.wallet or '')}</code>\n\n"
-    else:
-        text += "Активных запросов нет."
-    await callback.message.edit_text(pe(text), parse_mode="HTML", reply_markup=admin_withdrawals_keyboard(requests))
+    text, _ = await _withdrawals_page_text(db, requests, 0)
+    await callback.message.edit_text(pe(text), parse_mode="HTML", reply_markup=admin_withdrawals_keyboard(requests, page=0))
 
 
 @router.callback_query(F.data.startswith("admin_decline_withdraw:"))
@@ -1129,15 +1171,54 @@ async def callback_decline_withdraw(callback: CallbackQuery, db: Database):
         await callback.answer("Заявка уже обработана", show_alert=True)
 
     requests = await db.get_withdrawal_requests("pending")
-    text = "💸 Запросы на вывод\n\n"
-    if requests:
-        for r in requests:
-            user = await db.get_user_by_id(r.user_id)
-            username = f"@{html.escape(user.username)}" if user and user.username else str(r.user_id)
-            text += f"• {username} — {r.amount:.2f} USDT\n  Кошелёк: <code>{html.escape(r.wallet or '')}</code>\n\n"
-    else:
-        text += "Активных запросов нет."
-    await callback.message.edit_text(pe(text), parse_mode="HTML", reply_markup=admin_withdrawals_keyboard(requests))
+    text, _ = await _withdrawals_page_text(db, requests, 0)
+    await callback.message.edit_text(pe(text), parse_mode="HTML", reply_markup=admin_withdrawals_keyboard(requests, page=0))
+
+
+@router.callback_query(F.data.startswith("admin_promo_page:"))
+async def callback_admin_promo_page(callback: CallbackQuery, db: Database):
+    if not is_admin(callback.from_user.id):
+        await callback.answer("Нет доступа", show_alert=True)
+        return
+    page = int(callback.data.split(":")[1])
+    promocodes = await db.get_all_promocodes()
+    text, page = _promos_page_text(promocodes, page)
+    await callback.message.edit_text(text, reply_markup=admin_promo_list_keyboard(promocodes, page=page))
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("admin_withdrawals_page:"))
+async def callback_admin_withdrawals_page(callback: CallbackQuery, db: Database):
+    if not is_admin(callback.from_user.id):
+        await callback.answer("Нет доступа", show_alert=True)
+        return
+    page = int(callback.data.split(":")[1])
+    requests = await db.get_withdrawal_requests("pending")
+    text, page = await _withdrawals_page_text(db, requests, page)
+    await callback.message.edit_text(pe(text), parse_mode="HTML", reply_markup=admin_withdrawals_keyboard(requests, page=page))
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("admin_proxy_pool_page:"))
+async def callback_admin_proxy_pool_page(callback: CallbackQuery, db: Database):
+    if not is_admin(callback.from_user.id):
+        await callback.answer("Нет доступа", show_alert=True)
+        return
+    page = int(callback.data.split(":")[1])
+    await callback.message.edit_reply_markup(reply_markup=admin_proxy_pool_keyboard(await db.get_pool_proxies(), page=page))
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("admin_channels_page:"))
+async def callback_admin_channels_page(callback: CallbackQuery, db: Database):
+    if not is_admin(callback.from_user.id):
+        await callback.answer("Нет доступа", show_alert=True)
+        return
+    page = int(callback.data.split(":")[1])
+    channels = await db.get_required_channels()
+    text, page = _channels_page_text(channels, page)
+    await callback.message.edit_text(text, reply_markup=admin_channels_keyboard(channels, page=page))
+    await callback.answer()
 
 
 @router.callback_query(F.data == "admin_back")
@@ -1206,7 +1287,9 @@ async def process_import_db(
     os.close(fd)
     backup_fd, backup_tmp = tempfile.mkstemp(suffix=".db")
     os.close(backup_fd)
-    runtime_stopped = False
+    mailing_stop_attempted = False
+    clients_stop_attempted = False
+    database_replaced = False
     try:
         file_info = await message.bot.get_file(doc.file_id)
         await message.bot.download_file(file_info.file_path, destination=tmp)
@@ -1253,9 +1336,10 @@ async def process_import_db(
             await state.clear()
             await message.answer("⏳ Заменяю базу данных...")
 
+            mailing_stop_attempted = True
             await mailing_service.stop()
+            clients_stop_attempted = True
             await userbot_manager.stop_all_clients()
-            runtime_stopped = True
 
             async with aiosqlite.connect(backup_tmp) as backup:
                 await db._conn.backup(backup)
@@ -1264,30 +1348,42 @@ async def process_import_db(
                     db._cache.clear()
                     db._cache_ts.clear()
                     await db._run_migrations()
+                    database_replaced = True
                 except BaseException:
                     await backup.backup(db._conn)
                     db._cache.clear()
                     db._cache_ts.clear()
                     raise
 
-        await message.answer(
+        await safe_answer(
+            message,
             pe("✅ База данных успешно заменена!\n"
             "Все данные обновлены."),
             parse_mode="HTML",
             reply_markup=admin_keyboard(),
         )
     except Exception as e:
-        await message.answer(pe(f"❌ Ошибка при импорте: {html.escape(str(e))}"), parse_mode="HTML")
+        if database_replaced:
+            logger.error("Database import succeeded but follow-up failed: %s", e, exc_info=True)
+        else:
+            await message.answer(pe(f"❌ Ошибка при импорте: {html.escape(str(e))}"), parse_mode="HTML")
     finally:
-        if runtime_stopped:
+        restart_errors = []
+        if clients_stop_attempted:
             try:
                 await userbot_manager.start_all_clients(background=True)
+            except Exception as e:
+                restart_errors.append(f"клиенты: {e}")
+        if mailing_stop_attempted:
+            try:
                 await mailing_service.start()
             except Exception as e:
-                await message.answer(
-                    pe(f"❌ База загружена, но фоновые задачи не запустились: {html.escape(str(e))}"),
-                    parse_mode="HTML",
-                )
+                restart_errors.append(f"рассылки: {e}")
+        if restart_errors:
+            await message.answer(
+                pe("❌ База загружена, но часть фоновых задач не запустилась: " + html.escape("; ".join(restart_errors))),
+                parse_mode="HTML",
+            )
         if os.path.exists(tmp):
             os.remove(tmp)
         if os.path.exists(backup_tmp):

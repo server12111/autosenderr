@@ -1,4 +1,5 @@
 import html
+import logging
 import time
 from datetime import datetime, timedelta
 from aiogram import Router, F
@@ -27,6 +28,7 @@ from ..utils.tg import safe_edit
 from ..utils.time_utils import now_moscow
 
 router = Router()
+logger = logging.getLogger(__name__)
 
 
 class SubscriptionStates(StatesGroup):
@@ -72,7 +74,7 @@ async def callback_subscription(callback: CallbackQuery, db: Database, state: FS
         )
         has_subscription = False
 
-    await safe_edit(callback.message, pe(text), parse_mode="HTML", reply_markup=subscription_keyboard(has_subscription))
+    await safe_edit(callback.message, pe(text), parse_mode="HTML", reply_markup=subscription_keyboard(has_subscription), retries=0)
     await callback.answer()
 
 
@@ -87,6 +89,7 @@ async def callback_buy_subscription(callback: CallbackQuery, state: FSMContext, 
         f"📅 30 дней — {price_30d} USDT"),
         parse_mode="HTML",
         reply_markup=subscription_plan_keyboard(),
+        retries=0,
     )
     await callback.answer()
 
@@ -119,6 +122,7 @@ async def callback_sub_plan(
         await safe_edit(
             callback.message, text, parse_mode="HTML",
             reply_markup=payment_method_keyboard(show_platega=show_platega, show_ton=has_ton),
+            retries=0,
         )
     else:
         await _create_cryptobot_subscription(callback, db, plan_days=plan_days)
@@ -145,7 +149,7 @@ async def _create_cryptobot_subscription(
     price = await db.get_price(plan_days)
     crypto_price = round(price * 1.03, 2)  # +3% processing fee
 
-    await safe_edit(callback.message, pe("⏳ Создаём платёж..."), parse_mode="HTML")
+    await safe_edit(callback.message, pe("⏳ Создаём платёж..."), parse_mode="HTML", retries=0)
 
     invoice = await cryptobot.create_invoice(
         amount=crypto_price,
@@ -163,6 +167,7 @@ async def _create_cryptobot_subscription(
             pe(f"❌ Ошибка создания платежа:\n{html.escape(error_msg)}"),
             parse_mode="HTML",
             reply_markup=main_menu_keyboard(),
+            retries=0,
         )
         return
 
@@ -186,7 +191,10 @@ async def _create_cryptobot_subscription(
     support = await db.get_setting("card_manager_username") or "autosenderkarta"
     await safe_edit(
         callback.message,
-        text, parse_mode="HTML", reply_markup=payment_keyboard(invoice.pay_url, invoice.invoice_id, plan_days, support_username=support)
+        text,
+        parse_mode="HTML",
+        reply_markup=payment_keyboard(invoice.pay_url, invoice.invoice_id, plan_days, support_username=support),
+        retries=0,
     )
 
 
@@ -200,7 +208,7 @@ async def callback_pay_ton(
     user = await db.get_user(callback.from_user.id)
     comment = f"sub_{user.telegram_id}_{time.time_ns()}"
 
-    await safe_edit(callback.message, pe("⏳ Получаем курс GRAM(TON)..."), parse_mode="HTML")
+    await safe_edit(callback.message, pe("⏳ Получаем курс GRAM(TON)..."), parse_mode="HTML", retries=0)
 
     price = await db.get_price(plan_days)
     amount = await ton_service.calculate_ton_amount(price)
@@ -210,6 +218,7 @@ async def callback_pay_ton(
             pe("❌ Не удалось получить курс GRAM(TON). Попробуйте позже."),
             parse_mode="HTML",
             reply_markup=payment_method_keyboard(show_platega=bool(config.PLATEGA_MERCHANT_ID and config.PLATEGA_SECRET)),
+            retries=0,
         )
         await callback.answer()
         return
@@ -238,7 +247,7 @@ async def callback_pay_ton(
     )
 
     support = await db.get_setting("card_manager_username") or "autosenderkarta"
-    await safe_edit(callback.message, text, reply_markup=ton_payment_keyboard(pay_url, comment, plan_days, support_username=support))
+    await safe_edit(callback.message, text, reply_markup=ton_payment_keyboard(pay_url, comment, plan_days, support_username=support), retries=0)
     await callback.answer()
 
 
@@ -256,6 +265,9 @@ async def callback_check_ton_payment(
     user = await db.get_user(callback.from_user.id)
     if not user or payment.user_id != user.id:
         await callback.answer("⛔ Нет доступа к этому платежу", show_alert=True)
+        return
+    if payment.payment_method != "ton":
+        await callback.answer("⛔ Этот платёж не предназначен для подписки", show_alert=True)
         return
 
     if payment.status == "paid":
@@ -301,6 +313,9 @@ async def callback_check_payment(
     if not user or payment.user_id != user.id:
         await callback.answer("⛔ Нет доступа к этому платежу", show_alert=True)
         return
+    if payment.payment_method != "cryptobot":
+        await callback.answer("⛔ Этот платёж не предназначен для подписки", show_alert=True)
+        return
 
     if payment.status == "paid":
         await callback.answer("✅ Этот платёж уже обработан", show_alert=True)
@@ -345,7 +360,7 @@ async def callback_pay_platega(
 
     order_id = f"platega_{user.telegram_id}_{time.time_ns()}"
 
-    await safe_edit(callback.message, pe("⏳ Создаём платёж через СБП..."), parse_mode="HTML")
+    await safe_edit(callback.message, pe("⏳ Создаём платёж через СБП..."), parse_mode="HTML", retries=0)
 
     invoice = await platega_service.create_invoice(
         amount_rub=amount_rub,
@@ -359,6 +374,7 @@ async def callback_pay_platega(
             pe("❌ Ошибка создания платежа через Platega. Попробуйте позже."),
             parse_mode="HTML",
             reply_markup=payment_method_keyboard(show_platega=True),
+            retries=0,
         )
         await callback.answer()
         return
@@ -386,6 +402,7 @@ async def callback_pay_platega(
     await safe_edit(
         callback.message, text, parse_mode="HTML",
         reply_markup=platega_payment_keyboard(invoice["payment_url"], transaction_id, plan_days, support_username=support),
+        retries=0,
     )
     await callback.answer()
 
@@ -404,6 +421,9 @@ async def callback_check_platega_payment(
     user = await db.get_user(callback.from_user.id)
     if not user or payment.user_id != user.id:
         await callback.answer("⛔ Нет доступа к этому платежу", show_alert=True)
+        return
+    if payment.payment_method != "platega":
+        await callback.answer("⛔ Этот платёж не предназначен для подписки", show_alert=True)
         return
 
     if payment.status == "paid":
@@ -483,7 +503,7 @@ async def callback_activate_free_tier(callback: CallbackQuery, db: Database):
         + (f"\n\n{status_line}" if status_line else "")
     )
     await safe_edit(callback.message, text, parse_mode="HTML",
-                    reply_markup=free_tier_info_keyboard(already_active or bool(has_paid)))
+                    reply_markup=free_tier_info_keyboard(already_active or bool(has_paid)), retries=0)
     await callback.answer()
 
 
@@ -511,7 +531,7 @@ async def callback_activate_free_tier_confirm(callback: CallbackQuery, db: Datab
 @router.callback_query(F.data == "enter_promocode")
 async def callback_enter_promocode(callback: CallbackQuery, state: FSMContext):
     await state.set_state(SubscriptionStates.waiting_promocode)
-    await safe_edit(callback.message, "🎟 Введите промокод:", reply_markup=cancel_keyboard())
+    await safe_edit(callback.message, "🎟 Введите промокод:", reply_markup=cancel_keyboard(), retries=0)
     await callback.answer()
 
 
@@ -560,7 +580,44 @@ async def process_promocode(message: Message, state: FSMContext, db: Database):
         await state.clear()
         return
 
-    user = await db.get_user(message.from_user.id)
+    try:
+        user = await db.get_user(message.from_user.id)
+    except Exception:
+        # use_promocode() has already committed both the use and subscription
+        # extension.  A read/UI failure must not make that durable success look
+        # like an unsuccessful activation.
+        logger.error("Promocode %s was used but the updated user could not be read", code, exc_info=True)
+        try:
+            await state.clear()
+        except Exception:
+            logger.warning("Could not clear promocode state after successful use", exc_info=True)
+        try:
+            await message.answer(
+                pe(f"✅ Промокод активирован! Добавлено дней: {promo.duration_days}. "
+                   "Данные подписки обновятся при следующем открытии раздела."),
+                parse_mode="HTML",
+                reply_markup=subscription_keyboard(True),
+            )
+        except Exception:
+            logger.warning("Could not send promocode success fallback", exc_info=True)
+        return
+
+    if not user:
+        logger.error("Promocode %s was used but the updated user no longer exists", code)
+        try:
+            await state.clear()
+        except Exception:
+            logger.warning("Could not clear promocode state after successful use", exc_info=True)
+        try:
+            await message.answer(
+                pe(f"✅ Промокод активирован! Добавлено дней: {promo.duration_days}."),
+                parse_mode="HTML",
+                reply_markup=back_to_subscription_keyboard(),
+            )
+        except Exception:
+            logger.warning("Could not send promocode success fallback", exc_info=True)
+        return
+
     new_end = user.subscription_end
 
     if user.welcome_pin_msg_id:
@@ -571,17 +628,26 @@ async def process_promocode(message: Message, state: FSMContext, db: Database):
             )
         except Exception:
             pass
-        await db.update_user_pin_msg_id(user.id, None)
+        try:
+            await db.update_user_pin_msg_id(user.id, None)
+        except Exception:
+            logger.warning("Could not clear welcome pin marker after promocode use", exc_info=True)
 
-    await state.clear()
+    try:
+        await state.clear()
+    except Exception:
+        logger.warning("Could not clear promocode state after successful use", exc_info=True)
 
-    await message.answer(
-        pe(f"✅ Промокод активирован!\n\n"
-        f"Добавлено дней: {promo.duration_days}\n"
-        f"Подписка активна до: {new_end.strftime('%d.%m.%Y %H:%M')}"),
-        parse_mode="HTML",
-        reply_markup=subscription_keyboard(True),
-    )
+    try:
+        await message.answer(
+            pe(f"✅ Промокод активирован!\n\n"
+            f"Добавлено дней: {promo.duration_days}\n"
+            f"Подписка активна до: {new_end.strftime('%d.%m.%Y %H:%M')}"),
+            parse_mode="HTML",
+            reply_markup=subscription_keyboard(True),
+        )
+    except Exception:
+        logger.warning("Could not send promocode success message", exc_info=True)
 
 
 @router.callback_query(F.data == "pay_card")
@@ -610,5 +676,6 @@ async def callback_pay_card(callback: CallbackQuery, state: FSMContext, db: Data
         "⏰ Время работы менеджера: ежедневно с 9:00 до 23:00"),
         parse_mode="HTML",
         reply_markup=back_to_subscription_keyboard(),
+        retries=0,
     )
     await callback.answer()

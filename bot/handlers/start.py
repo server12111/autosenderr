@@ -190,6 +190,15 @@ async def callback_check_channels(callback: CallbackQuery, db: Database, state: 
                 pass
 
 
+@router.callback_query(F.data.startswith("required_channels_page:"))
+async def callback_required_channels_page(callback: CallbackQuery, db: Database):
+    page = int(callback.data.split(":")[1])
+    channels = await db.get_required_channels()
+    not_subscribed = await check_channels_subscription(callback.bot, callback.from_user.id, channels)
+    await callback.message.edit_reply_markup(reply_markup=channel_check_keyboard(not_subscribed, page=page))
+    await callback.answer()
+
+
 @router.callback_query(F.data == "main_menu")
 async def callback_main_menu(callback: CallbackQuery, db: Database, state: FSMContext):
     # Always-reachable nav button — without clearing state, a stray text

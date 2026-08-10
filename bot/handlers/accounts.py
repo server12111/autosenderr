@@ -143,6 +143,7 @@ async def callback_accounts_page(callback: CallbackQuery, db: Database):
     await safe_edit(
         callback.message, pe(_accounts_list_text(accounts, page)), parse_mode="HTML",
         reply_markup=accounts_keyboard(accounts, page=page),
+        retries=0,
     )
     await callback.answer()
 
@@ -303,7 +304,7 @@ async def _create_cryptobot_account_payment(callback: CallbackQuery, db: Databas
         invoice_id=invoice.invoice_id,
         amount=invoice.amount,
         currency=invoice.currency,
-        payment_method="cryptobot",
+        payment_method="account_cryptobot",
     )
 
     text = pe(
@@ -352,7 +353,7 @@ async def callback_pay_account_ton(
         invoice_id=comment,
         amount=amount,
         currency="TON",
-        payment_method="ton",
+        payment_method="account_ton",
     )
 
     pay_url = ton_service.generate_payment_link(amount, comment)
@@ -389,8 +390,14 @@ async def callback_check_ton_account(
     if not user or payment.user_id != user.id:
         await callback.answer("⛔ Нет доступа к этому платежу", show_alert=True)
         return
+    if payment.payment_method != "account_ton":
+        await callback.answer("⛔ Этот платёж не предназначен для добавления аккаунта", show_alert=True)
+        return
 
-    if payment.status == "paid":
+    if payment.status == "account_setup":
+        await _continue_paid_account_setup(callback, state, db, user, comment)
+        return
+    if payment.status in ("paid", "account_used"):
         await callback.answer("✅ Этот платёж уже обработан", show_alert=True)
         return
 
@@ -400,29 +407,15 @@ async def callback_check_ton_account(
         await callback.answer("❌ Оплата ещё не получена. Попробуйте позже.", show_alert=True)
         return
 
-    updated = await db.update_payment_status(comment, "paid")
+    updated = await db.update_payment_status(comment, "account_setup")
     if not updated:
+        payment = await db.get_payment_by_invoice(comment)
+        if payment and payment.status == "account_setup":
+            await _continue_paid_account_setup(callback, state, db, user, comment)
+            return
         await callback.answer("✅ Этот платёж уже обработан", show_alert=True)
         return
-
-    accounts_count = await db.count_user_accounts(user.id)
-
-    text = pe(
-        "✅ Оплата получена!\n\n"
-        "➕ Добавление аккаунта\n\n"
-        f"📊 У вас {accounts_count} аккаунтов\n\n"
-        "<b>Шаг 1 из 3</b>\n\n"
-        "Хотите использовать прокси SOCKS5?\n\n"
-        "Если да — введите в формате:\n"
-        "<code>socks5://host:port</code>\n"
-        "или <code>socks5://user:pass@host:port</code>"
-    )
-
-    await _disconnect_pending_client(state)
-    await state.clear()
-    await state.update_data(account_setup_allowed=True)
-    await callback.message.edit_text(text, parse_mode="HTML", reply_markup=add_account_proxy_keyboard())
-    await callback.answer()
+    await _continue_paid_account_setup(callback, state, db, user, comment)
 
 
 @router.callback_query(F.data.startswith("check_account_payment:"))
@@ -433,7 +426,13 @@ async def callback_check_account_payment(callback: CallbackQuery, state: FSMCont
     if not payment or not user or payment.user_id != user.id:
         await callback.answer("⛔ Платёж не найден", show_alert=True)
         return
-    if payment.status == "paid":
+    if payment.payment_method != "account_cryptobot":
+        await callback.answer("⛔ Этот платёж не предназначен для добавления аккаунта", show_alert=True)
+        return
+    if payment.status == "account_setup":
+        await _continue_paid_account_setup(callback, state, db, user, invoice_id)
+        return
+    if payment.status in ("paid", "account_used"):
         await callback.answer("✅ Этот платёж уже обработан", show_alert=True)
         return
     crypto_service = CryptoBotService(config.CRYPTOBOT_TOKEN, config.CRYPTOBOT_TESTNET)
@@ -443,32 +442,67 @@ async def callback_check_account_payment(callback: CallbackQuery, state: FSMCont
         await callback.answer("❌ Оплата ещё не получена. Попробуйте позже.", show_alert=True)
         return
 
-    updated = await db.update_payment_status(invoice_id, "paid")
+    updated = await db.update_payment_status(invoice_id, "account_setup")
     if not updated:
+        payment = await db.get_payment_by_invoice(invoice_id)
+        if payment and payment.status == "account_setup":
+            await _continue_paid_account_setup(callback, state, db, user, invoice_id)
+            return
         await callback.answer("✅ Этот платёж уже обработан", show_alert=True)
         return
+    await _continue_paid_account_setup(callback, state, db, user, invoice_id)
 
-    accounts_count = await db.count_user_accounts(user.id)
-    remaining = config.FREE_ACCOUNTS_LIMIT - accounts_count
-    if remaining < 0:
-        remaining = 0
 
-    text = pe(
-        "✅ Оплата получена!\n\n"
-        "➕ Добавление аккаунта\n\n"
-        f"📊 У вас {accounts_count} аккаунтов\n\n"
-        "<b>Шаг 1 из 3</b>\n\n"
-        "Хотите использовать прокси SOCKS5?\n\n"
-        "Если да — введите в формате:\n"
-        "<code>socks5://host:port</code>\n"
-        "или <code>socks5://user:pass@host:port</code>"
-    )
+async def _continue_paid_account_setup(
+    callback: CallbackQuery,
+    state: FSMContext,
+    db: Database,
+    user,
+    invoice_id: str,
+):
+    """Restore the wizard from the durable paid entitlement.
 
-    await _disconnect_pending_client(state)
-    await state.clear()
-    await state.update_data(account_setup_allowed=True)
-    await callback.message.edit_text(text, parse_mode="HTML", reply_markup=add_account_proxy_keyboard())
-    await callback.answer()
+    A successful payment is never represented solely by MemoryStorage: if a
+    DB/FSM/UI call below fails, tapping the same payment button resumes this
+    function while the payment remains in ``account_setup`` state.
+    """
+    try:
+        accounts_count = await db.count_user_accounts(user.id)
+        text = pe(
+            "✅ Оплата получена!\n\n"
+            "➕ Добавление аккаунта\n\n"
+            f"📊 У вас {accounts_count} аккаунтов\n\n"
+            "<b>Шаг 1 из 3</b>\n\n"
+            "Хотите использовать прокси SOCKS5?\n\n"
+            "Если да — введите в формате:\n"
+            "<code>socks5://host:port</code>\n"
+            "или <code>socks5://user:pass@host:port</code>"
+        )
+        await _disconnect_pending_client(state)
+        await state.clear()
+        await state.update_data(
+            account_setup_allowed=True,
+            account_payment_invoice=invoice_id,
+        )
+        await callback.message.edit_text(
+            text,
+            parse_mode="HTML",
+            reply_markup=add_account_proxy_keyboard(),
+        )
+        await callback.answer()
+    except Exception as e:
+        logger.warning(
+            "Paid extra-account setup %s could not be restored yet: %s",
+            invoice_id,
+            e,
+        )
+        try:
+            await callback.answer(
+                "Оплата сохранена. Нажмите «Проверить оплату» ещё раз, чтобы продолжить добавление аккаунта.",
+                show_alert=True,
+            )
+        except Exception:
+            pass
 
 
 @router.callback_query(F.data == "add_account_set_proxy")
@@ -825,6 +859,7 @@ async def _persist_new_account(
     proxy_str: Optional[str],
     auto_proxy: Optional[str],
     auto_proxy_pool_id: Optional[int],
+    account_payment_invoice: Optional[str] = None,
 ):
     """Save the account row after a successful Telethon sign_in.
 
@@ -843,6 +878,7 @@ async def _persist_new_account(
                 api_id=api_id,
                 api_hash=api_hash,
                 session_string=session_string,
+                account_payment_invoice=account_payment_invoice,
             )
             if account_id:
                 if proxy_str:
@@ -929,6 +965,7 @@ async def process_password(message: Message, state: FSMContext, db: Database, us
             data.get("proxy"),
             data.get("auto_proxy"),
             data.get("auto_proxy_pool_id"),
+            data.get("account_payment_invoice"),
         )
 
         # The account is genuinely created at this point — nothing past
@@ -1138,6 +1175,7 @@ async def _confirm_code(event, state: FSMContext, db: Database, userbot_manager:
             data.get("proxy"),
             data.get("auto_proxy"),
             data.get("auto_proxy_pool_id"),
+            data.get("account_payment_invoice"),
         )
 
         # Same reasoning as process_password above — the account already
@@ -1232,9 +1270,11 @@ async def callback_confirm_delete_account(
     # logout_and_stop already tore down the live Telegram session — retry the
     # DB write a few times instead of leaving a stranded account row (still
     # is_active=1, session dead) behind a transient DB error.
+    deleted = False
     for attempt in range(3):
         try:
             await db.delete_account(account_id)
+            deleted = True
             break
         except Exception as e:
             if attempt < 2:
@@ -1243,8 +1283,26 @@ async def callback_confirm_delete_account(
             else:
                 logger.error(f"delete_account({account_id}) failed after retries: {e}", exc_info=True)
 
-    user = await db.get_user(callback.from_user.id)
-    accounts = await db.get_user_accounts(user.id)
+    if not deleted:
+        # The Telegram session has already been logged out above, but the
+        # account row is still active when every DB retry failed.  Never
+        # claim that the account was deleted in this state: leave the
+        # confirmation screen in place so the user can retry the DB step.
+        await callback.answer(
+            "⚠️ Сессия отключена, но запись аккаунта не удалилась. Повторите удаление.",
+            show_alert=True,
+        )
+        return
+
+    try:
+        accounts = await db.get_user_accounts(user.id)
+    except Exception:
+        logger.error("Account %s was deleted but account-list refresh failed", account_id, exc_info=True)
+        try:
+            await callback.answer("✅ Аккаунт удалён. Список обновится при следующем открытии.", show_alert=True)
+        except Exception:
+            pass
+        return
     # The account is already gone at this point regardless of what happens
     # next — use safe_edit so a transient network blip rendering this
     # confirmation doesn't surface as a scary "Произошла ошибка" for an

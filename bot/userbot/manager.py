@@ -19,6 +19,7 @@ from telethon.errors import (
 
 from ..config import config
 from ..database.db import Database, Account
+from ..utils.delivery_journal import DeliveryJournal
 from ..utils.premium_emoji import pe
 
 
@@ -92,6 +93,8 @@ class UserbotManager:
         self._client_locks: dict[int, asyncio.Lock] = {}
         self._proxy_failure_lock = asyncio.Lock()
         self._account_proxy_failure_callback: Optional[Callable] = None
+        self._pending_proxy_problem_marks: set[int] = set()
+        self._delivery_journal = DeliveryJournal(db.db_path)
 
     def set_message_handler(self, handler: Callable):
         self._message_handler = handler
@@ -264,7 +267,28 @@ class UserbotManager:
         # have its own error handling short-circuited by a failure in what
         # is fundamentally just a best-effort notification side effect.
         try:
+            journal_key = f"proxy-problem:{account.id}"
             if await self.db.is_proxy_problem_notified(account.id):
+                await self._forget_delivery_journal(journal_key)
+                return
+
+            # The alert may have reached Telegram immediately before bot.db
+            # became unavailable.  This independent journal survives a bot
+            # restart, so repair the main marker without delivering twice.
+            journal_contains = await self._delivery_journal_contains(journal_key)
+            if journal_contains is None:
+                # A corrupt/unreadable journal may contain the only proof of
+                # a delivered alert.  Defer rather than risk a duplicate.
+                return
+            if journal_contains:
+                if await self._mark_proxy_problem_notified_after_send(account.id):
+                    await self._forget_delivery_journal(journal_key)
+                return
+
+            if account.id in self._pending_proxy_problem_marks:
+                if await self._mark_proxy_problem_notified_after_send(account.id):
+                    self._pending_proxy_problem_marks.discard(account.id)
+                    await self._forget_delivery_journal(journal_key)
                 return
 
             if self._account_proxy_failure_callback:
@@ -302,9 +326,56 @@ class UserbotManager:
             # permanently silence every future notification attempt for
             # this account, unlike the dedup check above which is meant to
             # stop *repeat* alerts once one has actually landed.
-            await self.db.mark_proxy_problem_notified(account.id)
+            journal_saved = await self._remember_delivery_journal(journal_key)
+            if not await self._mark_proxy_problem_notified_after_send(account.id):
+                self._pending_proxy_problem_marks.add(account.id)
+                if not journal_saved:
+                    logger.critical(
+                        "Delivered proxy alert for account %s has no durable dedup marker; "
+                        "a restart can duplicate it until storage is repaired",
+                        account.id,
+                    )
+            else:
+                await self._forget_delivery_journal(journal_key)
         except Exception as ne:
             logger.error(f"Failed to notify about proxy error for account {account.id}: {ne}")
+
+    async def _delivery_journal_contains(self, key: str) -> bool | None:
+        try:
+            return await self._delivery_journal.contains(key)
+        except Exception as exc:
+            logger.error("Could not read notification delivery journal for %s; notification deferred: %s", key, exc)
+            return None
+
+    async def _remember_delivery_journal(self, key: str) -> bool:
+        try:
+            await self._delivery_journal.remember(key)
+            return True
+        except Exception as exc:
+            # Continue to the main DB retries; this is an extra safety net,
+            # not a reason to report a delivered notification as unsent.
+            logger.error("Could not journal delivered notification %s: %s", key, exc)
+            return False
+
+    async def _forget_delivery_journal(self, key: str) -> None:
+        try:
+            await self._delivery_journal.forget(key)
+        except Exception as exc:
+            logger.warning("Could not clean notification delivery journal %s: %s", key, exc)
+
+    async def _mark_proxy_problem_notified_after_send(self, account_id: int) -> bool:
+        """Retry the durable dedup marker after an alert has actually been
+        delivered; callers keep an in-memory pending marker if SQLite remains
+        unavailable so retries never duplicate that delivered alert."""
+        for attempt in range(3):
+            try:
+                await self.db.mark_proxy_problem_notified(account_id)
+                return True
+            except Exception as exc:
+                if attempt == 2:
+                    logger.error("Could not mark proxy alert sent for account %s: %s", account_id, exc)
+                    return False
+                await asyncio.sleep(1 + attempt)
 
     async def _handle_pool_proxy_failure(self, dead_pool_id: int, error_text: str):
         """A pool-assigned proxy died. Unlike a user's own proxy, the account
@@ -339,12 +410,12 @@ class UserbotManager:
                 was_active = await self.db.deactivate_pool_proxy(dead_pool_id)
             except Exception as ne:
                 logger.error(f"Failed to deactivate pool proxy {dead_pool_id}: {ne}")
-                was_active = False
-
-            if not was_active:
                 return
 
-            if self._bot_notify_callback:
+            # A previous attempt may already have marked the proxy inactive
+            # and then failed while moving the accounts.  In that case do not
+            # send another admin alert, but do retry the idempotent reassignment.
+            if was_active and self._bot_notify_callback:
                 for admin_id in config.ADMIN_IDS:
                     try:
                         await self._bot_notify_callback(
