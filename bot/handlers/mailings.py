@@ -1113,7 +1113,10 @@ async def process_edit_folder(
         from telethon.tl.functions.chatlists import CheckChatlistInviteRequest
         # Unbounded before — a slow/unresponsive Telegram RPC (or a flaky
         # proxy) left this hanging forever on "Загружаем чаты из папки...".
-        result = await asyncio.wait_for(client(CheckChatlistInviteRequest(slug=slug)), timeout=30)
+        # 90s (not 30s) — resolving a large folder (dozens+ of chats) over a
+        # pool proxy can legitimately take longer than 30s and was timing
+        # out here even though it would have succeeded given more time.
+        result = await asyncio.wait_for(client(CheckChatlistInviteRequest(slug=slug)), timeout=90)
 
         chats = getattr(result, 'chats', [])
         if not chats:
@@ -2041,7 +2044,10 @@ async def process_create_folder(
         from telethon.tl.functions.chatlists import CheckChatlistInviteRequest
         # Unbounded before — a slow/unresponsive Telegram RPC (or a flaky
         # proxy) left this hanging forever on "Загружаем чаты из папки...".
-        result = await asyncio.wait_for(client(CheckChatlistInviteRequest(slug=slug)), timeout=30)
+        # 90s (not 30s) — resolving a large folder (dozens+ of chats) over a
+        # pool proxy can legitimately take longer than 30s and was timing
+        # out here even though it would have succeeded given more time.
+        result = await asyncio.wait_for(client(CheckChatlistInviteRequest(slug=slug)), timeout=90)
 
         chats = getattr(result, 'chats', [])
         if not chats:
@@ -2525,12 +2531,21 @@ async def _has_forum_flag(client, target) -> bool:
 
 
 async def _find_forum_targets(client, targets: list) -> list[str]:
-    """Check which chat identifiers have forum flag (lightweight, no membership needed)."""
-    forums = []
-    for t in targets:
-        if await _has_forum_flag(client, t.chat_identifier):
-            forums.append(t.chat_identifier)
-    return forums
+    """Check which chat identifiers have forum flag (lightweight, no membership needed).
+
+    Run with bounded concurrency instead of one-at-a-time — a large folder
+    import (dozens+ of chats) sequentially checking each one at up to 10s
+    could take minutes; a handful of concurrent checks keeps that bounded
+    without firing so many requests at once that Telegram flood-waits it.
+    """
+    semaphore = asyncio.Semaphore(8)
+
+    async def _check(t):
+        async with semaphore:
+            return t.chat_identifier if await _has_forum_flag(client, t.chat_identifier) else None
+
+    results = await asyncio.gather(*(_check(t) for t in targets))
+    return [r for r in results if r]
 
 
 # === Keep Targets Toggle ===
