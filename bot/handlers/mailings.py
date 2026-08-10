@@ -1073,12 +1073,20 @@ async def process_target_interval(message: Message, state: FSMContext, db: Datab
     await state.clear()
 
     targets = await db.get_mailing_targets(mailing_id)
+    # Text is capped to the same first page the keyboard shows (page=0) —
+    # listing all N targets in text while the keyboard only has buttons for
+    # the first TARGETS_PAGE_SIZE would desync the numbering for anything
+    # past that page.
+    total_pages = max(1, (len(targets) + TARGETS_PAGE_SIZE - 1) // TARGETS_PAGE_SIZE)
+    page_targets = targets[:TARGETS_PAGE_SIZE]
     text = f"✅ Интервал обновлён!\n\n🎯 Целевые чаты ({len(targets)} шт.):\n\n"
-    for i, t in enumerate(targets, 1):
+    for i, t in enumerate(page_targets, 1):
         iv = f" [{t.interval_seconds}с]" if t.interval_seconds else " [умолч.]"
         text += f"{i}. {html.escape(t.chat_identifier)}{iv}\n"
+    if total_pages > 1:
+        text += f"\nСтраница 1/{total_pages}."
 
-    await message.answer(pe(text), parse_mode="HTML", reply_markup=mailing_targets_keyboard(mailing_id, targets))
+    await message.answer(pe(text), parse_mode="HTML", reply_markup=mailing_targets_keyboard(mailing_id, targets, page=0))
 
 
 # === Folder targets (edit mode) ===
