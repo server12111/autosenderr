@@ -931,7 +931,17 @@ async def process_password(message: Message, state: FSMContext, db: Database, us
             data.get("auto_proxy_pool_id"),
         )
 
-        accounts = await db.get_user_accounts(user.id)
+        # The account is genuinely created at this point — nothing past
+        # here should be able to turn this into a shown error (the exact
+        # bug already fixed once inside _persist_new_account itself, which
+        # recurred one call later in this same function: a transient
+        # failure fetching the list for the confirmation screen used to
+        # fall into the except block below meant for sign_in failures).
+        try:
+            accounts = await db.get_user_accounts(user.id)
+        except Exception as e:
+            logger.warning(f"Failed to fetch account list after creating account {account_id}: {e}")
+            accounts = []
         await message.answer(
             pe(f"✅ Аккаунт {html.escape(data['phone'])} успешно добавлен!"),
             parse_mode="HTML",
@@ -1130,7 +1140,14 @@ async def _confirm_code(event, state: FSMContext, db: Database, userbot_manager:
             data.get("auto_proxy_pool_id"),
         )
 
-        accounts = await db.get_user_accounts(user.id)
+        # Same reasoning as process_password above — the account already
+        # exists at this point, so a failure fetching the list must not
+        # fall into the except block below and get reported as an error.
+        try:
+            accounts = await db.get_user_accounts(user.id)
+        except Exception as e:
+            logger.warning(f"Failed to fetch account list after creating account {account_id}: {e}")
+            accounts = []
         await _edit_code_message(event, state,
             pe(f"✅ Аккаунт {html.escape(data['phone'])} успешно добавлен!"),
             parse_mode="HTML",

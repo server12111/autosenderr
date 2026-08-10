@@ -165,11 +165,20 @@ class UserbotManager:
             me = await client.get_me()
             self._me_ids[account.id] = me.id
             self._clients[account.id] = client
-            await self.db.clear_proxy_problem_notified(account.id)
 
-            fresh_session = client.session.save()
-            if fresh_session != account.session_string:
-                await self.db.update_account_session(account.id, fresh_session)
+            # The client is fully connected and authorized at this point —
+            # a failure in either of these two bookkeeping writes must not
+            # tear down an otherwise-working session (the except Exception
+            # below pops it back out of self._clients and disconnects it,
+            # which used to happen here for what's just a DB hiccup).
+            try:
+                await self.db.clear_proxy_problem_notified(account.id)
+
+                fresh_session = client.session.save()
+                if fresh_session != account.session_string:
+                    await self.db.update_account_session(account.id, fresh_session)
+            except Exception as e:
+                logger.warning(f"Post-connect bookkeeping failed for account {account.id}, continuing anyway: {e}")
 
             account_id = account.id
             me_id = me.id

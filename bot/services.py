@@ -1479,7 +1479,22 @@ class MailingService:
                                 logger.info(f"Mailing {mailing_id}: ✓ sent to {target} via account {current_account_id}")
                             else:
                                 logger.debug(f"Mailing {mailing_id}: ✓ sent to {target} via account {current_account_id}")
-                            await self.db.update_target_last_sent(target_obj.id, current_account_id)
+                            # The message was genuinely delivered at this
+                            # point — a failure recording last_sent_at (e.g.
+                            # transient DB lock contention) must not be
+                            # misrouted into the except clauses below as if
+                            # the SEND itself had failed. Left unrecorded,
+                            # the next cycle's interval check would think
+                            # nothing was sent and re-send to this same
+                            # target — a real duplicate-message bug, not
+                            # just a cosmetic log entry.
+                            try:
+                                await self.db.update_target_last_sent(target_obj.id, current_account_id)
+                            except Exception as book_e:
+                                logger.error(
+                                    f"Mailing {mailing_id}: failed to record last_sent_at for target "
+                                    f"{target_obj.id} after a successful send: {book_e}"
+                                )
                             self._mark_target_working(mailing_id, target_obj.id)
                             sent_any = True
                             cycle_sent += 1
@@ -1610,7 +1625,17 @@ class MailingService:
                                     reply_to_id, add_sig, hidden_tag_user_ids,
                                 )
                             if fallback_sent:
-                                await self.db.update_target_last_sent(target_obj.id, current_account_id)
+                                # Same reasoning as the main send path above —
+                                # the fallback text was genuinely delivered;
+                                # a bookkeeping failure here must not abort
+                                # the cycle or risk a duplicate send next time.
+                                try:
+                                    await self.db.update_target_last_sent(target_obj.id, current_account_id)
+                                except Exception as book_e:
+                                    logger.error(
+                                        f"Mailing {mailing_id}: failed to record last_sent_at for target "
+                                        f"{target_obj.id} after a successful fallback send: {book_e}"
+                                    )
                                 self._mark_target_working(mailing_id, target_obj.id)
                                 sent_any = True
                                 logger.info(f"Mailing {mailing_id}: media forbidden in '{target}', sent text-only fallback instead")
@@ -1673,7 +1698,13 @@ class MailingService:
                                     reply_to_id, add_sig, hidden_tag_user_ids,
                                 )
                                 if fallback_sent:
-                                    await self.db.update_target_last_sent(target_obj.id, current_account_id)
+                                    try:
+                                        await self.db.update_target_last_sent(target_obj.id, current_account_id)
+                                    except Exception as book_e:
+                                        logger.error(
+                                            f"Mailing {mailing_id}: failed to record last_sent_at for target "
+                                            f"{target_obj.id} after a successful fallback send: {book_e}"
+                                        )
                                     self._mark_target_working(mailing_id, target_obj.id)
                                     sent_any = True
                                     logger.info(f"Mailing {mailing_id}: {type(e).__name__} in '{target}', sent text-only fallback instead")
@@ -1927,7 +1958,18 @@ class MailingService:
                 add_signature=add_signature,
                 hidden_tag_user_ids=hidden_tag_user_ids,
             )
-            await self.db.update_target_last_sent(target_obj.id, account_id)
+            # Same reasoning as the main send path in _mailing_loop — the
+            # message was genuinely delivered, so a bookkeeping failure
+            # here must not be misrouted into the except clauses below as
+            # a send failure (and must not risk a duplicate send next
+            # cycle from an unrecorded last_sent_at).
+            try:
+                await self.db.update_target_last_sent(target_obj.id, account_id)
+            except Exception as book_e:
+                logger.error(
+                    f"Mailing {mailing_id}: failed to record last_sent_at for target "
+                    f"{target_obj.id} after a successful auto-join send: {book_e}"
+                )
             logger.info(f"Mailing {mailing_id}: sent to '{target}' after auto-join")
             return True
         except _BAN_ERRORS as e:

@@ -2477,11 +2477,21 @@ async def callback_launch_mailing(
     success = await mailing_service.start_mailing(mailing_id)
 
     if success:
-        mailing = await db.get_mailing(mailing_id)
-        await callback.message.edit_text(
+        # The mailing is genuinely running at this point — a failure
+        # re-fetching it for the redraw must not surface as "не удалось
+        # запустить" (same bug already fixed for account creation this
+        # session). Fall back to the already-fetched (slightly stale but
+        # perfectly usable) object above instead of letting this escape.
+        try:
+            fresh_mailing = await db.get_mailing(mailing_id)
+        except Exception as e:
+            logger.warning(f"Failed to refresh mailing {mailing_id} after launch: {e}")
+            fresh_mailing = mailing
+        await safe_edit(
+            callback.message,
             pe("🚀 Рассылка запущена!"),
             parse_mode="HTML",
-            reply_markup=mailing_menu_keyboard(mailing) if mailing else main_menu_keyboard(),
+            reply_markup=mailing_menu_keyboard(fresh_mailing) if fresh_mailing else main_menu_keyboard(),
         )
         await callback.answer("Рассылка запущена!")
     else:
@@ -2526,31 +2536,38 @@ async def callback_set_mailing_account(callback: CallbackQuery, db: Database):
     await db.update_mailing_account(mailing_id, account_id)
     await callback.answer("✅ Аккаунт изменён")
 
-    mailing = await db.get_mailing_for_user(mailing_id, callback.from_user.id)
-    if not mailing:
-        await callback.answer("Рассылка не найдена", show_alert=True)
-        return
-    account = await db.get_account(mailing.account_id)
-    messages = await db.get_mailing_messages(mailing_id)
-    targets = await db.get_mailing_targets(mailing_id)
+    # The change is already committed and already confirmed above — a
+    # failure anywhere in this redraw must not surface as an error (the
+    # callback is also already answered once, so a second callback.answer()
+    # from a crash here would itself just fail silently, masking what's
+    # really just a display refresh problem).
+    try:
+        mailing = await db.get_mailing_for_user(mailing_id, callback.from_user.id)
+        if not mailing:
+            return
+        account = await db.get_account(mailing.account_id)
+        messages = await db.get_mailing_messages(mailing_id)
+        targets = await db.get_mailing_targets(mailing_id)
 
-    status = "🟢 Активна" if mailing.is_active else "🔴 Остановлена"
-    last_sent = _fmt_dt(mailing.last_sent_at)
-    active_hours = format_active_hours(mailing.active_hours_json)
+        status = "🟢 Активна" if mailing.is_active else "🔴 Остановлена"
+        last_sent = _fmt_dt(mailing.last_sent_at)
+        active_hours = format_active_hours(mailing.active_hours_json)
 
-    text = pe(
-        f"📋 Рассылка: {html.escape(mailing.name)}\n\n"
-        f"Статус: {status}\n"
-        f"Аккаунт: {html.escape(account.display_name) if account else 'не найден'}\n"
-        f"Интервал: {mailing.interval_seconds} сек\n"
-        f"Время активности: {active_hours}\n"
-        f"Сообщений: {len(messages)}\n"
-        f"Целевых чатов: {len(targets)}\n"
-        f"Последняя отправка: {last_sent}\n\n"
-        "Выберите действие:"
-    )
+        text = pe(
+            f"📋 Рассылка: {html.escape(mailing.name)}\n\n"
+            f"Статус: {status}\n"
+            f"Аккаунт: {html.escape(account.display_name) if account else 'не найден'}\n"
+            f"Интервал: {mailing.interval_seconds} сек\n"
+            f"Время активности: {active_hours}\n"
+            f"Сообщений: {len(messages)}\n"
+            f"Целевых чатов: {len(targets)}\n"
+            f"Последняя отправка: {last_sent}\n\n"
+            "Выберите действие:"
+        )
 
-    await safe_edit(callback.message, text, parse_mode="HTML", reply_markup=mailing_menu_keyboard(mailing))
+        await safe_edit(callback.message, text, parse_mode="HTML", reply_markup=mailing_menu_keyboard(mailing))
+    except Exception as e:
+        logger.warning(f"Failed to redraw mailing {mailing_id} after account change: {e}")
 
 
 @router.callback_query(F.data.startswith("change_msg_format:"))
