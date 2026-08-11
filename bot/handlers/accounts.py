@@ -911,6 +911,8 @@ async def _persist_new_account(
     way to recover. Retry a few times before giving up.
     """
     last_exc = None
+    saved_proxy = proxy_str if proxy_str else auto_proxy
+    saved_proxy_pool_id = None if proxy_str else auto_proxy_pool_id
     for attempt in range(3):
         try:
             user = await db.get_user(telegram_user_id)
@@ -921,12 +923,9 @@ async def _persist_new_account(
                 api_hash=api_hash,
                 session_string=session_string,
                 account_payment_invoice=account_payment_invoice,
+                proxy=saved_proxy,
+                proxy_pool_id=saved_proxy_pool_id,
             )
-            if account_id:
-                if proxy_str:
-                    await db.update_account_proxy(account_id, proxy_str)
-                else:
-                    await db.update_account_proxy(account_id, auto_proxy, proxy_pool_id=auto_proxy_pool_id)
             break
         except Exception as e:
             last_exc = e

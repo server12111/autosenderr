@@ -684,6 +684,8 @@ class Database:
         api_hash: str,
         session_string: str,
         account_payment_invoice: Optional[str] = None,
+        proxy: Optional[str] = None,
+        proxy_pool_id: Optional[int] = None,
     ) -> int:
         async with self._transaction_lock:
             async with aiosqlite.connect(self.db_path) as conn:
@@ -700,8 +702,9 @@ class Database:
                         existing = await cur.fetchone()
                     if existing:
                         await conn.execute(
-                            "UPDATE accounts SET api_id=?, api_hash=?, session_string=?, is_active=1 WHERE id=?",
-                            (api_id, api_hash, session_string, existing["id"]),
+                            "UPDATE accounts SET api_id=?, api_hash=?, session_string=?, is_active=1, "
+                            "proxy=?, proxy_pool_id=? WHERE id=?",
+                            (api_id, api_hash, session_string, proxy, proxy_pool_id, existing["id"]),
                         )
                         # Re-authorizing an already known phone does not add
                         # an account.  Keep a fresh paid entitlement intact;
@@ -711,9 +714,9 @@ class Database:
                         return existing["id"]
                     cursor = await conn.execute(
                         "INSERT INTO accounts "
-                        "(user_id, phone, api_id, api_hash, session_string, created_at) "
-                        "VALUES (?, ?, ?, ?, ?, ?)",
-                        (user_id, phone, api_id, api_hash, session_string, now_moscow().isoformat()),
+                        "(user_id, phone, api_id, api_hash, session_string, proxy, proxy_pool_id, created_at) "
+                        "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                        (user_id, phone, api_id, api_hash, session_string, proxy, proxy_pool_id, now_moscow().isoformat()),
                     )
                     if account_payment_invoice:
                         await self._consume_extra_account_payment(
@@ -750,11 +753,12 @@ class Database:
         raise ValueError("Оплата дополнительного аккаунта уже использована или не подтверждена")
 
     async def update_account_session(self, account_id: int, session_string: str):
-        await self._conn.execute(
-            "UPDATE accounts SET session_string = ? WHERE id = ?",
-            (session_string, account_id),
-        )
-        await self._conn.commit()
+        async with self._transaction_lock:
+            await self._conn.execute(
+                "UPDATE accounts SET session_string = ? WHERE id = ?",
+                (session_string, account_id),
+            )
+            await self._conn.commit()
 
     async def update_account_name(self, account_id: int, name: str):
         await self._conn.execute("UPDATE accounts SET name = ? WHERE id = ?", (name, account_id))
@@ -815,10 +819,11 @@ class Database:
         await self._conn.commit()
 
     async def update_account_proxy(self, account_id: int, proxy: Optional[str], proxy_pool_id: Optional[int] = None):
-        await self._conn.execute(
-            "UPDATE accounts SET proxy = ?, proxy_pool_id = ? WHERE id = ?", (proxy, proxy_pool_id, account_id)
-        )
-        await self._conn.commit()
+        async with self._transaction_lock:
+            await self._conn.execute(
+                "UPDATE accounts SET proxy = ?, proxy_pool_id = ? WHERE id = ?", (proxy, proxy_pool_id, account_id)
+            )
+            await self._conn.commit()
 
     async def is_proxy_problem_notified(self, account_id: int) -> bool:
         async with self._conn.execute(
@@ -854,11 +859,12 @@ class Database:
             return self._parse_datetime(row["flood_wait_until"]) if row else None
 
     async def set_flood_wait_until(self, account_id: int, finish_at: Optional[datetime]):
-        await self._conn.execute(
-            "UPDATE accounts SET flood_wait_until = ? WHERE id = ?",
-            (finish_at.isoformat() if finish_at else None, account_id),
-        )
-        await self._conn.commit()
+        async with self._transaction_lock:
+            await self._conn.execute(
+                "UPDATE accounts SET flood_wait_until = ? WHERE id = ?",
+                (finish_at.isoformat() if finish_at else None, account_id),
+            )
+            await self._conn.commit()
 
     # === Proxy pool ===
 
@@ -1297,11 +1303,12 @@ class Database:
         await self._conn.commit()
 
     async def update_mailing_last_sent(self, mailing_id: int):
-        await self._conn.execute(
-            "UPDATE mailings SET last_sent_at = ? WHERE id = ?",
-            (now_moscow().isoformat(), mailing_id),
-        )
-        await self._conn.commit()
+        async with self._transaction_lock:
+            await self._conn.execute(
+                "UPDATE mailings SET last_sent_at = ? WHERE id = ?",
+                (now_moscow().isoformat(), mailing_id),
+            )
+            await self._conn.commit()
 
     async def update_mailing_active_hours(self, mailing_id: int, active_hours_json: Optional[str]):
         await self._conn.execute(
@@ -1558,11 +1565,12 @@ class Database:
             return [dict(row) for row in await cur.fetchall()]
 
     async def update_target_last_sent(self, target_id: int, account_id: Optional[int] = None):
-        await self._conn.execute(
-            "UPDATE mailing_targets SET last_sent_at = ?, last_account_id = ? WHERE id = ?",
-            (now_moscow().isoformat(), account_id, target_id),
-        )
-        await self._conn.commit()
+        async with self._transaction_lock:
+            await self._conn.execute(
+                "UPDATE mailing_targets SET last_sent_at = ?, last_account_id = ? WHERE id = ?",
+                (now_moscow().isoformat(), account_id, target_id),
+            )
+            await self._conn.commit()
 
     async def delete_mailing_target(self, target_id: int):
         await self._conn.execute("DELETE FROM mailing_targets WHERE id = ?", (target_id,))
@@ -2264,21 +2272,25 @@ class Database:
         mailing_id: Optional[int] = None,
         chat_identifier: Optional[str] = None,
     ):
-        await self._conn.execute(
-            "INSERT INTO mailing_error_log "
-            "(user_id, account_id, mailing_id, error_type, error_text, chat_identifier, created_at) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?)",
-            (user_id, account_id, mailing_id, error_type,
-             error_text[:500] if error_text else None, chat_identifier,
-             now_moscow().isoformat()),
-        )
-        await self._conn.execute(
-            """DELETE FROM mailing_error_log WHERE user_id = ? AND id NOT IN (
-                   SELECT id FROM mailing_error_log WHERE user_id = ? ORDER BY created_at DESC LIMIT 100
-               )""",
-            (user_id, user_id),
-        )
-        await self._conn.commit()
+        # Mailing failures can happen in dozens of concurrent loops.  Share
+        # the transaction lock with account/payment writes so their diagnostic
+        # rows never starve a just-authorized account from being persisted.
+        async with self._transaction_lock:
+            await self._conn.execute(
+                "INSERT INTO mailing_error_log "
+                "(user_id, account_id, mailing_id, error_type, error_text, chat_identifier, created_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (user_id, account_id, mailing_id, error_type,
+                 error_text[:500] if error_text else None, chat_identifier,
+                 now_moscow().isoformat()),
+            )
+            await self._conn.execute(
+                """DELETE FROM mailing_error_log WHERE user_id = ? AND id NOT IN (
+                       SELECT id FROM mailing_error_log WHERE user_id = ? ORDER BY created_at DESC LIMIT 100
+                   )""",
+                (user_id, user_id),
+            )
+            await self._conn.commit()
 
     async def get_user_error_logs(self, user_id: int, limit: int = 20) -> list:
         async with self._conn.execute(
