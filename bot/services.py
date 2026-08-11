@@ -872,6 +872,14 @@ def _truncate_utf16(text: str, max_units: int) -> str:
 
 _FREE_TIER_SIGNATURE = "\n━━━━━━━━━━\n🤖 Отправлено через @feAutoSenderBot"
 
+# A restart must not make every previously-active mailing perform its first
+# Telegram/SQLite cycle at the same instant.  With many restored mailings that
+# burst can delay the bot's own callback handlers for seconds.  New mailings
+# started by a user deliberately keep a zero delay; this applies only to the
+# restored batch during service startup.
+_RESTORED_MAILING_START_STEP_SECONDS = 0.30
+_RESTORED_MAILING_MAX_START_DELAY_SECONDS = 30.0
+
 
 class MailingService:
     def __init__(self, db: Database, userbot_manager):
@@ -893,9 +901,18 @@ class MailingService:
     async def start(self):
         self._running = True
         mailings = await self.db.get_active_mailings()
-        for m in mailings:
-            await self._start_mailing_task(m.id)
-        logger.info(f"Mailing service started with {len(mailings)} active mailings")
+        for index, mailing in enumerate(mailings):
+            initial_delay = min(
+                index * _RESTORED_MAILING_START_STEP_SECONDS,
+                _RESTORED_MAILING_MAX_START_DELAY_SECONDS,
+            )
+            await self._start_mailing_task(mailing.id, initial_delay=initial_delay)
+        logger.info(
+            "Mailing service started with %s active mailings "
+            "(restored starts spread over up to %.0fs)",
+            len(mailings),
+            _RESTORED_MAILING_MAX_START_DELAY_SECONDS,
+        )
 
     async def stop(self):
         self._running = False
@@ -1296,7 +1313,7 @@ class MailingService:
         except Exception:
             return False
 
-    async def _start_mailing_task(self, mailing_id: int):
+    async def _start_mailing_task(self, mailing_id: int, initial_delay: float = 0.0):
         lock = self._mailing_locks.setdefault(mailing_id, asyncio.Lock())
         async with lock:
             if mailing_id in self._tasks and not self._tasks[mailing_id].done():
@@ -1313,10 +1330,12 @@ class MailingService:
                         t.id: now + timedelta(seconds=i * stagger_delay)
                         for i, t in enumerate(virgin)
                     }
-            task = asyncio.create_task(self._mailing_loop(mailing_id))
+            task = asyncio.create_task(self._mailing_loop(mailing_id, initial_delay=initial_delay))
             self._tasks[mailing_id] = task
 
-    async def _mailing_loop(self, mailing_id: int):
+    async def _mailing_loop(self, mailing_id: int, initial_delay: float = 0.0):
+        if initial_delay:
+            await asyncio.sleep(initial_delay)
         logger.info(f"Mailing {mailing_id}: loop started")
         try:
             while self._running:
