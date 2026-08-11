@@ -33,7 +33,7 @@ from ..config import config
 from ..services import CryptoBotService, TonPaymentService, MailingService
 from ..utils.errors import friendly_error
 from ..utils.time_utils import now_moscow
-from ..utils.tg import safe_edit
+from ..utils.tg import safe_answer, safe_edit
 
 
 def _is_blocked_proxy_address(address: str) -> bool:
@@ -1021,12 +1021,23 @@ async def process_password(message: Message, state: FSMContext, db: Database, us
         except Exception as e:
             logger.warning(f"Failed to fetch account list after creating account {account_id}: {e}")
             accounts = []
-        await message.answer(
-            pe(f"✅ Аккаунт {html.escape(data['phone'])} успешно добавлен!"),
-            parse_mode="HTML",
-            reply_markup=accounts_keyboard(accounts),
-        )
-        await state.clear()
+        # The Telegram session and account row are durable now.  Do not let a
+        # transient Bot API failure while rendering this confirmation enter the
+        # outer ``except`` below: that branch says the login failed even though
+        # the account has already been added.
+        try:
+            await safe_answer(
+                message,
+                pe(f"✅ Аккаунт {html.escape(data['phone'])} успешно добавлен!"),
+                parse_mode="HTML",
+                reply_markup=accounts_keyboard(accounts),
+            )
+        except Exception:
+            logger.exception("Account %s was created but its confirmation could not be sent", account_id)
+        try:
+            await state.clear()
+        except Exception:
+            logger.exception("Account %s was created but add-account FSM cleanup failed", account_id)
 
     except PasswordHashInvalidError as e:
         # Keep the client connected and stay in waiting_password — the
@@ -1228,12 +1239,35 @@ async def _confirm_code(event, state: FSMContext, db: Database, userbot_manager:
         except Exception as e:
             logger.warning(f"Failed to fetch account list after creating account {account_id}: {e}")
             accounts = []
-        await _edit_code_message(event, state,
-            pe(f"✅ Аккаунт {html.escape(data['phone'])} успешно добавлен!"),
-            parse_mode="HTML",
-            reply_markup=accounts_keyboard(accounts),
-        )
-        await state.clear()
+        # Sign-in and the DB write have succeeded.  Rendering a callback's
+        # message can still fail on a slow server (in particular once the
+        # callback is old); never route that through the sign-in error handler
+        # and tell the user the opposite of what actually happened.
+        success_text = pe(f"✅ Аккаунт {html.escape(data['phone'])} успешно добавлен!")
+        success_markup = accounts_keyboard(accounts)
+        try:
+            await _edit_code_message(
+                event,
+                state,
+                success_text,
+                parse_mode="HTML",
+                reply_markup=success_markup,
+            )
+        except Exception:
+            logger.exception("Account %s was created but its confirmation edit failed", account_id)
+            try:
+                await safe_answer(
+                    event.message if isinstance(event, CallbackQuery) else event,
+                    success_text,
+                    parse_mode="HTML",
+                    reply_markup=success_markup,
+                )
+            except Exception:
+                logger.exception("Fallback confirmation for created account %s could not be sent", account_id)
+        try:
+            await state.clear()
+        except Exception:
+            logger.exception("Account %s was created but add-account FSM cleanup failed", account_id)
 
     except Exception as e:
         error_str = str(e).lower()
@@ -1270,7 +1304,13 @@ async def _confirm_code(event, state: FSMContext, db: Database, userbot_manager:
             await state.clear()
 
     if isinstance(event, CallbackQuery):
-        await event.answer()
+        # A long Telethon login may leave the callback older than Telegram's
+        # answer window.  The account confirmation above is the authoritative
+        # result, so an expired acknowledgement must not raise a generic error.
+        try:
+            await event.answer()
+        except Exception:
+            logger.debug("Could not acknowledge account-code callback", exc_info=True)
 
 @router.callback_query(F.data.startswith("delete_account:"))
 async def callback_delete_account(callback: CallbackQuery, db: Database):

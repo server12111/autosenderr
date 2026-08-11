@@ -53,7 +53,11 @@ class Config:
 
     # TON payments
     TON_WALLET_ADDRESS: str = os.getenv("TON_WALLET_ADDRESS", "")
-    TONCENTER_API_KEY: str = os.getenv("TONCENTER_API_KEY", "")
+    # ``TONCENTRE_API_KEY`` was the name used by the hosting panel and older
+    # deployments.  Keep accepting it so a normal server migration does not
+    # silently disable the TonCenter key; the correctly spelled name wins when
+    # both are present.
+    TONCENTER_API_KEY: str = os.getenv("TONCENTER_API_KEY") or os.getenv("TONCENTRE_API_KEY", "")
     TON_SUBSCRIPTION_PRICE: float = _safe_float("TON_SUBSCRIPTION_PRICE", 0.5)
     TON_EXTRA_ACCOUNT_PRICE: float = _safe_float("TON_EXTRA_ACCOUNT_PRICE", 0.05)
 

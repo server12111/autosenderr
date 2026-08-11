@@ -50,7 +50,7 @@ from ..keyboards.inline import (
     skip_thread_keyboard,
 )
 from ..utils.time_utils import format_active_hours, parse_time_range, create_active_hours_json, now_moscow
-from ..utils.tg import safe_edit
+from ..utils.tg import safe_answer, safe_edit
 from ..services import MailingService
 from ..userbot.manager import UserbotManager
 from ..utils.errors import friendly_error
@@ -976,25 +976,46 @@ async def process_edit_target(message: Message, state: FSMContext, db: Database,
     target_id = await db.add_mailing_target(mailing_id, target, is_forum=is_forum)
 
     if is_forum:
-        await state.update_data(target_id=target_id, mailing_id=mailing_id)
-        await state.set_state(EditMailingStates.waiting_thread_id_for_target)
-        await message.answer(
-            pe(f"💬 Чат <b>{html.escape(target)}</b> использует темы (Topics).\n\n"
-               "Отправьте ссылку на тему или её ID.\n"
-               "Примеры: <code>https://t.me/chatname/123</code> или <code>123</code>\n\n"
-               "Нажмите «Пропустить» для отправки в General."),
-            parse_mode="HTML",
-            reply_markup=skip_thread_keyboard(mailing_id),
-        )
+        try:
+            await state.update_data(target_id=target_id, mailing_id=mailing_id)
+            await state.set_state(EditMailingStates.waiting_thread_id_for_target)
+        except Exception:
+            logger.exception("Forum target %s was saved but its FSM state could not be updated", target_id)
+        try:
+            await safe_answer(
+                message,
+                pe(f"💬 Чат <b>{html.escape(target)}</b> использует темы (Topics).\n\n"
+                   "Отправьте ссылку на тему или её ID.\n"
+                   "Примеры: <code>https://t.me/chatname/123</code> или <code>123</code>\n\n"
+                   "Нажмите «Пропустить» для отправки в General."),
+                parse_mode="HTML",
+                reply_markup=skip_thread_keyboard(mailing_id),
+            )
+        except Exception:
+            logger.exception("Forum target %s was saved but its confirmation could not be sent", target_id)
         return
 
-    await state.clear()
-    targets = await db.get_mailing_targets(mailing_id)
-    await message.answer(
-        pe(f"✅ Чат добавлен! Всего чатов: {len(targets)}"),
-        parse_mode="HTML",
-        reply_markup=mailing_targets_keyboard(mailing_id, targets),
-    )
+    try:
+        await state.clear()
+    except Exception:
+        logger.exception("Target %s was saved but edit-target FSM cleanup failed", target_id)
+    try:
+        targets = await db.get_mailing_targets(mailing_id)
+        await safe_answer(
+            message,
+            pe(f"✅ Чат добавлен! Всего чатов: {len(targets)}"),
+            parse_mode="HTML",
+            reply_markup=mailing_targets_keyboard(mailing_id, targets),
+        )
+    except Exception:
+        # add_mailing_target() committed above.  The recovery response is
+        # deliberately best-effort: do not re-raise into the global error
+        # handler and falsely report this durable success as a failure.
+        logger.exception("Target %s was saved but its confirmation could not be rendered", target_id)
+        try:
+            await safe_answer(message, pe("✅ Чат добавлен. Откройте список чатов, чтобы продолжить."), parse_mode="HTML")
+        except Exception:
+            logger.exception("Fallback confirmation for target %s could not be sent", target_id)
 
 
 @router.callback_query(F.data.startswith("confirm_delete_target:"))
@@ -1380,14 +1401,25 @@ async def process_edit_txt_file(message: Message, state: FSMContext, db: Databas
         except Exception:
             pass
 
-    await state.clear()
-    targets = await db.get_mailing_targets(mailing_id)
-
-    await message.answer(
-        pe(f"✅ Добавлено {added} чатов из файла! Всего чатов: {len(targets)}"),
-        parse_mode="HTML",
-        reply_markup=mailing_targets_keyboard(mailing_id, targets),
-    )
+    try:
+        await state.clear()
+    except Exception:
+        logger.exception("%s imported targets were saved but edit-target FSM cleanup failed", added)
+    try:
+        targets = await db.get_mailing_targets(mailing_id)
+        await safe_answer(
+            message,
+            pe(f"✅ Добавлено {added} чатов из файла! Всего чатов: {len(targets)}"),
+            parse_mode="HTML",
+            reply_markup=mailing_targets_keyboard(mailing_id, targets),
+        )
+    except Exception:
+        logger.exception("%s imported targets were saved but their confirmation could not be rendered", added)
+        try:
+            await safe_answer(message, pe(f"✅ Добавлено {added} чатов из файла. Откройте список чатов, чтобы продолжить."), parse_mode="HTML")
+        except Exception:
+            logger.exception("Fallback confirmation for %s imported targets could not be sent", added)
+        return
 
     mailing = await db.get_mailing_for_user(mailing_id, message.from_user.id)
     if mailing:
@@ -2074,26 +2106,44 @@ async def process_create_target(message: Message, state: FSMContext, db: Databas
         # (both EditMailingStates handlers) know to hand control back to the
         # creation wizard instead of dropping into the edit-mode target list,
         # which has no "Готово" button and would silently strand the wizard.
-        await state.update_data(target_id=target_id, mailing_id=mailing_id, target_return_to_creation=True)
-        await state.set_state(EditMailingStates.waiting_thread_id_for_target)
-        await message.answer(
-            pe(f"💬 Чат <b>{html.escape(target)}</b> использует темы (Topics).\n\n"
-               "Отправьте ссылку на тему или её ID.\n"
-               "Примеры: <code>https://t.me/chatname/123</code> или <code>123</code>\n\n"
-               "Нажмите «Пропустить» для отправки в General."),
-            parse_mode="HTML",
-            reply_markup=skip_thread_keyboard(mailing_id),
-        )
+        try:
+            await state.update_data(target_id=target_id, mailing_id=mailing_id, target_return_to_creation=True)
+            await state.set_state(EditMailingStates.waiting_thread_id_for_target)
+        except Exception:
+            logger.exception("Forum target %s was saved but creation FSM state could not be updated", target_id)
+        try:
+            await safe_answer(
+                message,
+                pe(f"💬 Чат <b>{html.escape(target)}</b> использует темы (Topics).\n\n"
+                   "Отправьте ссылку на тему или её ID.\n"
+                   "Примеры: <code>https://t.me/chatname/123</code> или <code>123</code>\n\n"
+                   "Нажмите «Пропустить» для отправки в General."),
+                parse_mode="HTML",
+                reply_markup=skip_thread_keyboard(mailing_id),
+            )
+        except Exception:
+            logger.exception("Forum target %s was saved but its confirmation could not be sent", target_id)
         return
 
-    await state.set_state(CreateMailingStates.adding_targets)
-    targets = await db.get_mailing_targets(mailing_id)
-    await message.answer(
-        pe(f"✅ Чат добавлен! Всего чатов: {len(targets)}\n\n"
-        "Добавьте ещё или нажмите «Готово»:"),
-        parse_mode="HTML",
-        reply_markup=mailing_creation_targets_keyboard(mailing_id, targets),
-    )
+    try:
+        await state.set_state(CreateMailingStates.adding_targets)
+    except Exception:
+        logger.exception("Target %s was saved but creation FSM state could not be updated", target_id)
+    try:
+        targets = await db.get_mailing_targets(mailing_id)
+        await safe_answer(
+            message,
+            pe(f"✅ Чат добавлен! Всего чатов: {len(targets)}\n\n"
+            "Добавьте ещё или нажмите «Готово»:"),
+            parse_mode="HTML",
+            reply_markup=mailing_creation_targets_keyboard(mailing_id, targets),
+        )
+    except Exception:
+        logger.exception("Target %s was saved but its creation confirmation could not be rendered", target_id)
+        try:
+            await safe_answer(message, pe("✅ Чат добавлен. Откройте список чатов, чтобы продолжить."), parse_mode="HTML")
+        except Exception:
+            logger.exception("Fallback confirmation for target %s could not be sent", target_id)
 
 
 @router.callback_query(
@@ -2371,14 +2421,25 @@ async def process_create_txt_file(message: Message, state: FSMContext, db: Datab
         except Exception:
             pass
 
-    await state.set_state(CreateMailingStates.adding_targets)
-    targets = await db.get_mailing_targets(mailing_id)
-
-    await message.answer(
-        pe(f"✅ Добавлено {added} чатов из файла! Всего чатов: {len(targets)}\n\nДобавьте ещё или нажмите «Готово»:"),
-        parse_mode="HTML",
-        reply_markup=mailing_creation_targets_keyboard(mailing_id, targets),
-    )
+    try:
+        await state.set_state(CreateMailingStates.adding_targets)
+    except Exception:
+        logger.exception("%s imported targets were saved but creation FSM state could not be updated", added)
+    try:
+        targets = await db.get_mailing_targets(mailing_id)
+        await safe_answer(
+            message,
+            pe(f"✅ Добавлено {added} чатов из файла! Всего чатов: {len(targets)}\n\nДобавьте ещё или нажмите «Готово»:"),
+            parse_mode="HTML",
+            reply_markup=mailing_creation_targets_keyboard(mailing_id, targets),
+        )
+    except Exception:
+        logger.exception("%s imported targets were saved but their creation confirmation could not be rendered", added)
+        try:
+            await safe_answer(message, pe(f"✅ Добавлено {added} чатов из файла. Откройте список чатов, чтобы продолжить."), parse_mode="HTML")
+        except Exception:
+            logger.exception("Fallback confirmation for %s imported targets could not be sent", added)
+        return
 
     mailing = await db.get_mailing_for_user(mailing_id, message.from_user.id)
     if mailing:
