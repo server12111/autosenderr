@@ -7,7 +7,7 @@ import time
 from datetime import datetime
 from typing import Optional
 from aiogram import Router, F
-from aiogram.types import Message, CallbackQuery
+from aiogram.types import Message, CallbackQuery, LabeledPrice
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from telethon.errors import PasswordHashInvalidError, PhoneCodeInvalidError
@@ -29,7 +29,7 @@ from ..keyboards.inline import (
     back_to_menu_keyboard,
 )
 from ..userbot.manager import UserbotManager, _parse_proxy, _DEVICE_POOL
-from ..config import config
+from ..config import config, get_stars_price
 from ..services import CryptoBotService, TonPaymentService, MailingService
 from ..utils.errors import friendly_error
 from ..utils.time_utils import now_moscow
@@ -168,7 +168,7 @@ def _accounts_list_text(accounts: list, page: int) -> str:
             status = "🟢" if acc.is_active else "🔴"
             ar = "✅" if acc.autoresponder_enabled else "❌"
             gr = "✅" if acc.group_autoresponder_enabled else "❌"
-            text += f"{status} {html.escape(acc.display_name)}\n  └ Личный автоответ: {ar}  Групповой: {gr}\n"
+            text += f"{status} {html.escape(acc.display_name)}\n  └ Автоприветствие: {ar}  Групповой автоответ: {gr}\n"
     else:
         text += "У вас пока нет добавленных аккаунтов.\n"
     if total_pages > 1:
@@ -225,7 +225,7 @@ async def callback_account_menu(callback: CallbackQuery, db: Database):
     text = pe(
         f"📱 Аккаунт: {html.escape(account.display_name)}\n"
         f"📞 Номер: {html.escape(account.phone)}\n\n"
-        f"🤖 Личный автоответчик: {ar_status}\n"
+        f"🤖 Автоприветствие: {ar_status}\n"
         f"💬 Групповой автоответчик: {gr_status}\n"
         f"🤖 Автоподписка на спонсоров: {sponsor_status}\n"
         f"{proxy_status}\n"
@@ -240,28 +240,26 @@ async def callback_account_menu(callback: CallbackQuery, db: Database):
 
 
 @router.callback_query(F.data == "account_payment_methods")
-async def callback_account_payment_methods(callback: CallbackQuery, db: Database, state: FSMContext):
+async def callback_account_payment_methods(callback: CallbackQuery, db: Database):
+    lines = [f"💎 CryptoBot — {config.EXTRA_ACCOUNT_PRICE} {config.SUBSCRIPTION_CURRENCY}"]
     if config.TON_WALLET_ADDRESS:
         ton_service_instance = TonPaymentService(config.TON_WALLET_ADDRESS, config.TONCENTER_API_KEY)
         ton_amount = await ton_service_instance.calculate_ton_amount(config.EXTRA_ACCOUNT_PRICE)
-        ton_text = (
+        lines.append(
             f"💠 GRAM(TON) — ~{ton_amount} GRAM(TON) (≈ {config.EXTRA_ACCOUNT_PRICE} USDT)"
             if ton_amount
             else f"💠 GRAM(TON) — ≈ {config.EXTRA_ACCOUNT_PRICE} USDT в GRAM(TON)"
         )
-        text = pe(
-            f"➕ Добавление аккаунта\n\n"
-            f"⚠️ Вы достигли лимита бесплатных аккаунтов.\n\n"
-            f"Выберите способ оплаты:\n\n"
-            f"💎 CryptoBot — {config.EXTRA_ACCOUNT_PRICE} {config.SUBSCRIPTION_CURRENCY}\n"
-            f"{ton_text}"
-        )
-        await callback.message.edit_text(
-            text, parse_mode="HTML", reply_markup=account_payment_method_keyboard()
-        )
-        await callback.answer()
-    else:
-        await callback_accounts(callback, db, state)
+    lines.append(f"⭐️ Telegram Stars — {config.STARS_EXTRA_ACCOUNT_PRICE}")
+    text = pe(
+        f"➕ Добавление аккаунта\n\n"
+        f"⚠️ Вы достигли лимита бесплатных аккаунтов.\n\n"
+        f"Выберите способ оплаты:\n\n" + "\n".join(lines)
+    )
+    await callback.message.edit_text(
+        text, parse_mode="HTML", reply_markup=account_payment_method_keyboard()
+    )
+    await callback.answer()
 
 
 @router.callback_query(F.data == "add_account")
@@ -273,25 +271,24 @@ async def callback_add_account(callback: CallbackQuery, state: FSMContext, db: D
     account_limit = 1 if (user.subscription_type == "free_ad" and not has_paid) else config.FREE_ACCOUNTS_LIMIT
 
     if accounts_count >= account_limit:
+        lines = [f"💎 CryptoBot — {config.EXTRA_ACCOUNT_PRICE} {config.SUBSCRIPTION_CURRENCY}"]
         if config.TON_WALLET_ADDRESS:
             ton_service_instance = TonPaymentService(config.TON_WALLET_ADDRESS, config.TONCENTER_API_KEY)
             ton_amount = await ton_service_instance.calculate_ton_amount(config.EXTRA_ACCOUNT_PRICE)
-            if ton_amount:
-                ton_text = f"💠 GRAM(TON) — ~{ton_amount} GRAM(TON) (≈ {config.EXTRA_ACCOUNT_PRICE} USDT)"
-            else:
-                ton_text = f"💠 GRAM(TON) — ≈ {config.EXTRA_ACCOUNT_PRICE} USDT в GRAM(TON)"
-            text = pe(
-                f"➕ Добавление аккаунта\n\n"
-                f"⚠️ Вы достигли лимита в {account_limit} аккаунтов.\n\n"
-                f"Выберите способ оплаты:\n\n"
-                f"💎 CryptoBot — {config.EXTRA_ACCOUNT_PRICE} {config.SUBSCRIPTION_CURRENCY}\n"
-                f"{ton_text}"
+            lines.append(
+                f"💠 GRAM(TON) — ~{ton_amount} GRAM(TON) (≈ {config.EXTRA_ACCOUNT_PRICE} USDT)"
+                if ton_amount
+                else f"💠 GRAM(TON) — ≈ {config.EXTRA_ACCOUNT_PRICE} USDT в GRAM(TON)"
             )
-            await callback.message.edit_text(
-                text, parse_mode="HTML", reply_markup=account_payment_method_keyboard()
-            )
-        else:
-            await _create_cryptobot_account_payment(callback, db, accounts_count, account_limit)
+        lines.append(f"⭐️ Telegram Stars — {config.STARS_EXTRA_ACCOUNT_PRICE}")
+        text = pe(
+            f"➕ Добавление аккаунта\n\n"
+            f"⚠️ Вы достигли лимита в {account_limit} аккаунтов.\n\n"
+            f"Выберите способ оплаты:\n\n" + "\n".join(lines)
+        )
+        await callback.message.edit_text(
+            text, parse_mode="HTML", reply_markup=account_payment_method_keyboard()
+        )
         await callback.answer()
         return
 
@@ -368,6 +365,39 @@ async def callback_pay_account_cryptobot(callback: CallbackQuery, db: Database):
     user = await db.get_user(callback.from_user.id)
     accounts_count = await db.count_user_accounts(user.id)
     await _create_cryptobot_account_payment(callback, db, accounts_count)
+    await callback.answer()
+
+
+@router.callback_query(F.data == "pay_account_stars")
+async def callback_pay_account_stars(callback: CallbackQuery, db: Database):
+    user = await db.get_user(callback.from_user.id)
+
+    # Same reasoning as callback_pay_stars in subscription.py — the record
+    # must exist before the invoice is sent, since Telegram calls back via
+    # successful_payment with no external "check payment" polling step.
+    invoice_id = f"stars_acc_{user.telegram_id}_{time.time_ns()}"
+    await db.create_payment(
+        user_id=user.id,
+        invoice_id=invoice_id,
+        amount=config.STARS_EXTRA_ACCOUNT_PRICE,
+        currency="XTR",
+        payment_method="account_stars",
+    )
+
+    await callback.bot.send_invoice(
+        chat_id=callback.from_user.id,
+        title="Дополнительный аккаунт AutoSender",
+        description="Оплата дополнительного Telegram-аккаунта для рассылок сверх бесплатного лимита.",
+        payload=invoice_id,
+        currency="XTR",
+        prices=[LabeledPrice(label="Доп. аккаунт", amount=config.STARS_EXTRA_ACCOUNT_PRICE)],
+    )
+    await callback.message.edit_text(
+        pe(f"⭐️ Счёт на {config.STARS_EXTRA_ACCOUNT_PRICE} Stars отправлен ниже — "
+        "оплатите его, и добавление аккаунта продолжится автоматически."),
+        parse_mode="HTML",
+        reply_markup=account_payment_method_keyboard(),
+    )
     await callback.answer()
 
 
@@ -542,6 +572,53 @@ async def _continue_paid_account_setup(
             await callback.answer(
                 "Оплата сохранена. Нажмите «Проверить оплату» ещё раз, чтобы продолжить добавление аккаунта.",
                 show_alert=True,
+            )
+        except Exception:
+            pass
+
+
+async def continue_paid_account_setup_from_message(
+    message: Message,
+    state: FSMContext,
+    db: Database,
+    user,
+    invoice_id: str,
+):
+    """Same restoration as _continue_paid_account_setup, for the Stars flow.
+
+    A Telegram Stars payment is confirmed via an incoming successful_payment
+    Message, not a callback button tap — there is no message to edit, so this
+    sends a fresh one instead. Used by bot/handlers/stars_payment.py.
+    """
+    try:
+        accounts_count = await db.count_user_accounts(user.id)
+        text = pe(
+            "✅ Оплата получена!\n\n"
+            "➕ Добавление аккаунта\n\n"
+            f"📊 У вас {accounts_count} аккаунтов\n\n"
+            "<b>Шаг 1 из 3</b>\n\n"
+            "Хотите использовать прокси SOCKS5?\n\n"
+            "Если да — введите в формате:\n"
+            "<code>socks5://host:port</code>\n"
+            "или <code>socks5://user:pass@host:port</code>"
+        )
+        await _disconnect_pending_client(state)
+        await state.clear()
+        await state.update_data(
+            account_setup_allowed=True,
+            account_payment_invoice=invoice_id,
+        )
+        await message.answer(text, parse_mode="HTML", reply_markup=add_account_proxy_keyboard())
+    except Exception as e:
+        logger.warning(
+            "Paid extra-account setup %s (Stars) could not be restored yet: %s",
+            invoice_id,
+            e,
+        )
+        try:
+            await message.answer(
+                pe("Оплата сохранена. Откройте «➕ Добавить аккаунт» ещё раз, чтобы продолжить."),
+                parse_mode="HTML",
             )
         except Exception:
             pass
@@ -1599,7 +1676,7 @@ async def callback_toggle_sponsor_sub(callback: CallbackQuery, db: Database):
     text = pe(
         f"📱 Аккаунт: {html.escape(account.display_name)}\n"
         f"📞 Номер: {html.escape(account.phone)}\n\n"
-        f"🤖 Личный автоответчик: {ar_status}\n"
+        f"🤖 Автоприветствие: {ar_status}\n"
         f"💬 Групповой автоответчик: {gr_status}\n"
         f"🤖 Автоподписка на спонсоров: {sponsor_status}\n"
         f"{proxy_status}\n"

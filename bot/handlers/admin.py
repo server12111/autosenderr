@@ -59,6 +59,7 @@ class AdminStates(StatesGroup):
     waiting_promo_days = State()
     waiting_promo_max_uses = State()
     waiting_promo_is_subscription = State()
+    waiting_price_1d = State()
     waiting_price_7d = State()
     waiting_price_30d = State()
     waiting_ref_percent = State()
@@ -842,6 +843,7 @@ async def callback_admin_settings(callback: CallbackQuery, db: Database):
     if not is_admin(callback.from_user.id):
         await callback.answer("Нет доступа", show_alert=True)
         return
+    price_1d = await db.get_price(1)
     price_7d = await db.get_price(7)
     price_30d = await db.get_price(30)
     ref_percent = await db.get_ref_percent()
@@ -849,6 +851,7 @@ async def callback_admin_settings(callback: CallbackQuery, db: Database):
     card_manager = await db.get_setting("card_manager_username") or "autosenderkarta"
     text = pe(
         "⚙️ Настройки бота\n\n"
+        f"💰 Цена подписки 1 день: {price_1d} USDT\n"
         f"💰 Цена подписки 7 дней: {price_7d} USDT\n"
         f"💰 Цена подписки 30 дней: {price_30d} USDT\n"
         f"🤝 Реферальный процент: {ref_percent}%\n"
@@ -857,6 +860,36 @@ async def callback_admin_settings(callback: CallbackQuery, db: Database):
     )
     await callback.message.edit_text(text, parse_mode="HTML", reply_markup=admin_settings_keyboard())
     await callback.answer()
+
+
+@router.callback_query(F.data == "admin_set_price_1d")
+async def callback_admin_set_price_1d(callback: CallbackQuery, state: FSMContext):
+    if not is_admin(callback.from_user.id):
+        await callback.answer("Нет доступа", show_alert=True)
+        return
+    await state.set_state(AdminStates.waiting_price_1d)
+    await callback.message.edit_text(
+        "💰 Введите новую цену подписки на 1 день (USDT):",
+        reply_markup=cancel_keyboard(),
+    )
+    await callback.answer()
+
+
+@router.message(AdminStates.waiting_price_1d)
+async def process_price_1d(message: Message, state: FSMContext, db: Database):
+    if not is_admin(message.from_user.id):
+        await state.clear()
+        return
+    try:
+        price = float((message.text or "").strip().replace(",", "."))
+        if price <= 0:
+            raise ValueError
+    except ValueError:
+        await message.answer(pe("❌ Введите корректную сумму:"), parse_mode="HTML", reply_markup=cancel_keyboard())
+        return
+    await db.set_price(1, price)
+    await state.clear()
+    await message.answer(pe(f"✅ Цена на 1 день обновлена: {price} USDT"), parse_mode="HTML", reply_markup=admin_settings_keyboard())
 
 
 @router.callback_query(F.data == "admin_set_price_7d")

@@ -61,6 +61,13 @@ class Config:
     TON_SUBSCRIPTION_PRICE: float = _safe_float("TON_SUBSCRIPTION_PRICE", 0.5)
     TON_EXTRA_ACCOUNT_PRICE: float = _safe_float("TON_EXTRA_ACCOUNT_PRICE", 0.05)
 
+    # Telegram Stars (XTR) payments — fixed prices in stars, not USD-derived,
+    # set directly by the bot owner rather than computed from SUBSCRIPTION_PRICE.
+    STARS_PRICE_1D: int = _safe_int("STARS_PRICE_1D", 19)
+    STARS_PRICE_7D: int = _safe_int("STARS_PRICE_7D", 99)
+    STARS_PRICE_30D: int = _safe_int("STARS_PRICE_30D", 299)
+    STARS_EXTRA_ACCOUNT_PRICE: int = _safe_int("STARS_EXTRA_ACCOUNT_PRICE", 19)
+
     PRIVACY_URL: str = os.getenv("PRIVACY_URL", "https://telegra.ph/Politika-konfidencialnosti-05-31-36")
     TERMS_URL: str = os.getenv("TERMS_URL", "https://telegra.ph/Polzovatelskoe-soglashenie-05-31-24")
 
@@ -72,6 +79,18 @@ class Config:
     # Default Telegram API credentials (from official apps)
     DEFAULT_API_ID: int = _safe_int("DEFAULT_API_ID", _safe_int("API_ID", 2040))
     DEFAULT_API_HASH: str = os.getenv("DEFAULT_API_HASH") or os.getenv("API_HASH", "b18441a1ff607e10a989891a5462e627")
+
+
+def get_stars_price(plan_days: int) -> int:
+    """Fixed Stars price per plan — the 7/30-day USD prices don't convert to
+    a single consistent stars-per-dollar rate (they were set independently),
+    so this is a direct plan_days -> stars lookup, not a computed conversion.
+    Falls back to a per-day rate derived from the 30-day price for any
+    plan_days not explicitly priced (there are currently only three)."""
+    fixed = {1: config.STARS_PRICE_1D, 7: config.STARS_PRICE_7D, 30: config.STARS_PRICE_30D}
+    if plan_days in fixed:
+        return fixed[plan_days]
+    return max(1, round(config.STARS_PRICE_30D / 30 * plan_days))
 
 
 config = Config()

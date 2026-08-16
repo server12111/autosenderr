@@ -3,7 +3,7 @@ import logging
 import time
 from datetime import datetime, timedelta
 from aiogram import Router, F
-from aiogram.types import CallbackQuery, Message
+from aiogram.types import CallbackQuery, Message, LabeledPrice
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 
@@ -21,7 +21,7 @@ from ..keyboards.inline import (
     cancel_keyboard,
     back_to_menu_keyboard,
 )
-from ..config import config
+from ..config import config, get_stars_price
 from ..services import CryptoBotService, TonPaymentService, PlategaService, get_usd_uah_rate
 from ..utils.premium_emoji import pe
 from ..utils.tg import safe_edit
@@ -48,6 +48,7 @@ async def callback_subscription(callback: CallbackQuery, db: Database, state: FS
 
     if user.subscription_end and user.subscription_end > now_moscow():
         days_left = (user.subscription_end - now_moscow()).days
+        price_1d = await db.get_price(1)
         price_7d = await db.get_price(7)
         price_30d = await db.get_price(30)
         text = (
@@ -56,11 +57,13 @@ async def callback_subscription(callback: CallbackQuery, db: Database, state: FS
             f"Действует до: {user.subscription_end.strftime('%d.%m.%Y %H:%M')}\n"
             f"Осталось дней: {days_left}\n\n"
             f"Стоимость продления:\n"
+            f"• 1 день — {price_1d} USDT\n"
             f"• 7 дней — {price_7d} USDT\n"
             f"• 30 дней — {price_30d} USDT"
         )
         has_subscription = True
     else:
+        price_1d = await db.get_price(1)
         price_7d = await db.get_price(7)
         price_30d = await db.get_price(30)
         text = (
@@ -68,6 +71,7 @@ async def callback_subscription(callback: CallbackQuery, db: Database, state: FS
             f"❌ Подписка не активна\n\n"
             f"Для использования всех функций бота необходима подписка.\n\n"
             f"Стоимость:\n"
+            f"• 1 день — {price_1d} USDT\n"
             f"• 7 дней — {price_7d} USDT\n"
             f"• 30 дней — {price_30d} USDT\n\n"
             f"🆓 Или используйте бота бесплатно с рекламной подписью."
@@ -80,11 +84,13 @@ async def callback_subscription(callback: CallbackQuery, db: Database, state: FS
 
 @router.callback_query(F.data == "buy_subscription")
 async def callback_buy_subscription(callback: CallbackQuery, state: FSMContext, db: Database):
+    price_1d = await db.get_price(1)
     price_7d = await db.get_price(7)
     price_30d = await db.get_price(30)
     await safe_edit(
         callback.message,
         pe(f"💳 Выберите план подписки:\n\n"
+        f"📅 1 день — {price_1d} USDT\n"
         f"📅 7 дней — {price_7d} USDT\n"
         f"📅 30 дней — {price_30d} USDT"),
         parse_mode="HTML",
@@ -105,27 +111,32 @@ async def callback_sub_plan(
     price = await db.get_price(plan_days)
     show_platega = bool(config.PLATEGA_MERCHANT_ID and config.PLATEGA_SECRET)
     has_ton = bool(config.TON_WALLET_ADDRESS and ton_service)
+    stars_price = get_stars_price(plan_days)
 
-    if has_ton or show_platega:
-        crypto_price = round(price * 1.03, 2)
-        lines = [f"💎 CryptoBot — {price:.2f} USDT (+3%)"]
-        if has_ton:
-            ton_amount = await ton_service.calculate_ton_amount(price)
-            if ton_amount:
-                lines.append(f"💠 GRAM(TON) — ~{ton_amount} GRAM(TON) (≈ {price} USDT)")
-            else:
-                lines.append(f"💠 GRAM(TON) — ≈ {price} USDT в GRAM(TON)")
-        if show_platega and platega_service:
-            rub_price = await platega_service.calculate_rub_price(price)
-            lines.append(f"💳 СБП (рубли) — ~{rub_price:.0f} ₽")
-        text = pe(f"💳 Способ оплаты ({plan_days} дней):\n\n" + "\n".join(lines))
-        await safe_edit(
-            callback.message, text, parse_mode="HTML",
-            reply_markup=payment_method_keyboard(show_platega=show_platega, show_ton=has_ton),
-            retries=0,
-        )
-    else:
-        await _create_cryptobot_subscription(callback, db, plan_days=plan_days)
+    # Stars is a native Telegram payment — always available regardless of
+    # any provider config — so the method-selection screen is always worth
+    # showing now (previously skipped straight to CryptoBot when neither
+    # TON nor Platega were configured, which would have hidden Stars too).
+    crypto_price = round(price * 1.03, 2)
+    lines = [
+        f"💎 CryptoBot — {price:.2f} USDT (+3%)",
+        f"⭐️ Telegram Stars — {stars_price}",
+    ]
+    if has_ton:
+        ton_amount = await ton_service.calculate_ton_amount(price)
+        if ton_amount:
+            lines.append(f"💠 GRAM(TON) — ~{ton_amount} GRAM(TON) (≈ {price} USDT)")
+        else:
+            lines.append(f"💠 GRAM(TON) — ≈ {price} USDT в GRAM(TON)")
+    if show_platega and platega_service:
+        rub_price = await platega_service.calculate_rub_price(price)
+        lines.append(f"💳 СБП (рубли) — ~{rub_price:.0f} ₽")
+    text = pe(f"💳 Способ оплаты ({plan_days} дней):\n\n" + "\n".join(lines))
+    await safe_edit(
+        callback.message, text, parse_mode="HTML",
+        reply_markup=payment_method_keyboard(show_platega=show_platega, show_ton=has_ton),
+        retries=0,
+    )
     await callback.answer()
 
 
@@ -196,6 +207,52 @@ async def _create_cryptobot_subscription(
         reply_markup=payment_keyboard(invoice.pay_url, invoice.invoice_id, plan_days, support_username=support),
         retries=0,
     )
+
+
+@router.callback_query(F.data == "pay_stars")
+async def callback_pay_stars(callback: CallbackQuery, state: FSMContext, db: Database):
+    data = await state.get_data()
+    plan_days = data.get("plan_days", 30)
+    user = await db.get_user(callback.from_user.id)
+    stars_price = get_stars_price(plan_days)
+    price_usdt = await db.get_price(plan_days)
+
+    # Native Telegram payment (XTR) — unlike CryptoBot/TON/Platega, there is
+    # no external provider or manual "check payment" step: Telegram notifies
+    # the bot directly via a successful_payment message once the user pays.
+    # The payment record must exist BEFORE the invoice is sent so the
+    # pre_checkout_query/successful_payment handlers (bot/handlers/
+    # stars_payment.py) can find it by payload the instant Telegram calls
+    # back — there is no window to create it afterward like the other
+    # methods do after polling an external API.
+    invoice_id = f"stars_sub_{user.telegram_id}_{time.time_ns()}"
+    await db.create_payment(
+        user_id=user.id,
+        invoice_id=invoice_id,
+        amount=stars_price,
+        currency="XTR",
+        plan_days=plan_days,
+        payment_method="stars",
+        price_usdt=price_usdt,
+    )
+
+    await callback.bot.send_invoice(
+        chat_id=callback.from_user.id,
+        title=f"Подписка AutoSender — {plan_days} дн.",
+        description=f"Подписка на бота рассылок AutoSender на {plan_days} дней.",
+        payload=invoice_id,
+        currency="XTR",
+        prices=[LabeledPrice(label=f"Подписка на {plan_days} дн.", amount=stars_price)],
+    )
+    await safe_edit(
+        callback.message,
+        pe(f"⭐️ Счёт на {stars_price} Stars отправлен ниже — оплатите его, "
+        "и подписка активируется автоматически."),
+        parse_mode="HTML",
+        reply_markup=back_to_subscription_keyboard(),
+        retries=0,
+    )
+    await callback.answer()
 
 
 @router.callback_query(F.data == "pay_ton")

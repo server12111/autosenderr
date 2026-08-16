@@ -426,7 +426,7 @@ class Database:
         await self._conn.commit()
 
         # Seed default subscription prices if not set
-        for plan_days, default_price in [(7, 1.0), (30, 3.0)]:
+        for plan_days, default_price in [(1, 0.3), (7, 1.0), (30, 3.0)]:
             key = f"price_{plan_days}d"
             async with self._conn.execute(
                 "SELECT value FROM settings WHERE key = ?", (key,)
@@ -1690,7 +1690,7 @@ class Database:
                            FROM payments p
                            JOIN users u ON u.id = p.user_id
                            WHERE p.invoice_id = ?
-                             AND p.payment_method IN ('cryptobot', 'ton', 'platega')""",
+                             AND p.payment_method IN ('cryptobot', 'ton', 'platega', 'stars')""",
                         (invoice_id,),
                     ) as cur:
                         row = await cur.fetchone()
@@ -1711,7 +1711,7 @@ class Database:
                         """UPDATE payments
                            SET status = 'paid', paid_at = ?
                            WHERE invoice_id = ?
-                             AND payment_method IN ('cryptobot', 'ton', 'platega')
+                             AND payment_method IN ('cryptobot', 'ton', 'platega', 'stars')
                              AND status != 'paid'""",
                         (now.isoformat(), invoice_id),
                     )

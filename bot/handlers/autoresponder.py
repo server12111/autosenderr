@@ -63,11 +63,11 @@ async def callback_autoresponder(callback: CallbackQuery, db: Database):
     text_preview = html.escape(text_preview)
 
     text = (
-        f"🤖 Автоответчик для {html.escape(account.phone)}\n\n"
+        f"🤖 Автоприветствие для {html.escape(account.phone)}\n\n"
         f"Статус: {status}\n"
         f"Уведомления о сообщениях: {notify_status}\n\n"
-        f"Текст автоответа:\n{text_preview}\n\n"
-        "ℹ️ Автоответчик отвечает на каждое входящее личное сообщение.\n\n"
+        f"Текст автоприветствия:\n{text_preview}\n\n"
+        "ℹ️ Автоприветствие отправляется один раз каждому новому написавшему в ЛС.\n\n"
         "📬 Уведомления — получайте сообщения о каждом входящем ЛС."
     )
 
@@ -95,7 +95,7 @@ async def callback_toggle_autoresponder(callback: CallbackQuery, db: Database, u
         if not await db.has_paid_subscription(user.id):
             if not Database.is_free_ad_active(user):
                 await callback.answer(
-                    "⛔️ Автоответ в ЛС доступен только при наличии подписки.",
+                    "⛔️ Автоприветствие в ЛС доступно только при наличии подписки.",
                     show_alert=True
                 )
                 return
@@ -103,7 +103,7 @@ async def callback_toggle_autoresponder(callback: CallbackQuery, db: Database, u
 
     if new_status and not account.autoresponder_text:
         await callback.answer(
-            "⚠️ Сначала задайте текст автоответа", show_alert=True
+            "⚠️ Сначала задайте текст автоприветствия", show_alert=True
         )
         return
 
@@ -113,11 +113,11 @@ async def callback_toggle_autoresponder(callback: CallbackQuery, db: Database, u
         task = asyncio.create_task(userbot_manager.get_client(account_id))
         task.add_done_callback(_log_background_task_error)
 
-    status_text = "включён" if new_status else "выключен"
+    status_text = "включено" if new_status else "выключено"
     if free_ad_notice:
-        await callback.answer(f"Автоответчик {status_text} (бесплатный тариф — к ответам добавляется реклама)", show_alert=True)
+        await callback.answer(f"Автоприветствие {status_text} (бесплатный тариф — к ответам добавляется реклама)", show_alert=True)
     else:
-        await callback.answer(f"Автоответчик {status_text}")
+        await callback.answer(f"Автоприветствие {status_text}")
 
     account = await db.get_account_for_user(account_id, callback.from_user.id)
 
@@ -130,11 +130,11 @@ async def callback_toggle_autoresponder(callback: CallbackQuery, db: Database, u
 
     ad_note = "\n⚠️ Бесплатный тариф: к каждому автоответу добавляется реклама бота." if (account.autoresponder_enabled and free_ad_notice) else ""
     text = (
-        f"🤖 Автоответчик для {html.escape(account.phone)}\n\n"
+        f"🤖 Автоприветствие для {html.escape(account.phone)}\n\n"
         f"Статус: {status}\n"
         f"Уведомления о сообщениях: {notify_status}\n\n"
-        f"Текст автоответа:\n{text_preview}\n\n"
-        "ℹ️ Автоответчик отвечает на каждое входящее личное сообщение.\n\n"
+        f"Текст автоприветствия:\n{text_preview}\n\n"
+        "ℹ️ Автоприветствие отправляется один раз каждому новому написавшему в ЛС.\n\n"
         f"📬 Уведомления — получайте сообщения о каждом входящем ЛС.{ad_note}"
     )
 
@@ -172,11 +172,11 @@ async def callback_toggle_notify(callback: CallbackQuery, db: Database, userbot_
     text_preview = html.escape(text_preview)
 
     text = (
-        f"🤖 Автоответчик для {html.escape(account.phone)}\n\n"
+        f"🤖 Автоприветствие для {html.escape(account.phone)}\n\n"
         f"Статус: {status}\n"
         f"Уведомления о сообщениях: {notify_status}\n\n"
-        f"Текст автоответа:\n{text_preview}\n\n"
-        "ℹ️ Автоответчик отвечает на каждое входящее личное сообщение.\n\n"
+        f"Текст автоприветствия:\n{text_preview}\n\n"
+        "ℹ️ Автоприветствие отправляется один раз каждому новому написавшему в ЛС.\n\n"
         "📬 Уведомления — получайте сообщения о каждом входящем ЛС."
     )
 
@@ -200,8 +200,8 @@ async def callback_edit_autoresponder_text(
 
     await safe_edit(
         callback.message,
-        "✏️ Введите текст автоответа или отправьте фото с подписью:\n\n"
-        "Этот текст/фото будет отправляться в ответ на входящие личные сообщения.",
+        "✏️ Введите текст автоприветствия или отправьте фото с подписью:\n\n"
+        "Этот текст/фото будет отправлен один раз каждому, кто первым напишет в ЛС.",
         reply_markup=cancel_keyboard(),
         retries=0,
     )
@@ -257,8 +257,8 @@ async def process_autoresponder_text(message: Message, state: FSMContext, db: Da
     if not account:
         await message.answer(pe("❌ Аккаунт не найден."), parse_mode="HTML")
         return
-    saved = "Фото + текст сохранены" if photo_path else "Текст автоответа сохранён"
-    hint = "" if account.autoresponder_enabled else "\n\nНе забудьте включить автоответчик."
+    saved = "Фото + текст сохранены" if photo_path else "Текст автоприветствия сохранён"
+    hint = "" if account.autoresponder_enabled else "\n\nНе забудьте включить автоприветствие."
 
     await message.answer(
         pe(f"✅ {saved}!{hint}"),

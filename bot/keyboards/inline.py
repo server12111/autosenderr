@@ -124,7 +124,7 @@ def account_menu_keyboard(account_id: int, auto_subscribe_sponsors: bool = False
     builder = InlineKeyboardBuilder()
     builder.row(_btn("✉️ Рассылки аккаунта", callback_data=f"account_mailings:{account_id}", style="primary"))
     builder.row(
-        _btn("🤖 Автоответ (личные)", callback_data=f"autoresponder:{account_id}", style="primary"),
+        _btn("🤖 Автоприветствие (личные)", callback_data=f"autoresponder:{account_id}", style="primary"),
         _btn("💬 Автоответ (группы)", callback_data=f"group_autoresponder:{account_id}", style="primary"),
     )
     sponsor_text = "🔴 Автоподписка: ВЫКЛ" if not auto_subscribe_sponsors else "🟢 Автоподписка: ВКЛ"
@@ -204,6 +204,7 @@ def account_payment_method_keyboard() -> InlineKeyboardMarkup:
         _btn("💎 CryptoBot (USDT)", callback_data="pay_account_cryptobot", style="primary"),
         _btn("💠 GRAM(TON)", callback_data="pay_account_ton", style="primary"),
     )
+    builder.row(_btn("⭐️ Telegram Stars", callback_data="pay_account_stars", style="primary"))
     builder.row(_btn("💳 На карту", callback_data="pay_account_card", style="primary"))
     builder.row(_btn("◀️ Назад", callback_data="accounts", style="primary"))
     return builder.as_markup()
@@ -597,6 +598,7 @@ def free_tier_info_keyboard(already_active: bool = False) -> InlineKeyboardMarku
 def subscription_plan_keyboard() -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
     builder.row(
+        _btn("📅 1 день", callback_data="sub_plan:1", style="primary"),
         _btn("📅 7 дней", callback_data="sub_plan:7", style="primary"),
         _btn("📅 30 дней", callback_data="sub_plan:30", style="primary"),
     )
@@ -630,6 +632,7 @@ def payment_method_keyboard(show_platega: bool = False, show_ton: bool = True) -
         )
     else:
         builder.row(_btn("💎 CryptoBot (USDT)", callback_data="pay_cryptobot", style="primary"))
+    builder.row(_btn("⭐️ Telegram Stars", callback_data="pay_stars", style="primary"))
     if show_platega:
         builder.row(_btn("🇷🇺 Оплата рублями (СБП)", callback_data="pay_platega", style="primary"))
     builder.row(_btn("🇺🇦 На карту(грн)", callback_data="pay_card", style="primary"))
@@ -804,6 +807,7 @@ def admin_sub_method_keyboard() -> InlineKeyboardMarkup:
 def admin_settings_keyboard() -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
     builder.row(
+        _btn("💰 Цена 1 день", callback_data="admin_set_price_1d", style="primary"),
         _btn("💰 Цена 7 дней", callback_data="admin_set_price_7d", style="primary"),
         _btn("💰 Цена 30 дней", callback_data="admin_set_price_30d", style="primary"),
     )

@@ -7,6 +7,7 @@ from .mailings import router as mailings_router
 from .subscription import router as subscription_router
 from .admin import router as admin_router
 from .referral import router as referral_router
+from .stars_payment import router as stars_payment_router
 
 
 def setup_routers() -> Router:
@@ -19,6 +20,7 @@ def setup_routers() -> Router:
         subscription_router,
         admin_router,
         referral_router,
+        stars_payment_router,
     )
     for child_router in child_routers:
         parent_router = child_router.parent_router
