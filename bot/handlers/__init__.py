@@ -13,6 +13,11 @@ from .stars_payment import router as stars_payment_router
 def setup_routers() -> Router:
     main_router = Router()
     child_routers = (
+        # Registered first so a Stars payment confirmation (successful_payment)
+        # is never swallowed by an unrelated FSM-state text handler in another
+        # router (e.g. the add-account wizard) if the user happens to be mid-flow
+        # elsewhere when Telegram delivers it.
+        stars_payment_router,
         start_router,
         accounts_router,
         autoresponder_router,
@@ -20,7 +25,6 @@ def setup_routers() -> Router:
         subscription_router,
         admin_router,
         referral_router,
-        stars_payment_router,
     )
     for child_router in child_routers:
         parent_router = child_router.parent_router

@@ -23,9 +23,11 @@ class SubscriptionMiddleware(BaseMiddleware):
         "pay_ton",
         "pay_card",
         "pay_platega",
+        "pay_stars",
         "pay_account_cryptobot",
         "pay_account_ton",
         "pay_account_card",
+        "pay_account_stars",
         "enter_promocode",
         "referral",
         "withdraw_ref_balance",
@@ -69,6 +71,13 @@ class SubscriptionMiddleware(BaseMiddleware):
         user_id = None
         if isinstance(event, Message):
             if event.text and event.text.startswith("/start"):
+                return await handler(event, data)
+            # A Stars payment confirmation must always reach its handler —
+            # the paying user very often has no subscription yet (that's
+            # what they're paying for), and this event is a one-time push
+            # from Telegram with no retry, so swallowing it here would lose
+            # a completed, already-charged payment.
+            if event.successful_payment:
                 return await handler(event, data)
             user_id = event.from_user.id
         elif isinstance(event, CallbackQuery):
