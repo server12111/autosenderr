@@ -240,11 +240,18 @@ async def callback_account_menu(callback: CallbackQuery, db: Database):
 
 
 @router.callback_query(F.data == "account_payment_methods")
-async def callback_account_payment_methods(callback: CallbackQuery, db: Database):
+async def callback_account_payment_methods(callback: CallbackQuery, db: Database, ton_service: TonPaymentService = None):
+    has_ton = bool(config.TON_WALLET_ADDRESS and ton_service)
+    if has_ton:
+        await safe_edit(callback.message, pe("⏳ Загружаем способы оплаты..."), parse_mode="HTML", retries=0)
+    await callback.answer()
+
     lines = [f"💎 CryptoBot — {config.EXTRA_ACCOUNT_PRICE} {config.SUBSCRIPTION_CURRENCY}"]
-    if config.TON_WALLET_ADDRESS:
-        ton_service_instance = TonPaymentService(config.TON_WALLET_ADDRESS, config.TONCENTER_API_KEY)
-        ton_amount = await ton_service_instance.calculate_ton_amount(config.EXTRA_ACCOUNT_PRICE)
+    if has_ton:
+        try:
+            ton_amount = await asyncio.wait_for(ton_service.calculate_ton_amount(config.EXTRA_ACCOUNT_PRICE), timeout=12)
+        except asyncio.TimeoutError:
+            ton_amount = None
         lines.append(
             f"💠 GRAM(TON) — ~{ton_amount} GRAM(TON) (≈ {config.EXTRA_ACCOUNT_PRICE} USDT)"
             if ton_amount
@@ -256,14 +263,11 @@ async def callback_account_payment_methods(callback: CallbackQuery, db: Database
         f"⚠️ Вы достигли лимита бесплатных аккаунтов.\n\n"
         f"Выберите способ оплаты:\n\n" + "\n".join(lines)
     )
-    await callback.message.edit_text(
-        text, parse_mode="HTML", reply_markup=account_payment_method_keyboard()
-    )
-    await callback.answer()
+    await safe_edit(callback.message, text, parse_mode="HTML", reply_markup=account_payment_method_keyboard(), retries=0)
 
 
 @router.callback_query(F.data == "add_account")
-async def callback_add_account(callback: CallbackQuery, state: FSMContext, db: Database):
+async def callback_add_account(callback: CallbackQuery, state: FSMContext, db: Database, ton_service: TonPaymentService = None):
     user = await db.get_user(callback.from_user.id)
     accounts_count = await db.count_user_accounts(user.id)
 
@@ -271,10 +275,17 @@ async def callback_add_account(callback: CallbackQuery, state: FSMContext, db: D
     account_limit = 1 if (user.subscription_type == "free_ad" and not has_paid) else config.FREE_ACCOUNTS_LIMIT
 
     if accounts_count >= account_limit:
+        has_ton = bool(config.TON_WALLET_ADDRESS and ton_service)
+        if has_ton:
+            await safe_edit(callback.message, pe("⏳ Загружаем способы оплаты..."), parse_mode="HTML", retries=0)
+        await callback.answer()
+
         lines = [f"💎 CryptoBot — {config.EXTRA_ACCOUNT_PRICE} {config.SUBSCRIPTION_CURRENCY}"]
-        if config.TON_WALLET_ADDRESS:
-            ton_service_instance = TonPaymentService(config.TON_WALLET_ADDRESS, config.TONCENTER_API_KEY)
-            ton_amount = await ton_service_instance.calculate_ton_amount(config.EXTRA_ACCOUNT_PRICE)
+        if has_ton:
+            try:
+                ton_amount = await asyncio.wait_for(ton_service.calculate_ton_amount(config.EXTRA_ACCOUNT_PRICE), timeout=12)
+            except asyncio.TimeoutError:
+                ton_amount = None
             lines.append(
                 f"💠 GRAM(TON) — ~{ton_amount} GRAM(TON) (≈ {config.EXTRA_ACCOUNT_PRICE} USDT)"
                 if ton_amount
@@ -286,10 +297,7 @@ async def callback_add_account(callback: CallbackQuery, state: FSMContext, db: D
             f"⚠️ Вы достигли лимита в {account_limit} аккаунтов.\n\n"
             f"Выберите способ оплаты:\n\n" + "\n".join(lines)
         )
-        await callback.message.edit_text(
-            text, parse_mode="HTML", reply_markup=account_payment_method_keyboard()
-        )
-        await callback.answer()
+        await safe_edit(callback.message, text, parse_mode="HTML", reply_markup=account_payment_method_keyboard(), retries=0)
         return
 
     remaining = account_limit - accounts_count
@@ -315,6 +323,7 @@ async def _create_cryptobot_account_payment(callback: CallbackQuery, db: Databas
     """Create CryptoBot invoice for extra account."""
     extra_cost = config.EXTRA_ACCOUNT_PRICE
     crypto_service = CryptoBotService(config.CRYPTOBOT_TOKEN, config.CRYPTOBOT_TESTNET)
+    await safe_edit(callback.message, pe("⏳ Создаём счёт..."), parse_mode="HTML", retries=0)
     invoice = await crypto_service.create_invoice(
         amount=extra_cost,
         currency=config.SUBSCRIPTION_CURRENCY,
@@ -323,19 +332,23 @@ async def _create_cryptobot_account_payment(callback: CallbackQuery, db: Databas
 
     if not invoice:
         error_msg = crypto_service.last_error.message if crypto_service.last_error else "Неизвестная ошибка"
-        await callback.message.edit_text(
+        await safe_edit(
+            callback.message,
             pe(f"❌ Не удалось создать счёт: {html.escape(error_msg)}"),
             parse_mode="HTML",
             reply_markup=main_menu_keyboard(),
+            retries=0,
         )
         return
 
     user = await db.get_user(callback.from_user.id)
     if not user:
-        await callback.message.edit_text(
+        await safe_edit(
+            callback.message,
             pe("❌ Пользователь не найден. Попробуйте начать заново."),
             parse_mode="HTML",
             reply_markup=main_menu_keyboard(),
+            retries=0,
         )
         return
     await db.create_payment(
@@ -353,10 +366,10 @@ async def _create_cryptobot_account_payment(callback: CallbackQuery, db: Databas
         "Оплатите счёт и нажмите «Проверить оплату»."
     )
     support = await db.get_setting("card_manager_username") or "autosenderkarta"
-    await callback.message.edit_text(
-        text,
-        parse_mode="HTML",
+    await safe_edit(
+        callback.message, text, parse_mode="HTML",
         reply_markup=account_payment_keyboard(invoice.pay_url, invoice.invoice_id, support_username=support),
+        retries=0,
     )
 
 
@@ -364,8 +377,8 @@ async def _create_cryptobot_account_payment(callback: CallbackQuery, db: Databas
 async def callback_pay_account_cryptobot(callback: CallbackQuery, db: Database):
     user = await db.get_user(callback.from_user.id)
     accounts_count = await db.count_user_accounts(user.id)
-    await _create_cryptobot_account_payment(callback, db, accounts_count)
     await callback.answer()
+    await _create_cryptobot_account_payment(callback, db, accounts_count)
 
 
 @router.callback_query(F.data == "pay_account_stars")
@@ -408,16 +421,23 @@ async def callback_pay_account_ton(
     user = await db.get_user(callback.from_user.id)
     comment = f"acc_{user.telegram_id}_{time.time_ns()}"
 
-    await callback.message.edit_text(pe("⏳ Получаем курс GRAM(TON)..."), parse_mode="HTML")
+    await safe_edit(callback.message, pe("⏳ Получаем курс GRAM(TON)..."), parse_mode="HTML", retries=0)
+    # Clear the button spinner before the rate lookup below, which can take
+    # several seconds — same fix as callback_pay_ton in subscription.py.
+    await callback.answer()
 
-    amount = await ton_service.calculate_ton_amount(config.EXTRA_ACCOUNT_PRICE)
+    try:
+        amount = await asyncio.wait_for(ton_service.calculate_ton_amount(config.EXTRA_ACCOUNT_PRICE), timeout=12)
+    except asyncio.TimeoutError:
+        amount = None
     if not amount:
-        await callback.message.edit_text(
+        await safe_edit(
+            callback.message,
             pe("❌ Не удалось получить курс GRAM(TON). Попробуйте позже."),
             parse_mode="HTML",
             reply_markup=account_payment_method_keyboard(),
+            retries=0,
         )
-        await callback.answer()
         return
 
     await db.create_payment(
@@ -441,10 +461,11 @@ async def callback_pay_account_ton(
     )
 
     support = await db.get_setting("card_manager_username") or "autosenderkarta"
-    await callback.message.edit_text(
-        text, parse_mode="HTML", reply_markup=ton_account_payment_keyboard(pay_url, comment, support_username=support)
+    await safe_edit(
+        callback.message, text, parse_mode="HTML",
+        reply_markup=ton_account_payment_keyboard(pay_url, comment, support_username=support),
+        retries=0,
     )
-    await callback.answer()
 
 
 @router.callback_query(F.data.startswith("check_ton_account:"))

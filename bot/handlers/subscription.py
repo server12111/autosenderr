@@ -164,8 +164,8 @@ async def callback_pay_cryptobot(
 ):
     data = await state.get_data()
     plan_days = data.get("plan_days", 30)
-    await _create_cryptobot_subscription(callback, db, cryptobot, plan_days=plan_days)
     await callback.answer()
+    await _create_cryptobot_subscription(callback, db, cryptobot, plan_days=plan_days)
 
 
 async def _create_cryptobot_subscription(
@@ -437,17 +437,26 @@ async def callback_pay_platega(
     plan_days = data.get("plan_days", 30)
     user = await db.get_user(callback.from_user.id)
     price_usdt = await db.get_price(plan_days)
-    amount_rub = await platega_service.calculate_rub_price(price_usdt)
-
     order_id = f"platega_{user.telegram_id}_{time.time_ns()}"
 
     await safe_edit(callback.message, pe("⏳ Создаём платёж через СБП..."), parse_mode="HTML", retries=0)
+    # Both calls below hit the Platega gateway over the network — answer the
+    # callback now so the button spinner doesn't sit through them.
+    await callback.answer()
 
-    invoice = await platega_service.create_invoice(
-        amount_rub=amount_rub,
-        order_id=order_id,
-        description=f"Подписка на бота рассылок ({plan_days} дней)",
-    )
+    invoice = None
+    try:
+        amount_rub = await asyncio.wait_for(platega_service.calculate_rub_price(price_usdt), timeout=12)
+        invoice = await asyncio.wait_for(
+            platega_service.create_invoice(
+                amount_rub=amount_rub,
+                order_id=order_id,
+                description=f"Подписка на бота рассылок ({plan_days} дней)",
+            ),
+            timeout=15,
+        )
+    except asyncio.TimeoutError:
+        invoice = None
 
     if not invoice or not invoice.get("payment_url"):
         await safe_edit(
@@ -457,7 +466,6 @@ async def callback_pay_platega(
             reply_markup=payment_method_keyboard(show_platega=True),
             retries=0,
         )
-        await callback.answer()
         return
 
     transaction_id = invoice["payment_id"]  # UUID from Platega
@@ -485,7 +493,6 @@ async def callback_pay_platega(
         reply_markup=platega_payment_keyboard(invoice["payment_url"], transaction_id, plan_days, support_username=support),
         retries=0,
     )
-    await callback.answer()
 
 
 @router.callback_query(F.data.startswith("check_platega:"))
