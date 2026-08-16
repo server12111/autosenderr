@@ -1,3 +1,4 @@
+import asyncio
 import html
 import logging
 import time
@@ -107,6 +108,13 @@ async def callback_sub_plan(
 ):
     plan_days = int(callback.data.split(":")[1])
     await state.update_data(plan_days=plan_days)
+    # Fetching the GRAM(TON)/rouble exchange rate below can take a real
+    # network round-trip (up to ~10-20s worst case if the price cache is
+    # cold and the upstream API is slow) — answer right away so the button
+    # doesn't sit in Telegram's loading spinner for that whole time; the
+    # message itself still gets a quick placeholder below while the actual
+    # prices load.
+    await callback.answer()
 
     price = await db.get_price(plan_days)
     show_platega = bool(config.PLATEGA_MERCHANT_ID and config.PLATEGA_SECRET)
@@ -122,22 +130,32 @@ async def callback_sub_plan(
         f"💎 CryptoBot — {price:.2f} USDT (+3%)",
         f"⭐️ Telegram Stars — {stars_price}",
     ]
+    if has_ton or (show_platega and platega_service):
+        await safe_edit(
+            callback.message, pe("⏳ Загружаем способы оплаты..."), parse_mode="HTML", retries=0,
+        )
     if has_ton:
-        ton_amount = await ton_service.calculate_ton_amount(price)
+        try:
+            ton_amount = await asyncio.wait_for(ton_service.calculate_ton_amount(price), timeout=12)
+        except asyncio.TimeoutError:
+            ton_amount = None
         if ton_amount:
             lines.append(f"💠 GRAM(TON) — ~{ton_amount} GRAM(TON) (≈ {price} USDT)")
         else:
             lines.append(f"💠 GRAM(TON) — ≈ {price} USDT в GRAM(TON)")
     if show_platega and platega_service:
-        rub_price = await platega_service.calculate_rub_price(price)
-        lines.append(f"💳 СБП (рубли) — ~{rub_price:.0f} ₽")
+        try:
+            rub_price = await asyncio.wait_for(platega_service.calculate_rub_price(price), timeout=12)
+        except asyncio.TimeoutError:
+            rub_price = None
+        if rub_price:
+            lines.append(f"💳 СБП (рубли) — ~{rub_price:.0f} ₽")
     text = pe(f"💳 Способ оплаты ({plan_days} дней):\n\n" + "\n".join(lines))
     await safe_edit(
         callback.message, text, parse_mode="HTML",
         reply_markup=payment_method_keyboard(show_platega=show_platega, show_ton=has_ton),
         retries=0,
     )
-    await callback.answer()
 
 
 @router.callback_query(F.data == "pay_cryptobot")
@@ -266,9 +284,17 @@ async def callback_pay_ton(
     comment = f"sub_{user.telegram_id}_{time.time_ns()}"
 
     await safe_edit(callback.message, pe("⏳ Получаем курс GRAM(TON)..."), parse_mode="HTML", retries=0)
+    # Clear the button's loading spinner now — the actual rate lookup below
+    # is a real network call (bounded, but can still take several seconds),
+    # and the placeholder message above already tells the user something
+    # is happening.
+    await callback.answer()
 
     price = await db.get_price(plan_days)
-    amount = await ton_service.calculate_ton_amount(price)
+    try:
+        amount = await asyncio.wait_for(ton_service.calculate_ton_amount(price), timeout=12)
+    except asyncio.TimeoutError:
+        amount = None
     if not amount:
         await safe_edit(
             callback.message,
@@ -277,7 +303,6 @@ async def callback_pay_ton(
             reply_markup=payment_method_keyboard(show_platega=bool(config.PLATEGA_MERCHANT_ID and config.PLATEGA_SECRET)),
             retries=0,
         )
-        await callback.answer()
         return
 
     await db.create_payment(
@@ -305,7 +330,6 @@ async def callback_pay_ton(
 
     support = await db.get_setting("card_manager_username") or "autosenderkarta"
     await safe_edit(callback.message, text, reply_markup=ton_payment_keyboard(pay_url, comment, plan_days, support_username=support), retries=0)
-    await callback.answer()
 
 
 @router.callback_query(F.data.startswith("check_ton_payment:"))
