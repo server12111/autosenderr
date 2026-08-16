@@ -793,7 +793,10 @@ def admin_sub_stats_keyboard() -> InlineKeyboardMarkup:
         _btn("💎 CryptoBot", callback_data="admin_sub_method:cryptobot", style="primary"),
         _btn("💠 GRAM(TON)", callback_data="admin_sub_method:ton", style="primary"),
     )
-    builder.row(_btn("🇷🇺 Platega (СБП)", callback_data="admin_sub_method:platega", style="primary"))
+    builder.row(
+        _btn("🇷🇺 Platega (СБП)", callback_data="admin_sub_method:platega", style="primary"),
+        _btn("⭐️ Telegram Stars", callback_data="admin_sub_method:stars", style="primary"),
+    )
     builder.row(_btn("◀️ Назад", callback_data="admin_back", style="primary"))
     return builder.as_markup()
 

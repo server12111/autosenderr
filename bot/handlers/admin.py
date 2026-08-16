@@ -288,24 +288,28 @@ async def callback_admin_sub_stats(callback: CallbackQuery, db: Database):
         await callback.answer("Нет доступа", show_alert=True)
         return
 
-    cb, ton, plat = await db.get_payment_method_stats("cryptobot"), \
+    cb, ton, plat, stars = await db.get_payment_method_stats("cryptobot"), \
                     await db.get_payment_method_stats("ton"), \
-                    await db.get_payment_method_stats("platega")
+                    await db.get_payment_method_stats("platega"), \
+                    await db.get_payment_method_stats("stars")
 
     text = pe(
         "💳 <b>Статистика подписок</b>\n\n"
         "<b>За неделю:</b>\n"
         f"  💎 CryptoBot: {cb['week_count']} шт. — {cb['week_amount']:.2f} USDT\n"
         f"  💠 GRAM(TON):  {ton['week_count']} шт. — {ton['week_amount']:.2f} GRAM(TON)\n"
-        f"  🇷🇺 Platega:  {plat['week_count']} шт. — {plat['week_amount']:.0f} ₽\n\n"
+        f"  🇷🇺 Platega:  {plat['week_count']} шт. — {plat['week_amount']:.0f} ₽\n"
+        f"  ⭐️ Stars:  {stars['week_count']} шт. — {stars['week_amount']:.0f} ⭐\n\n"
         "<b>За месяц:</b>\n"
         f"  💎 CryptoBot: {cb['month_count']} шт. — {cb['month_amount']:.2f} USDT\n"
         f"  💠 GRAM(TON):  {ton['month_count']} шт. — {ton['month_amount']:.2f} GRAM(TON)\n"
-        f"  🇷🇺 Platega:  {plat['month_count']} шт. — {plat['month_amount']:.0f} ₽\n\n"
+        f"  🇷🇺 Platega:  {plat['month_count']} шт. — {plat['month_amount']:.0f} ₽\n"
+        f"  ⭐️ Stars:  {stars['month_count']} шт. — {stars['month_amount']:.0f} ⭐\n\n"
         "<b>Всего:</b>\n"
         f"  💎 CryptoBot: {cb['total_count']} шт. — {cb['total_amount']:.2f} USDT\n"
         f"  💠 GRAM(TON):  {ton['total_count']} шт. — {ton['total_amount']:.2f} GRAM(TON)\n"
-        f"  🇷🇺 Platega:  {plat['total_count']} шт. — {plat['total_amount']:.0f} ₽"
+        f"  🇷🇺 Platega:  {plat['total_count']} шт. — {plat['total_amount']:.0f} ₽\n"
+        f"  ⭐️ Stars:  {stars['total_count']} шт. — {stars['total_amount']:.0f} ⭐"
     )
 
     await callback.message.edit_text(text, parse_mode="HTML", reply_markup=admin_sub_stats_keyboard())
@@ -316,6 +320,7 @@ _METHOD_LABELS = {
     "cryptobot": ("💎 CryptoBot", "USDT", ".2f"),
     "ton":       ("💠 GRAM(TON)", "GRAM(TON)", ".2f"),
     "platega":   ("🇷🇺 Platega (СБП)", "₽", ".0f"),
+    "stars":     ("⭐️ Telegram Stars", "⭐", ".0f"),
 }
 
 

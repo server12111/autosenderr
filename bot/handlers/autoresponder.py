@@ -128,7 +128,7 @@ async def callback_toggle_autoresponder(callback: CallbackQuery, db: Database, u
         text_preview = text_preview[:100] + "..."
     text_preview = html.escape(text_preview)
 
-    ad_note = "\n⚠️ Бесплатный тариф: к каждому автоответу добавляется реклама бота." if (account.autoresponder_enabled and free_ad_notice) else ""
+    ad_note = "\n⚠️ Бесплатный тариф: к автоприветствию добавляется реклама бота." if (account.autoresponder_enabled and free_ad_notice) else ""
     text = (
         f"🤖 Автоприветствие для {html.escape(account.phone)}\n\n"
         f"Статус: {status}\n"
