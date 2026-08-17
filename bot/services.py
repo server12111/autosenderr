@@ -906,6 +906,10 @@ class MailingService:
         # FloodWait/frozen-account detection looks at the account as a whole,
         # not per-mailing.
         self._account_last_send: dict[int, datetime] = {}
+        # account_id -> created_at, cached once per process — used only for
+        # the warm-up multiplier below, and created_at never changes, so
+        # there's no reason to re-query it every single mailing cycle.
+        self._account_created_at_cache: dict[int, Optional[datetime]] = {}
         # Flood-wait expiry is persisted in accounts.flood_wait_until (DB), not
         # kept here in memory — a bot restart (which happens on every deploy)
         # must not forget an account is still in an active flood window and
@@ -1425,9 +1429,14 @@ class MailingService:
                     # Warm-up: a freshly-added account mailing at full speed is a
                     # much stronger FloodWait/frozen risk than one with history.
                     warmup_multiplier = 1.0
-                    account_for_warmup = await self.db.get_account(mailing.account_id)
-                    if account_for_warmup and account_for_warmup.created_at:
-                        account_age_days = (now - account_for_warmup.created_at).total_seconds() / 86400
+                    if mailing.account_id not in self._account_created_at_cache:
+                        account_for_warmup = await self.db.get_account(mailing.account_id)
+                        self._account_created_at_cache[mailing.account_id] = (
+                            account_for_warmup.created_at if account_for_warmup else None
+                        )
+                    account_created_at = self._account_created_at_cache[mailing.account_id]
+                    if account_created_at:
+                        account_age_days = (now - account_created_at).total_seconds() / 86400
                         if account_age_days < config.WARMUP_ACCOUNT_DAYS:
                             warmup_multiplier = config.WARMUP_MULTIPLIER
                     cycle_sent = 0
@@ -1469,12 +1478,21 @@ class MailingService:
                                 continue
                         current_account_id = mailing.account_id
                         # Cross-mailing account-wide throttle — see
-                        # self._account_last_send above. Checked and set with
-                        # no `await` in between, so concurrent mailing tasks
-                        # on the same account can't both pass this at once.
+                        # self._account_last_send above. Uses a freshly-read
+                        # timestamp, NOT the cycle's `now` (which is captured
+                        # once at the top of the cycle and stays frozen while
+                        # this loop works through potentially many targets) —
+                        # comparing against a frozen `now` would make elapsed
+                        # time read as ~0 for every target after the first
+                        # send in the same cycle, throttling a mailing against
+                        # itself regardless of real wall-clock time. Checked
+                        # and set with no `await` in between, so concurrent
+                        # mailing tasks on the same account can't both pass at
+                        # once.
+                        send_now = now_moscow()
                         last_account_send = self._account_last_send.get(current_account_id)
                         if last_account_send is not None:
-                            account_elapsed = (now - last_account_send).total_seconds()
+                            account_elapsed = (send_now - last_account_send).total_seconds()
                             if account_elapsed < config.MIN_SAFE_SECONDS_PER_TARGET:
                                 if target_obj.last_account_id in (None, mailing.account_id):
                                     self._mark_target_working(mailing_id, target_obj.id)
@@ -1483,7 +1501,7 @@ class MailingService:
                                     f"elsewhere {account_elapsed:.1f}s ago, deferring target {target_obj.id}"
                                 )
                                 continue
-                        self._account_last_send[current_account_id] = now
+                        self._account_last_send[current_account_id] = send_now
                         target_client = client
                         target_me = me
                         target = target_obj.chat_identifier
