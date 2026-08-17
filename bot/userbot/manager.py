@@ -31,7 +31,54 @@ _DEVICE_POOL = [
     {"device_model": "Samsung Galaxy S23",   "system_version": "Android 13", "app_version": "10.14.5"},
     {"device_model": "OPPO A78",             "system_version": "Android 12", "app_version": "10.12.4"},
     {"device_model": "Xiaomi 13T",           "system_version": "Android 13", "app_version": "10.14.5"},
+    {"device_model": "Samsung Galaxy A34",   "system_version": "Android 13", "app_version": "10.13.0"},
+    {"device_model": "Samsung Galaxy S22",   "system_version": "Android 12", "app_version": "10.12.0"},
+    {"device_model": "Xiaomi Redmi Note 11", "system_version": "Android 11", "app_version": "10.11.4"},
+    {"device_model": "Xiaomi Poco X5",       "system_version": "Android 13", "app_version": "10.14.0"},
+    {"device_model": "OPPO Reno8",           "system_version": "Android 13", "app_version": "10.13.5"},
+    {"device_model": "Vivo V27",             "system_version": "Android 13", "app_version": "10.14.2"},
+    {"device_model": "realme 10",            "system_version": "Android 12", "app_version": "10.12.6"},
+    {"device_model": "OnePlus Nord 3",       "system_version": "Android 13", "app_version": "10.14.5"},
+    {"device_model": "Huawei P50",           "system_version": "Android 12", "app_version": "10.12.4"},
+    {"device_model": "iPhone 13",            "system_version": "iOS 17.5",   "app_version": "10.9.2"},
+    {"device_model": "iPhone 12",            "system_version": "iOS 17.4",   "app_version": "10.8.1"},
+    {"device_model": "iPhone 14",            "system_version": "iOS 17.5",   "app_version": "10.9.2"},
 ]
+
+# Phone country calling code (longest prefix wins) -> (lang_code, system_lang_code).
+# A userbot claiming Ukrainian locale on an Indian or Colombian number is a
+# mismatch anti-fraud systems can flag; matching locale to the account's own
+# number is a much more natural signal. Falls back to English.
+_PHONE_LOCALE = {
+    "7": ("ru", "ru"),          # Russia/Kazakhstan
+    "375": ("ru", "ru"),        # Belarus
+    "380": ("uk", "uk-UA"),     # Ukraine
+    "1": ("en", "en-US"),       # US/Canada
+    "44": ("en", "en-GB"),      # UK
+    "91": ("en", "en-IN"),      # India
+    "57": ("es", "es-CO"),      # Colombia
+    "52": ("es", "es-MX"),      # Mexico
+    "34": ("es", "es-ES"),      # Spain
+    "55": ("pt", "pt-BR"),      # Brazil
+    "351": ("pt", "pt-PT"),     # Portugal
+    "62": ("id", "id-ID"),      # Indonesia
+    "63": ("en", "en-PH"),      # Philippines
+    "84": ("vi", "vi-VN"),      # Vietnam
+    "95": ("en", "en-MM"),      # Myanmar
+    "234": ("en", "en-NG"),     # Nigeria
+    "998": ("uz", "uz-UZ"),     # Uzbekistan
+    "996": ("ru", "ru-KG"),     # Kyrgyzstan
+    "992": ("ru", "ru-TJ"),     # Tajikistan
+}
+_PHONE_LOCALE_PREFIXES = tuple(sorted(_PHONE_LOCALE, key=len, reverse=True))
+
+
+def _locale_for_phone(phone: Optional[str]) -> tuple[str, str]:
+    digits = (phone or "").lstrip("+").strip()
+    for prefix in _PHONE_LOCALE_PREFIXES:
+        if digits.startswith(prefix):
+            return _PHONE_LOCALE[prefix]
+    return ("en", "en-US")
 
 
 def _device_for_account(account_id: int) -> dict:
@@ -148,6 +195,7 @@ class UserbotManager:
         client = None
         try:
             device = _device_for_account(account.id)
+            lang_code, system_lang_code = _locale_for_phone(account.phone)
             client = TelegramClient(
                 StringSession(account.session_string),
                 account.api_id,
@@ -156,8 +204,8 @@ class UserbotManager:
                 device_model=device["device_model"],
                 system_version=device["system_version"],
                 app_version=device["app_version"],
-                lang_code="uk",
-                system_lang_code="uk-UA",
+                lang_code=lang_code,
+                system_lang_code=system_lang_code,
                 connection_retries=5,
                 retry_delay=10,
             )

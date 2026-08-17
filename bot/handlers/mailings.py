@@ -24,6 +24,7 @@ def _fmt_dt(dt) -> str:
     return dt.strftime("%d.%m.%Y %H:%M")
 
 from ..database.db import Database
+from ..config import config
 from ..keyboards.inline import (
     mailings_keyboard,
     mailing_menu_keyboard,
@@ -2463,7 +2464,7 @@ async def process_create_txt_file_wrong_type(message: Message):
 @router.callback_query(
     CreateMailingStates.adding_targets, F.data.startswith("create_targets_done:")
 )
-async def callback_create_targets_done(callback: CallbackQuery, state: FSMContext):
+async def callback_create_targets_done(callback: CallbackQuery, state: FSMContext, db: Database):
     data = await state.get_data()
     mailing_id = data.get("mailing_id")
     if not mailing_id:
@@ -2473,10 +2474,27 @@ async def callback_create_targets_done(callback: CallbackQuery, state: FSMContex
 
     await state.set_state(CreateMailingStates.waiting_hours)
 
+    warning = ""
+    mailing = await db.get_mailing(mailing_id)
+    if mailing and mailing.interval_seconds:
+        targets = await db.get_mailing_targets(mailing_id)
+        if targets:
+            seconds_per_target = mailing.interval_seconds / len(targets)
+            if seconds_per_target < config.MIN_SAFE_SECONDS_PER_TARGET:
+                needed = int(len(targets) * config.MIN_SAFE_SECONDS_PER_TARGET)
+                warning = (
+                    f"\n\n⚠️ <b>Внимание:</b> при {len(targets)} целях и интервале "
+                    f"{mailing.interval_seconds} сек аккаунту нужно слать сообщение каждые "
+                    f"~{seconds_per_target:.1f} сек — это высокий риск FloodWait и заморозки "
+                    f"аккаунта Telegram. Рекомендуем интервал от {needed} сек "
+                    f"(изменить можно позже в настройках рассылки)."
+                )
+
     await callback.message.edit_text(
-        "Шаг 6/6: Время активности\n\n"
+        pe("Шаг 6/6: Время активности\n\n"
         "Хотите настроить часы работы рассылки?\n"
-        "Или работать 24/7?",
+        "Или работать 24/7?" + warning),
+        parse_mode="HTML",
         reply_markup=active_hours_keyboard(mailing_id),
     )
     await callback.answer()

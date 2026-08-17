@@ -17,7 +17,8 @@ logger = logging.getLogger(__name__)
 
 _SETTINGS_TTL = 60      # seconds — settings/prices
 _CHANNELS_TTL = 300     # seconds — required channels list
-POOL_PROXY_ACCOUNT_CAP = 50   # max active accounts per pool proxy
+POOL_PROXY_ACCOUNT_CAP = 20   # max active accounts per pool proxy — many accounts on
+                              # one IP is a strong Telegram anti-spam signal (frozen/FloodWait)
 
 # SQLite cannot bind table/column identifiers.  Keep the only dynamic DDL in
 # migrations behind this exact allowlist so no caller can turn _add_col() into
@@ -1113,19 +1114,20 @@ class Database:
 
     async def purge_inactive_accounts(self) -> int:
         """Delete inactive accounts that are not referenced by any mailing."""
-        async with self._conn.execute(
-            "SELECT id, autoresponder_photo, group_autoresponder_photo FROM accounts a WHERE a.is_active = 0 "
-            "AND NOT EXISTS (SELECT 1 FROM mailings m WHERE m.account_id = a.id) "
-            "AND NOT EXISTS (SELECT 1 FROM mailing_accounts ma WHERE ma.account_id = a.id)"
-        ) as cur:
-            rows = await cur.fetchall()
-        count = len(rows)
-        await self._conn.execute(
-            "DELETE FROM accounts WHERE is_active = 0 "
-            "AND NOT EXISTS (SELECT 1 FROM mailings m WHERE m.account_id = accounts.id) "
-            "AND NOT EXISTS (SELECT 1 FROM mailing_accounts ma WHERE ma.account_id = accounts.id)"
-        )
-        await self._conn.commit()
+        async with self._transaction_lock:
+            async with self._conn.execute(
+                "SELECT id, autoresponder_photo, group_autoresponder_photo FROM accounts a WHERE a.is_active = 0 "
+                "AND NOT EXISTS (SELECT 1 FROM mailings m WHERE m.account_id = a.id) "
+                "AND NOT EXISTS (SELECT 1 FROM mailing_accounts ma WHERE ma.account_id = a.id)"
+            ) as cur:
+                rows = await cur.fetchall()
+            count = len(rows)
+            await self._conn.execute(
+                "DELETE FROM accounts WHERE is_active = 0 "
+                "AND NOT EXISTS (SELECT 1 FROM mailings m WHERE m.account_id = accounts.id) "
+                "AND NOT EXISTS (SELECT 1 FROM mailing_accounts ma WHERE ma.account_id = accounts.id)"
+            )
+            await self._conn.commit()
         for row in rows:
             async with self._conn.execute(
                 "SELECT 1 FROM accounts WHERE id = ?", (row["id"],)

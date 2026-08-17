@@ -76,6 +76,18 @@ class Config:
 
     MAILING_DEBUG: bool = os.getenv("MAILING_DEBUG", "false").lower() == "true"
 
+    # Below this many seconds-per-target, a mailing needs more messages/sec
+    # from one account than is safe — Telegram's FloodWait/frozen-account
+    # anti-spam kicks in well before this. Used to warn when interval is too
+    # short for the number of targets (see callback_create_targets_done).
+    MIN_SAFE_SECONDS_PER_TARGET: float = _safe_float("MIN_SAFE_SECONDS_PER_TARGET", 3.0)
+
+    # New accounts are more likely to get FloodWait/frozen if they mail at
+    # full speed immediately — accounts younger than this many days get their
+    # send interval multiplied (see MailingService._mailing_loop).
+    WARMUP_ACCOUNT_DAYS: int = _safe_int("WARMUP_ACCOUNT_DAYS", 5)
+    WARMUP_MULTIPLIER: float = _safe_float("WARMUP_MULTIPLIER", 2.5)
+
     # Default Telegram API credentials (from official apps)
     DEFAULT_API_ID: int = _safe_int("DEFAULT_API_ID", _safe_int("API_ID", 2040))
     DEFAULT_API_HASH: str = os.getenv("DEFAULT_API_HASH") or os.getenv("API_HASH", "b18441a1ff607e10a989891a5462e627")

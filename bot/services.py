@@ -48,6 +48,12 @@ _CHAT_BAN_ERRORS = (
     UserBannedInChannelError,
 )
 
+# Telegram's account-freeze anti-spam restriction (2025) disables almost every
+# API method until the owner re-verifies in the official app. Telethon has no
+# dedicated exception class for it yet, so it's matched by substring — same
+# approach already used for PEER_FLOOD below.
+_FROZEN_ACCOUNT_MARKER = "not available for frozen accounts"
+
 # Errors that may mean "not a member" — try to join first
 _NOT_MEMBER_ERRORS = (
     UserNotParticipantError,
@@ -893,6 +899,13 @@ class MailingService:
         self._working_targets: dict[int, set[int]] = {}
         self._message_rotation: dict[int, int] = {}  # mailing_id -> next message index (round-robin, not random)
         self._flood_notify_locks: dict[int, asyncio.Lock] = {}  # account_id -> lock, serializes _notify_flood_wait
+        # account_id -> last send time, ACROSS all mailings using that account.
+        # Each mailing only paces itself against its own interval, so an
+        # account shared by several mailings could otherwise be sent from at
+        # several times its configured rate in aggregate — Telegram's
+        # FloodWait/frozen-account detection looks at the account as a whole,
+        # not per-mailing.
+        self._account_last_send: dict[int, datetime] = {}
         # Flood-wait expiry is persisted in accounts.flood_wait_until (DB), not
         # kept here in memory — a bot restart (which happens on every deploy)
         # must not forget an account is still in an active flood window and
@@ -1408,6 +1421,15 @@ class MailingService:
 
                     now = now_moscow()
                     sent_any = False
+
+                    # Warm-up: a freshly-added account mailing at full speed is a
+                    # much stronger FloodWait/frozen risk than one with history.
+                    warmup_multiplier = 1.0
+                    account_for_warmup = await self.db.get_account(mailing.account_id)
+                    if account_for_warmup and account_for_warmup.created_at:
+                        account_age_days = (now - account_for_warmup.created_at).total_seconds() / 86400
+                        if account_age_days < config.WARMUP_ACCOUNT_DAYS:
+                            warmup_multiplier = config.WARMUP_MULTIPLIER
                     cycle_sent = 0
                     cycle_errors = 0
                     if mailing.account_id not in self._me_cache:
@@ -1430,7 +1452,7 @@ class MailingService:
                         # Interval check per target — jitter ±3s around the configured
                         # value so sends don't land on a perfectly regular cadence
                         # (a dead-even interval is itself a spam-pattern signal).
-                        base_interval = target_obj.interval_seconds or mailing.interval_seconds
+                        base_interval = (target_obj.interval_seconds or mailing.interval_seconds) * warmup_multiplier
                         target_interval = max(1, base_interval + random.uniform(-3, 3))
                         if target_obj.last_sent_at is not None:
                             elapsed = (now - target_obj.last_sent_at).total_seconds()
@@ -1446,6 +1468,22 @@ class MailingService:
                             if now < stagger_ready:
                                 continue
                         current_account_id = mailing.account_id
+                        # Cross-mailing account-wide throttle — see
+                        # self._account_last_send above. Checked and set with
+                        # no `await` in between, so concurrent mailing tasks
+                        # on the same account can't both pass this at once.
+                        last_account_send = self._account_last_send.get(current_account_id)
+                        if last_account_send is not None:
+                            account_elapsed = (now - last_account_send).total_seconds()
+                            if account_elapsed < config.MIN_SAFE_SECONDS_PER_TARGET:
+                                if target_obj.last_account_id in (None, mailing.account_id):
+                                    self._mark_target_working(mailing_id, target_obj.id)
+                                logger.debug(
+                                    f"Mailing {mailing_id}: account {current_account_id} sent "
+                                    f"elsewhere {account_elapsed:.1f}s ago, deferring target {target_obj.id}"
+                                )
+                                continue
+                        self._account_last_send[current_account_id] = now
                         target_client = client
                         target_me = me
                         target = target_obj.chat_identifier
@@ -1805,6 +1843,20 @@ class MailingService:
                                 # is account-wide, so stop hammering the rest
                                 # of this cycle's targets and retry next cycle.
                                 break
+                            elif _FROZEN_ACCOUNT_MARKER in err_str.lower():
+                                try:
+                                    await self.db.add_error_log(
+                                        user_id=mailing.user_id,
+                                        error_type="FrozenAccount",
+                                        error_text=err_str[:300],
+                                        account_id=current_account_id,
+                                        mailing_id=mailing_id,
+                                        chat_identifier=target,
+                                    )
+                                except Exception:
+                                    pass
+                                await self._handle_mailing_ban(mailing_id, current_account_id, e)
+                                return
                             else:
                                 self._mark_target_not_working(mailing_id, target_obj.id)
                                 cycle_errors += 1
@@ -1867,18 +1919,31 @@ class MailingService:
                 self._clear_working_targets(mailing_id)
 
     async def _handle_mailing_ban(self, mailing_id: int, account_id: int, error: Exception):
-        """Stop mailing, deactivate account, notify owner."""
+        """Stop mailing (and any sibling mailings on the same account),
+        deactivate account, notify owner."""
         error_name = type(error).__name__
         if isinstance(error, (UserDeactivatedBanError,)):
             reason = "⛔️ аккаунт заблокирован Telegram"
         elif isinstance(error, UserDeactivatedError):
             reason = "❌ аккаунт деактивирован"
+        elif _FROZEN_ACCOUNT_MARKER in str(error).lower():
+            reason = "🧊 аккаунт заморожен Telegram — нужна проверка в официальном приложении"
         else:
             reason = "🔑 сессия сброшена (аккаунт заморожен или вышел)"
 
         logger.warning(f"Mailing {mailing_id}: ban detected on account {account_id} — {error_name}")
 
+        # A frozen/banned account is broken for ALL its mailings, not just the
+        # one that happened to hit the error first — leaving siblings running
+        # just means they keep failing (and writing to the DB) until their
+        # own next cycle notices, so stop them all right away.
+        sibling_ids = [
+            m.id for m in await self.db.get_active_mailings_by_account(account_id)
+            if m.id != mailing_id
+        ]
         await self.stop_mailing(mailing_id)
+        for sibling_id in sibling_ids:
+            await self.stop_mailing(sibling_id)
         await self.db.deactivate_account(account_id)
 
         notify = getattr(self.userbot_manager, '_bot_notify_callback', None)
