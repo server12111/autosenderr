@@ -1855,11 +1855,28 @@ class MailingService:
                                     )
                                 except Exception:
                                     pass
-                                logger.warning(f"Mailing {mailing_id}: PEER_FLOOD на аккаунте, пауза 60с")
-                                await asyncio.sleep(60)
-                                # Same reasoning as FloodWaitError above — this
-                                # is account-wide, so stop hammering the rest
-                                # of this cycle's targets and retry next cycle.
+                                # PEER_FLOOD is Telegram's temporary spam
+                                # restriction — unlike FloodWaitError it comes
+                                # with no explicit wait duration, but retrying
+                                # every ~60s (the old behavior here) just kept
+                                # hammering an already-restricted account,
+                                # which risks extending the restriction and
+                                # never told the owner it happened. Route it
+                                # through the same flood_wait_until mechanism
+                                # as a real FloodWait, with a conservative
+                                # fixed cooldown.
+                                self._clear_working_targets(mailing_id)
+                                await self._notify_flood_wait(
+                                    mailing_user, current_account_id, config.PEER_FLOOD_COOLDOWN_SECONDS
+                                )
+                                logger.warning(
+                                    f"Mailing {mailing_id}: PEER_FLOOD (temporary spam restriction) on "
+                                    f"account {current_account_id} — deferring targets for "
+                                    f"{config.PEER_FLOOD_COOLDOWN_SECONDS}s"
+                                )
+                                # Account-wide, not per-target — stop hammering the
+                                # rest of this cycle's targets; the top-of-loop
+                                # flood_wait_until gate handles the actual wait.
                                 break
                             elif _FROZEN_ACCOUNT_MARKER in err_str.lower():
                                 try:

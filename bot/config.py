@@ -88,6 +88,13 @@ class Config:
     WARMUP_ACCOUNT_DAYS: int = _safe_int("WARMUP_ACCOUNT_DAYS", 5)
     WARMUP_MULTIPLIER: float = _safe_float("WARMUP_MULTIPLIER", 2.5)
 
+    # PEER_FLOOD (Telegram's temporary spam restriction) carries no explicit
+    # wait duration from Telegram, unlike FloodWaitError. Retrying too soon
+    # risks extending the restriction, so this is a conservative fixed pause
+    # before the account is tried again — see the PEER_FLOOD handler in
+    # MailingService._mailing_loop.
+    PEER_FLOOD_COOLDOWN_SECONDS: int = _safe_int("PEER_FLOOD_COOLDOWN_SECONDS", 21600)  # 6h
+
     # Default Telegram API credentials (from official apps)
     DEFAULT_API_ID: int = _safe_int("DEFAULT_API_ID", _safe_int("API_ID", 2040))
     DEFAULT_API_HASH: str = os.getenv("DEFAULT_API_HASH") or os.getenv("API_HASH", "b18441a1ff607e10a989891a5462e627")
