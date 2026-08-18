@@ -127,6 +127,10 @@ async def main():
     if backfilled:
         logger.info(f"Backfilled pool/shared proxies onto {len(backfilled)} existing account(s)")
 
+    api_backfilled = await db.backfill_missing_api_credentials()
+    if api_backfilled:
+        logger.info(f"Backfilled pool api_id onto {len(api_backfilled)} existing account(s)")
+
     bot = Bot(
         token=config.BOT_TOKEN,
         default=DefaultBotProperties(parse_mode=ParseMode.HTML),

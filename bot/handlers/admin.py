@@ -20,7 +20,7 @@ from aiogram.fsm.state import State, StatesGroup
 from aiogram.exceptions import TelegramBadRequest, TelegramRetryAfter
 import aiosqlite
 
-from ..database.db import Database
+from ..database.db import Database, POOL_API_CREDENTIAL_ACCOUNT_CAP
 from ..keyboards.inline import (
     admin_keyboard,
     admin_stats_period_keyboard,
@@ -36,6 +36,7 @@ from ..keyboards.inline import (
     admin_free_tier_keyboard,
     admin_free_chats_keyboard,
     admin_proxy_pool_keyboard,
+    admin_api_pool_keyboard,
     cancel_keyboard,
     main_menu_keyboard,
     promo_subscription_keyboard,
@@ -70,6 +71,7 @@ class AdminStates(StatesGroup):
     waiting_diag_user_id = State()
     waiting_promo_edit_uses = State()
     waiting_pool_proxy = State()
+    waiting_api_credential = State()
 
 
 def is_admin(user_id: int) -> bool:
@@ -839,6 +841,144 @@ async def callback_admin_delete_proxy(callback: CallbackQuery, db: Database, use
     proxies = await db.get_pool_proxies()
     text = "🌐 Пул прокси\n\nПрокси в пуле пока нет." if not proxies else "🌐 Пул прокси\n\n🟢 — активен, 💀 — отключён\nВ скобках — число аккаунтов на нём:"
     await callback.message.edit_text(pe(text), parse_mode="HTML", reply_markup=admin_proxy_pool_keyboard(proxies))
+
+
+# === API credential pool ===
+# Same pattern as the proxy pool above — many phone numbers sharing one
+# api_id/api_hash is a spam signal Telegram tracks globally, independent of
+# proxy/IP, so accounts are spread across several app credentials the same
+# way they're spread across several proxies.
+
+@router.callback_query(F.data == "admin_api_pool")
+async def callback_admin_api_pool(callback: CallbackQuery, db: Database):
+    if not is_admin(callback.from_user.id):
+        await callback.answer("Нет доступа", show_alert=True)
+        return
+    creds = await db.get_api_credential_pool()
+    if not creds:
+        text = (
+            "🔑 Пул API ID\n\n"
+            "Пул пока пуст. Новые аккаунты используют общий api_id по умолчанию.\n\n"
+            f"Добавленные сюда api_id/api_hash автоматически распределяются между "
+            f"аккаунтами (не больше {POOL_API_CREDENTIAL_ACCOUNT_CAP} аккаунтов на один)."
+        )
+    else:
+        text = "🔑 Пул API ID\n\n🟢 — активен, ⚫️ — отключён\nВ скобках — число аккаунтов на нём:"
+    await callback.message.edit_text(pe(text), parse_mode="HTML", reply_markup=admin_api_pool_keyboard(creds))
+    await callback.answer()
+
+
+@router.callback_query(F.data == "admin_add_api")
+async def callback_admin_add_api(callback: CallbackQuery, state: FSMContext):
+    if not is_admin(callback.from_user.id):
+        await callback.answer("Нет доступа", show_alert=True)
+        return
+    await state.set_state(AdminStates.waiting_api_credential)
+    await callback.message.edit_text(
+        "➕ Добавление api_id в пул\n\n"
+        "Пришлите api_id и api_hash с my.telegram.org — каждый с новой строки "
+        "или через пробел:\n\n"
+        "<code>37346444\n787abaa90a010c414ab51409f6fd0389</code>",
+        parse_mode="HTML",
+        reply_markup=cancel_keyboard(),
+    )
+    await callback.answer()
+
+
+@router.message(AdminStates.waiting_api_credential)
+async def process_admin_add_api(message: Message, state: FSMContext, db: Database, userbot_manager):
+    if not is_admin(message.from_user.id):
+        await state.clear()
+        return
+    parts = (message.text or "").split()
+    if len(parts) != 2:
+        await message.answer(
+            pe("❌ Пришлите ровно два значения: api_id и api_hash (с новой строки или через пробел)."),
+            parse_mode="HTML",
+            reply_markup=cancel_keyboard(),
+        )
+        return
+    api_id_str, api_hash = parts
+    try:
+        api_id = int(api_id_str)
+    except ValueError:
+        await message.answer(
+            pe("❌ api_id должен быть числом. Попробуйте снова:"),
+            parse_mode="HTML",
+            reply_markup=cancel_keyboard(),
+        )
+        return
+    if len(api_hash) < 20:
+        await message.answer(
+            pe("❌ api_hash выглядит слишком коротким. Проверьте и попробуйте снова:"),
+            parse_mode="HTML",
+            reply_markup=cancel_keyboard(),
+        )
+        return
+
+    await db.add_api_credential(api_id, api_hash, message.from_user.id)
+    await state.clear()
+
+    # Same reasoning as the proxy pool's backfill-on-add: absorb accounts
+    # that have no pool credential yet right away — this is also what
+    # migrates every pre-existing account (all starting with no pool
+    # assignment) off the single shared default the first time a pool
+    # credential is added, rather than leaving them on it until each
+    # account's own next natural reconnect.
+    backfilled = await db.backfill_missing_api_credentials()
+    if backfilled:
+        asyncio.create_task(userbot_manager._reconnect_accounts_staggered(backfilled))
+
+    creds = await db.get_api_credential_pool()
+    backfill_note = f"\n\n📥 api_id назначен {len(backfilled)} аккаунтам." if backfilled else ""
+    await message.answer(
+        pe(f"✅ api_id добавлен в пул: <code>{api_id}</code>{backfill_note}"),
+        parse_mode="HTML",
+        reply_markup=admin_api_pool_keyboard(creds),
+    )
+
+
+@router.callback_query(F.data.startswith("admin_api_info:"))
+async def callback_admin_api_info(callback: CallbackQuery, db: Database):
+    if not is_admin(callback.from_user.id):
+        await callback.answer("Нет доступа", show_alert=True)
+        return
+    pool_id = int(callback.data.split(":")[1])
+    creds = await db.get_api_credential_pool()
+    match = next((c for c, cnt in creds if c.id == pool_id), None)
+    if not match:
+        await callback.answer("api_id не найден", show_alert=True)
+        return
+    status = "активен" if match.is_active else "отключён"
+    await callback.answer(f"api_id={match.api_id}\n\nСтатус: {status}", show_alert=True)
+
+
+@router.callback_query(F.data.startswith("admin_delete_api:"))
+async def callback_admin_delete_api(callback: CallbackQuery, db: Database, userbot_manager):
+    if not is_admin(callback.from_user.id):
+        await callback.answer("Нет доступа", show_alert=True)
+        return
+    pool_id = int(callback.data.split(":")[1])
+    affected = await db.delete_api_credential(pool_id)
+    if affected:
+        asyncio.create_task(userbot_manager._reconnect_accounts_staggered(affected))
+        await callback.answer(f"✅ api_id удалён, {len(affected)} аккаунт(ов) переехали на другой")
+    else:
+        await callback.answer("✅ api_id удалён из пула")
+
+    creds = await db.get_api_credential_pool()
+    text = "🔑 Пул API ID\n\nПул пока пуст." if not creds else "🔑 Пул API ID\n\n🟢 — активен, ⚫️ — отключён\nВ скобках — число аккаунтов на нём:"
+    await callback.message.edit_text(pe(text), parse_mode="HTML", reply_markup=admin_api_pool_keyboard(creds))
+
+
+@router.callback_query(F.data.startswith("admin_api_pool_page:"))
+async def callback_admin_api_pool_page(callback: CallbackQuery, db: Database):
+    if not is_admin(callback.from_user.id):
+        await callback.answer("Нет доступа", show_alert=True)
+        return
+    page = int(callback.data.split(":")[1])
+    await callback.answer()
+    await callback.message.edit_reply_markup(reply_markup=admin_api_pool_keyboard(await db.get_api_credential_pool(), page=page))
 
 
 # === Settings panel ===

@@ -19,6 +19,10 @@ _SETTINGS_TTL = 60      # seconds — settings/prices
 _CHANNELS_TTL = 300     # seconds — required channels list
 POOL_PROXY_ACCOUNT_CAP = 20   # max active accounts per pool proxy — many accounts on
                               # one IP is a strong Telegram anti-spam signal (frozen/FloodWait)
+POOL_API_CREDENTIAL_ACCOUNT_CAP = 12  # max active accounts per api_id/api_hash pair —
+                              # api_id reputation is tracked globally by Telegram across every
+                              # chat, not just ones this bot touches, so many phone numbers
+                              # sharing one app identity is its own independent spam signal
 
 # SQLite cannot bind table/column identifiers.  Keep the only dynamic DDL in
 # migrations behind this exact allowlist so no caller can turn _add_col() into
@@ -47,6 +51,7 @@ _ALLOWED_MIGRATION_COLUMNS = frozenset({
     ('users', 'subscription_expired_notified_at', 'DATETIME DEFAULT NULL'), ('users', 'reminder_3d_sent_at', 'DATETIME DEFAULT NULL'),
     ('users', 'reminder_1d_sent_at', 'DATETIME DEFAULT NULL'), ('users', 'welcome_pin_msg_id', 'INTEGER DEFAULT NULL'),
     ('users', 'subscription_type', 'TEXT DEFAULT NULL'),
+    ('accounts', 'api_credential_pool_id', 'INTEGER DEFAULT NULL'),
 })
 
 
@@ -103,6 +108,7 @@ class Account:
     proxy: Optional[str] = None
     auto_subscribe_sponsors: bool = False
     proxy_pool_id: Optional[int] = None
+    api_credential_pool_id: Optional[int] = None
 
     @property
     def display_name(self) -> str:
@@ -113,6 +119,16 @@ class Account:
 class PoolProxy:
     id: int
     proxy: str
+    is_active: bool
+    added_by: Optional[int]
+    created_at: datetime
+
+
+@dataclass
+class PoolApiCredential:
+    id: int
+    api_id: int
+    api_hash: str
     is_active: bool
     added_by: Optional[int]
     created_at: datetime
@@ -337,6 +353,17 @@ class Database:
                 created_at DATETIME DEFAULT (datetime('now', '+3 hours'))
             )
         """)
+        await _add_col("accounts", "api_credential_pool_id",       "INTEGER DEFAULT NULL")
+        await self._conn.execute("""
+            CREATE TABLE IF NOT EXISTS api_credential_pool (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                api_id INTEGER NOT NULL,
+                api_hash TEXT NOT NULL,
+                is_active INTEGER DEFAULT 1,
+                added_by INTEGER,
+                created_at DATETIME DEFAULT (datetime('now', '+3 hours'))
+            )
+        """)
         await self._conn.commit()
         # mailing_messages
         await _add_col("mailing_messages", "photo_path",    "TEXT")
@@ -502,6 +529,7 @@ class Database:
             proxy=row["proxy"] if "proxy" in keys else None,
             auto_subscribe_sponsors=bool(row["auto_subscribe_sponsors"]) if "auto_subscribe_sponsors" in keys and row["auto_subscribe_sponsors"] is not None else False,
             proxy_pool_id=row["proxy_pool_id"] if "proxy_pool_id" in keys else None,
+            api_credential_pool_id=row["api_credential_pool_id"] if "api_credential_pool_id" in keys else None,
         )
 
     # === Users ===
@@ -687,6 +715,7 @@ class Database:
         account_payment_invoice: Optional[str] = None,
         proxy: Optional[str] = None,
         proxy_pool_id: Optional[int] = None,
+        api_credential_pool_id: Optional[int] = None,
     ) -> int:
         async with self._transaction_lock:
             async with aiosqlite.connect(self.db_path) as conn:
@@ -704,8 +733,8 @@ class Database:
                     if existing:
                         await conn.execute(
                             "UPDATE accounts SET api_id=?, api_hash=?, session_string=?, is_active=1, "
-                            "proxy=?, proxy_pool_id=? WHERE id=?",
-                            (api_id, api_hash, session_string, proxy, proxy_pool_id, existing["id"]),
+                            "proxy=?, proxy_pool_id=?, api_credential_pool_id=? WHERE id=?",
+                            (api_id, api_hash, session_string, proxy, proxy_pool_id, api_credential_pool_id, existing["id"]),
                         )
                         # Re-authorizing an already known phone does not add
                         # an account.  Keep a fresh paid entitlement intact;
@@ -715,9 +744,9 @@ class Database:
                         return existing["id"]
                     cursor = await conn.execute(
                         "INSERT INTO accounts "
-                        "(user_id, phone, api_id, api_hash, session_string, proxy, proxy_pool_id, created_at) "
-                        "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-                        (user_id, phone, api_id, api_hash, session_string, proxy, proxy_pool_id, now_moscow().isoformat()),
+                        "(user_id, phone, api_id, api_hash, session_string, proxy, proxy_pool_id, api_credential_pool_id, created_at) "
+                        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                        (user_id, phone, api_id, api_hash, session_string, proxy, proxy_pool_id, api_credential_pool_id, now_moscow().isoformat()),
                     )
                     if account_payment_invoice:
                         await self._consume_extra_account_payment(
@@ -823,6 +852,16 @@ class Database:
         async with self._transaction_lock:
             await self._conn.execute(
                 "UPDATE accounts SET proxy = ?, proxy_pool_id = ? WHERE id = ?", (proxy, proxy_pool_id, account_id)
+            )
+            await self._conn.commit()
+
+    async def update_account_api_credential(
+        self, account_id: int, api_id: int, api_hash: str, api_credential_pool_id: Optional[int] = None
+    ):
+        async with self._transaction_lock:
+            await self._conn.execute(
+                "UPDATE accounts SET api_id = ?, api_hash = ?, api_credential_pool_id = ? WHERE id = ?",
+                (api_id, api_hash, api_credential_pool_id, account_id),
             )
             await self._conn.commit()
 
@@ -1036,6 +1075,123 @@ class Database:
         for row in rows:
             proxy = await self.auto_assign_proxy(row["user_id"], row["id"], cap=cap)
             if proxy:
+                assigned.append(row["id"])
+        return assigned
+
+    # === API credential pool ===
+    # Same shape as the proxy pool above, but simpler: unlike proxies, users
+    # never supply their own api_id/api_hash per-account (it's an admin-only
+    # pool), and there's no "connection failed" signal to detect a dead
+    # credential — admins just delete a bad one manually.
+
+    async def add_api_credential(self, api_id: int, api_hash: str, added_by: Optional[int]) -> int:
+        cursor = await self._conn.execute(
+            "INSERT INTO api_credential_pool (api_id, api_hash, added_by) VALUES (?, ?, ?)",
+            (api_id, api_hash, added_by),
+        )
+        await self._conn.commit()
+        return cursor.lastrowid
+
+    async def get_api_credential_pool(self) -> list[tuple["PoolApiCredential", int]]:
+        """All pool credentials with the number of active accounts currently on each."""
+        async with self._conn.execute(
+            """SELECT c.id, c.api_id, c.api_hash, c.is_active, c.added_by, c.created_at,
+                      (SELECT COUNT(*) FROM accounts a WHERE a.api_credential_pool_id = c.id AND a.is_active = 1) as cnt
+               FROM api_credential_pool c ORDER BY c.created_at DESC"""
+        ) as cur:
+            rows = await cur.fetchall()
+            return [
+                (
+                    PoolApiCredential(
+                        id=r["id"], api_id=r["api_id"], api_hash=r["api_hash"], is_active=bool(r["is_active"]),
+                        added_by=r["added_by"], created_at=self._parse_datetime(r["created_at"]),
+                    ),
+                    r["cnt"],
+                )
+                for r in rows
+            ]
+
+    async def get_least_loaded_api_credential(
+        self, exclude_id: Optional[int] = None, cap: Optional[int] = None
+    ) -> Optional["PoolApiCredential"]:
+        inner = (
+            "SELECT c.id, c.api_id, c.api_hash, c.is_active, c.added_by, c.created_at, "
+            "(SELECT COUNT(*) FROM accounts a WHERE a.api_credential_pool_id = c.id AND a.is_active = 1) as cnt "
+            "FROM api_credential_pool c WHERE c.is_active = 1"
+        )
+        params: list = []
+        if exclude_id is not None:
+            inner += " AND c.id != ?"
+            params.append(exclude_id)
+        query = f"SELECT * FROM ({inner}) WHERE 1=1"
+        if cap is not None:
+            query += " AND cnt < ?"
+            params.append(cap)
+        query += " ORDER BY cnt ASC, id ASC LIMIT 1"
+        async with self._conn.execute(query, params) as cur:
+            row = await cur.fetchone()
+            if not row:
+                return None
+            return PoolApiCredential(
+                id=row["id"], api_id=row["api_id"], api_hash=row["api_hash"], is_active=bool(row["is_active"]),
+                added_by=row["added_by"], created_at=self._parse_datetime(row["created_at"]),
+            )
+
+    async def delete_api_credential(self, pool_id: int, cap: int = POOL_API_CREDENTIAL_ACCOUNT_CAP) -> list[int]:
+        """Reassign any accounts still on this credential to another pool
+        credential before deleting the row. Returns the ids of accounts that
+        got reassigned, so the caller can reconnect them."""
+        affected = await self.reassign_accounts_off_api_credential(pool_id, cap=cap)
+        await self._conn.execute("DELETE FROM api_credential_pool WHERE id = ?", (pool_id,))
+        await self._conn.commit()
+        return affected
+
+    async def reassign_accounts_off_api_credential(
+        self, dead_pool_id: int, cap: int = POOL_API_CREDENTIAL_ACCOUNT_CAP
+    ) -> list[int]:
+        async with self._conn.execute(
+            "SELECT id FROM accounts WHERE api_credential_pool_id = ? AND is_active = 1",
+            (dead_pool_id,),
+        ) as cur:
+            rows = await cur.fetchall()
+        reassigned = []
+        for row in rows:
+            cred = await self.get_least_loaded_api_credential(exclude_id=dead_pool_id, cap=cap)
+            if not cred:
+                break  # no room anywhere else — leave the rest as-is
+            await self.update_account_api_credential(row["id"], cred.api_id, cred.api_hash, cred.id)
+            reassigned.append(row["id"])
+        return reassigned
+
+    async def auto_assign_api_credential(
+        self, account_id: int, cap: int = POOL_API_CREDENTIAL_ACCOUNT_CAP
+    ) -> Optional[tuple[int, str]]:
+        """Called when a new account is created — hand out the least-loaded
+        pool credential, or None if the pool is empty/exhausted (caller
+        falls back to config.DEFAULT_API_ID/DEFAULT_API_HASH)."""
+        cred = await self.get_least_loaded_api_credential(cap=cap)
+        if cred:
+            await self.update_account_api_credential(account_id, cred.api_id, cred.api_hash, cred.id)
+            return cred.api_id, cred.api_hash
+        return None
+
+    async def backfill_missing_api_credentials(self, cap: int = POOL_API_CREDENTIAL_ACCOUNT_CAP) -> list[int]:
+        """Same idea as backfill_missing_proxies — assign a pool credential
+        to every active account not already on one. Unlike proxies, every
+        account always HAS some api_id/api_hash (the config default if
+        nothing else), so this targets accounts with no pool assignment yet
+        rather than a NULL/empty value. Doubles as the one-off migration
+        that moves accounts off a single overused shared api_id once a pool
+        exists — every pre-existing account starts with no pool assignment,
+        so this naturally sweeps them all in, not just newly-created ones."""
+        async with self._conn.execute(
+            "SELECT id FROM accounts WHERE is_active = 1 AND api_credential_pool_id IS NULL"
+        ) as cur:
+            rows = await cur.fetchall()
+        assigned = []
+        for row in rows:
+            cred = await self.auto_assign_api_credential(row["id"], cap=cap)
+            if cred:
                 assigned.append(row["id"])
         return assigned
 

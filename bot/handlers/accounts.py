@@ -12,7 +12,7 @@ from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from telethon.errors import PasswordHashInvalidError, PhoneCodeInvalidError
 
-from ..database.db import Database
+from ..database.db import Database, POOL_API_CREDENTIAL_ACCOUNT_CAP
 from ..keyboards.inline import (
     accounts_keyboard,
     account_menu_keyboard,
@@ -743,14 +743,26 @@ async def callback_add_account_set_api(callback: CallbackQuery, state: FSMContex
 
 
 @router.callback_query(F.data == "add_account_skip_api")
-async def callback_add_account_skip_api(callback: CallbackQuery, state: FSMContext):
+async def callback_add_account_skip_api(callback: CallbackQuery, state: FSMContext, db: Database):
     if not (await state.get_data()).get("account_setup_allowed"):
         await callback.answer("Сессия добавления аккаунта истекла", show_alert=True)
         return
-    await state.update_data(
-        api_id=config.DEFAULT_API_ID,
-        api_hash=config.DEFAULT_API_HASH,
-    )
+    # Many phone numbers sharing one api_id is its own spam signal Telegram
+    # tracks globally (not just in chats this bot touches) — same reasoning
+    # as the proxy pool, so pull from the api-credential pool before ever
+    # falling back to the single shared config default.
+    pool_cred = await db.get_least_loaded_api_credential(cap=POOL_API_CREDENTIAL_ACCOUNT_CAP)
+    if pool_cred:
+        await state.update_data(
+            api_id=pool_cred.api_id,
+            api_hash=pool_cred.api_hash,
+            api_credential_pool_id=pool_cred.id,
+        )
+    else:
+        await state.update_data(
+            api_id=config.DEFAULT_API_ID,
+            api_hash=config.DEFAULT_API_HASH,
+        )
     await callback.message.edit_text(
         pe("➕ Добавление аккаунта\n\n"
         "<b>Шаг 3 из 3</b>\n\n"
@@ -1000,6 +1012,7 @@ async def _persist_new_account(
     auto_proxy: Optional[str],
     auto_proxy_pool_id: Optional[int],
     account_payment_invoice: Optional[str] = None,
+    api_credential_pool_id: Optional[int] = None,
 ):
     """Save the account row after a successful Telethon sign_in.
 
@@ -1023,6 +1036,7 @@ async def _persist_new_account(
                 account_payment_invoice=account_payment_invoice,
                 proxy=saved_proxy,
                 proxy_pool_id=saved_proxy_pool_id,
+                api_credential_pool_id=api_credential_pool_id,
             )
             break
         except Exception as e:
@@ -1105,6 +1119,7 @@ async def process_password(message: Message, state: FSMContext, db: Database, us
             data.get("auto_proxy"),
             data.get("auto_proxy_pool_id"),
             data.get("account_payment_invoice"),
+            data.get("api_credential_pool_id"),
         )
 
         # The account is genuinely created at this point — nothing past
@@ -1326,6 +1341,7 @@ async def _confirm_code(event, state: FSMContext, db: Database, userbot_manager:
             data.get("auto_proxy"),
             data.get("auto_proxy_pool_id"),
             data.get("account_payment_invoice"),
+            data.get("api_credential_pool_id"),
         )
 
         # Same reasoning as process_password above — the account already

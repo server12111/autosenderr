@@ -748,6 +748,9 @@ def admin_keyboard() -> InlineKeyboardMarkup:
         _btn("🌐 Пул прокси", callback_data="admin_proxy_pool", style="primary"),
     )
     builder.row(
+        _btn("🔑 Пул API ID", callback_data="admin_api_pool", style="primary"),
+    )
+    builder.row(
         _btn("🔍 Диагностика", callback_data="admin_diagnostics", style="primary"),
         _btn("🗑 Мёртвые аккаунты", callback_data="admin_cleanup_accounts", style="primary"),
     )
@@ -917,6 +920,23 @@ def admin_proxy_pool_keyboard(proxies: list, page: int = 0) -> InlineKeyboardMar
         )
     _paginate_nav_row(builder, page, total_pages, "admin_proxy_pool_page")
     builder.row(_btn("➕ Добавить прокси", callback_data="admin_add_proxy", style="success"))
+    builder.row(_btn("◀️ Назад", callback_data="admin_back", style="primary"))
+    return builder.as_markup()
+
+
+def admin_api_pool_keyboard(credentials: list, page: int = 0) -> InlineKeyboardMarkup:
+    """credentials: list of (PoolApiCredential, account_count) tuples."""
+    builder = InlineKeyboardBuilder()
+    total_pages = max(1, (len(credentials) + LIST_PAGE_SIZE - 1) // LIST_PAGE_SIZE)
+    page = max(0, min(page, total_pages - 1))
+    for cred, count in credentials[page * LIST_PAGE_SIZE:(page + 1) * LIST_PAGE_SIZE]:
+        status = "🟢" if cred.is_active else "⚫️"
+        builder.row(
+            _btn(f"{status} {cred.api_id} [{count}]", callback_data=f"admin_api_info:{cred.id}", style="primary"),
+            _btn("🗑️", callback_data=f"admin_delete_api:{cred.id}", style="danger"),
+        )
+    _paginate_nav_row(builder, page, total_pages, "admin_api_pool_page")
+    builder.row(_btn("➕ Добавить api_id", callback_data="admin_add_api", style="success"))
     builder.row(_btn("◀️ Назад", callback_data="admin_back", style="primary"))
     return builder.as_markup()
 
