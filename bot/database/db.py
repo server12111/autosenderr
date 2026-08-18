@@ -1118,6 +1118,12 @@ class Database:
     async def get_least_loaded_api_credential(
         self, exclude_id: Optional[int] = None, cap: Optional[int] = None
     ) -> Optional["PoolApiCredential"]:
+        """`cap` is a soft preference, not a hard refusal: if every credential
+        is already at/over cap, this still returns the least-loaded one
+        instead of None — the operator explicitly wants every account kept
+        on a pool credential rather than ever falling back to the single old
+        shared config.DEFAULT_API_ID once the pool is non-empty. Only a
+        genuinely empty (or all-inactive) pool returns None."""
         inner = (
             "SELECT c.id, c.api_id, c.api_hash, c.is_active, c.added_by, c.created_at, "
             "(SELECT COUNT(*) FROM accounts a WHERE a.api_credential_pool_id = c.id AND a.is_active = 1) as cnt "
@@ -1127,19 +1133,22 @@ class Database:
         if exclude_id is not None:
             inner += " AND c.id != ?"
             params.append(exclude_id)
-        query = f"SELECT * FROM ({inner}) WHERE 1=1"
+        base_query = f"SELECT * FROM ({inner}) WHERE 1=1"
+        row = None
         if cap is not None:
-            query += " AND cnt < ?"
-            params.append(cap)
-        query += " ORDER BY cnt ASC, id ASC LIMIT 1"
-        async with self._conn.execute(query, params) as cur:
-            row = await cur.fetchone()
-            if not row:
-                return None
-            return PoolApiCredential(
-                id=row["id"], api_id=row["api_id"], api_hash=row["api_hash"], is_active=bool(row["is_active"]),
-                added_by=row["added_by"], created_at=self._parse_datetime(row["created_at"]),
-            )
+            async with self._conn.execute(
+                base_query + " AND cnt < ? ORDER BY cnt ASC, id ASC LIMIT 1", params + [cap]
+            ) as cur:
+                row = await cur.fetchone()
+        if not row:
+            async with self._conn.execute(base_query + " ORDER BY cnt ASC, id ASC LIMIT 1", params) as cur:
+                row = await cur.fetchone()
+        if not row:
+            return None
+        return PoolApiCredential(
+            id=row["id"], api_id=row["api_id"], api_hash=row["api_hash"], is_active=bool(row["is_active"]),
+            added_by=row["added_by"], created_at=self._parse_datetime(row["created_at"]),
+        )
 
     async def delete_api_credential(self, pool_id: int, cap: int = POOL_API_CREDENTIAL_ACCOUNT_CAP) -> list[int]:
         """Reassign any accounts still on this credential to another pool
