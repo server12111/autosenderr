@@ -19,10 +19,14 @@ _SETTINGS_TTL = 60      # seconds — settings/prices
 _CHANNELS_TTL = 300     # seconds — required channels list
 POOL_PROXY_ACCOUNT_CAP = 20   # max active accounts per pool proxy — many accounts on
                               # one IP is a strong Telegram anti-spam signal (frozen/FloodWait)
-POOL_API_CREDENTIAL_ACCOUNT_CAP = 12  # max active accounts per api_id/api_hash pair —
+POOL_API_CREDENTIAL_ACCOUNT_CAP = 20  # max active accounts per api_id/api_hash pair —
                               # api_id reputation is tracked globally by Telegram across every
                               # chat, not just ones this bot touches, so many phone numbers
-                              # sharing one app identity is its own independent spam signal
+                              # sharing one app identity is its own independent spam signal.
+                              # The operator plans to keep adding more credentials via the
+                              # admin panel over time, so this stays close to the originally
+                              # recommended 10-20 range rather than being raised to cover
+                              # everyone on just the first few added.
 
 # SQLite cannot bind table/column identifiers.  Keep the only dynamic DDL in
 # migrations behind this exact allowlist so no caller can turn _add_col() into
