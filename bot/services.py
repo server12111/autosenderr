@@ -2130,6 +2130,15 @@ class MailingService:
                     mailing_id=mailing_id,
                     chat_identifier=str(target),
                 )
+            if _FROZEN_ACCOUNT_MARKER in str(e).lower():
+                # Same as the frozen check in the main send path — without
+                # this, a frozen account that isn't yet a member of the
+                # target chat fails here on every join attempt forever
+                # (this join step runs before any send is even attempted),
+                # never reaching the send-path check that would have
+                # caught it and stopped the mailing.
+                await self._handle_mailing_ban(mailing_id, account_id, e)
+                return False
             logger.warning(f"Mailing {mailing_id}: failed to join '{target}': {e}")
             return False
 
