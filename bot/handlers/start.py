@@ -18,6 +18,7 @@ from ..keyboards.inline import (
 )
 from ..config import config
 from ..utils.premium_emoji import pe
+from ..utils.tg import safe_edit_markup
 
 router = Router()
 
@@ -195,7 +196,7 @@ async def callback_required_channels_page(callback: CallbackQuery, db: Database)
     page = int(callback.data.split(":")[1])
     channels = await db.get_required_channels()
     not_subscribed = await check_channels_subscription(callback.bot, callback.from_user.id, channels)
-    await callback.message.edit_reply_markup(reply_markup=channel_check_keyboard(not_subscribed, page=page))
+    await safe_edit_markup(callback.message, reply_markup=channel_check_keyboard(not_subscribed, page=page))
     await callback.answer()
 
 

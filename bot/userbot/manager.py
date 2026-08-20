@@ -537,19 +537,27 @@ class UserbotManager:
                     del self._clients[account.id]
                     self._me_ids.pop(account.id, None)
                 else:
+                    proxy = _parse_proxy(account.proxy)
+                    client = TelegramClient(
+                        StringSession(account.session_string), account.api_id, account.api_hash,
+                        proxy=proxy,
+                        connection_retries=3,
+                        retry_delay=5,
+                    )
                     try:
-                        proxy = _parse_proxy(account.proxy)
-                        client = TelegramClient(
-                            StringSession(account.session_string), account.api_id, account.api_hash,
-                            proxy=proxy,
-                            connection_retries=3,
-                            retry_delay=5,
-                        )
                         await client.connect()
                         await client.log_out()
-                        await client.disconnect()
                     except Exception as e:
                         logger.warning(f"Failed to log out account {account.id}: {e}")
+                    finally:
+                        # connect()/log_out() can be cancelled by the
+                        # wait_for timeout below (CancelledError is a
+                        # BaseException, not caught above) — disconnect
+                        # here unconditionally so the socket isn't leaked.
+                        try:
+                            await client.disconnect()
+                        except Exception:
+                            pass
 
         try:
             # The account lock can be held for a long time by the daily

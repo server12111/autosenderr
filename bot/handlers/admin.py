@@ -48,7 +48,7 @@ from ..services import MailingService
 from ..utils.premium_emoji import pe
 from ..utils.time_utils import now_moscow
 from .accounts import _test_proxy_connection
-from ..utils.tg import edit_or_answer, safe_answer
+from ..utils.tg import edit_or_answer, safe_answer, safe_edit_markup
 from ..utils.proxy import normalize_proxy_string
 
 router = Router()
@@ -979,7 +979,7 @@ async def callback_admin_api_pool_page(callback: CallbackQuery, db: Database):
         return
     page = int(callback.data.split(":")[1])
     await callback.answer()
-    await callback.message.edit_reply_markup(reply_markup=admin_api_pool_keyboard(await db.get_api_credential_pool(), page=page))
+    await safe_edit_markup(callback.message, reply_markup=admin_api_pool_keyboard(await db.get_api_credential_pool(), page=page))
 
 
 # === Settings panel ===
@@ -1384,7 +1384,7 @@ async def callback_admin_proxy_pool_page(callback: CallbackQuery, db: Database):
         await callback.answer("Нет доступа", show_alert=True)
         return
     page = int(callback.data.split(":")[1])
-    await callback.message.edit_reply_markup(reply_markup=admin_proxy_pool_keyboard(await db.get_pool_proxies(), page=page))
+    await safe_edit_markup(callback.message, reply_markup=admin_proxy_pool_keyboard(await db.get_pool_proxies(), page=page))
     await callback.answer()
 
 
