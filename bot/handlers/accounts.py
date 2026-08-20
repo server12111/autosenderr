@@ -1202,12 +1202,14 @@ async def callback_code_digit(callback: CallbackQuery, state: FSMContext):
     await state.update_data(entered_code=new_code)
 
     display = _format_code_display(new_code)
-    await callback.message.edit_text(
+    await safe_edit(
+        callback.message,
         pe(f"📱 Код отправлен!\n\n"
         f"🔢 Введите код с помощью кнопок:\n\n"
         f"Код: {display}"),
         parse_mode="HTML",
         reply_markup=code_input_keyboard(),
+        retries=0,
     )
     await callback.answer()
 
@@ -1231,12 +1233,14 @@ async def callback_code_backspace(callback: CallbackQuery, state: FSMContext):
     await state.update_data(entered_code=new_code)
 
     display = _format_code_display(new_code)
-    await callback.message.edit_text(
+    await safe_edit(
+        callback.message,
         pe(f"📱 Код отправлен!\n\n"
         f"🔢 Введите код с помощью кнопок:\n\n"
         f"Код: {display}"),
         parse_mode="HTML",
         reply_markup=code_input_keyboard(),
+        retries=0,
     )
     await callback.answer()
 
@@ -1252,12 +1256,14 @@ async def callback_code_clear(callback: CallbackQuery, state: FSMContext):
     await state.update_data(entered_code="")
 
     display = _format_code_display("")
-    await callback.message.edit_text(
+    await safe_edit(
+        callback.message,
         pe(f"📱 Код отправлен!\n\n"
         f"🔢 Введите код с помощью кнопок:\n\n"
         f"Код: {display}"),
         parse_mode="HTML",
         reply_markup=code_input_keyboard(),
+        retries=0,
     )
     await callback.answer("Код очищен")
 
