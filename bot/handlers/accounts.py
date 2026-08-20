@@ -34,6 +34,7 @@ from ..services import CryptoBotService, TonPaymentService, MailingService
 from ..utils.errors import friendly_error
 from ..utils.time_utils import now_moscow
 from ..utils.tg import safe_answer, safe_edit
+from ..utils.proxy import normalize_proxy_string
 
 
 def _is_blocked_proxy_address(address: str) -> bool:
@@ -673,7 +674,7 @@ async def callback_add_account_skip_proxy(callback: CallbackQuery, state: FSMCon
 
 @router.message(AddAccountStates.waiting_proxy)
 async def process_proxy(message: Message, state: FSMContext):
-    text = message.text.strip() if message.text else ""
+    text = normalize_proxy_string(message.text.strip() if message.text else "")
 
     if not text.startswith("socks5://"):
         await message.answer(
@@ -1641,6 +1642,7 @@ async def process_set_proxy(message: Message, state: FSMContext, db: Database, u
         )
         return
 
+    text = normalize_proxy_string(text)
     if not text.startswith("socks5://"):
         await message.answer(
             pe("❌ Неверный формат. Введите прокси в формате:\n"

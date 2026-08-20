@@ -49,6 +49,7 @@ from ..utils.premium_emoji import pe
 from ..utils.time_utils import now_moscow
 from .accounts import _test_proxy_connection
 from ..utils.tg import edit_or_answer, safe_answer
+from ..utils.proxy import normalize_proxy_string
 
 router = Router()
 logger = logging.getLogger(__name__)
@@ -755,7 +756,7 @@ async def process_admin_add_proxy(message: Message, state: FSMContext, db: Datab
     if not is_admin(message.from_user.id):
         await state.clear()
         return
-    text = (message.text or "").strip()
+    text = normalize_proxy_string((message.text or "").strip())
     if not text.startswith("socks5://"):
         await message.answer(
             pe("❌ Неверный формат. Введите прокси в формате:\n"
