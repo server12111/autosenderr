@@ -886,6 +886,10 @@ _FREE_TIER_SIGNATURE = "\n━━━━━━━━━━\n🤖 Отправле�
 _RESTORED_MAILING_START_STEP_SECONDS = 0.30
 _RESTORED_MAILING_MAX_START_DELAY_SECONDS = 30.0
 
+# How often buffered mailing_targets.last_sent_at writes are flushed to the
+# DB in one batch — see MailingService._pending_last_sent.
+_LAST_SENT_FLUSH_INTERVAL_SECONDS = 3.0
+
 
 class MailingService:
     def __init__(self, db: Database, userbot_manager):
@@ -915,6 +919,16 @@ class MailingService:
         # must not forget an account is still in an active flood window and
         # re-notify about the very same episode on the next reconnect/send.
 
+        # target_id -> (sent_at, account_id), flushed to the DB in one batch
+        # every _LAST_SENT_FLUSH_INTERVAL_SECONDS instead of one commit per
+        # send — see _flush_last_sent_loop. A crash before the next flush
+        # loses at most that interval's worth of bookkeeping (a target could
+        # be sent to once more than intended after a restart) — a bounded,
+        # deliberate tradeoff for cutting the DB's dominant write source by
+        # an order of magnitude under load.
+        self._pending_last_sent: dict[int, tuple[datetime, Optional[int]]] = {}
+        self._flush_task: Optional[asyncio.Task] = None
+
     async def start(self):
         self._running = True
         mailings = await self.db.get_active_mailings()
@@ -924,12 +938,55 @@ class MailingService:
                 _RESTORED_MAILING_MAX_START_DELAY_SECONDS,
             )
             await self._start_mailing_task(mailing.id, initial_delay=initial_delay)
+        self._flush_task = asyncio.create_task(self._flush_last_sent_loop())
         logger.info(
             "Mailing service started with %s active mailings "
             "(restored starts spread over up to %.0fs)",
             len(mailings),
             _RESTORED_MAILING_MAX_START_DELAY_SECONDS,
         )
+
+    async def _flush_last_sent_loop(self):
+        while self._running:
+            await asyncio.sleep(_LAST_SENT_FLUSH_INTERVAL_SECONDS)
+            await self._flush_last_sent()
+
+    async def _flush_last_sent(self):
+        if not self._pending_last_sent:
+            return
+        # Swap the dict out before awaiting the DB write so sends that land
+        # while the flush is in flight go into a fresh dict instead of
+        # racing with iteration over the one being written.
+        batch = self._pending_last_sent
+        self._pending_last_sent = {}
+        try:
+            await self.db.flush_target_last_sent(batch)
+        except Exception:
+            logger.error("Failed to flush batched last_sent_at updates (%d targets)", len(batch), exc_info=True)
+            # Put them back so the next flush retries rather than silently
+            # dropping this batch — a newer update for the same target_id
+            # (if one arrived since) correctly wins since dict union below
+            # keeps the newer side.
+            self._pending_last_sent = {**batch, **self._pending_last_sent}
+
+    def _record_sent(self, target_id: int, account_id: Optional[int]):
+        """Buffer a successful send for the next batched flush instead of
+        writing to the DB immediately — see _pending_last_sent."""
+        self._pending_last_sent[target_id] = (now_moscow(), account_id)
+
+    def _apply_pending_last_sent(self, targets: list):
+        """A target just sent to but not yet flushed still has its old
+        last_sent_at in the DB row get_mailing_targets() just fetched — apply
+        any not-yet-flushed value on top so the per-target interval check
+        below sees the real last-send time, not a stale one from before the
+        flush. Without this, a target could be sent to twice within one
+        flush interval."""
+        if not self._pending_last_sent:
+            return
+        for t in targets:
+            pending = self._pending_last_sent.get(t.id)
+            if pending:
+                t.last_sent_at, t.last_account_id = pending
 
     async def stop(self):
         self._running = False
@@ -940,6 +997,16 @@ class MailingService:
             await asyncio.gather(*tasks, return_exceptions=True)
         self._tasks.clear()
         self._working_targets.clear()
+        if self._flush_task:
+            self._flush_task.cancel()
+            try:
+                await self._flush_task
+            except asyncio.CancelledError:
+                pass
+            self._flush_task = None
+        # Flush whatever's left on a clean shutdown — a deploy restart
+        # shouldn't lose bookkeeping that a graceful stop could have saved.
+        await self._flush_last_sent()
 
     async def start_mailing(self, mailing_id: int) -> bool:
         mailing = await self.db.get_mailing(mailing_id)
@@ -1387,6 +1454,7 @@ class MailingService:
 
                     messages = await self.db.get_mailing_messages(mailing_id)
                     targets = await self.db.get_mailing_targets(mailing_id)
+                    self._apply_pending_last_sent(targets)
 
                     if not messages or not targets:
                         self._clear_working_targets(mailing_id)
@@ -1574,22 +1642,11 @@ class MailingService:
                                 logger.info(f"Mailing {mailing_id}: ✓ sent to {target} via account {current_account_id}")
                             else:
                                 logger.debug(f"Mailing {mailing_id}: ✓ sent to {target} via account {current_account_id}")
-                            # The message was genuinely delivered at this
-                            # point — a failure recording last_sent_at (e.g.
-                            # transient DB lock contention) must not be
-                            # misrouted into the except clauses below as if
-                            # the SEND itself had failed. Left unrecorded,
-                            # the next cycle's interval check would think
-                            # nothing was sent and re-send to this same
-                            # target — a real duplicate-message bug, not
-                            # just a cosmetic log entry.
-                            try:
-                                await self.db.update_target_last_sent(target_obj.id, current_account_id)
-                            except Exception as book_e:
-                                logger.error(
-                                    f"Mailing {mailing_id}: failed to record last_sent_at for target "
-                                    f"{target_obj.id} after a successful send: {book_e}"
-                                )
+                            # The message was genuinely delivered at this point —
+                            # buffered for the next batched flush (see
+                            # _pending_last_sent) rather than written immediately,
+                            # so this can't fail the way a DB call could.
+                            self._record_sent(target_obj.id, current_account_id)
                             self._mark_target_working(mailing_id, target_obj.id)
                             sent_any = True
                             cycle_sent += 1
@@ -1721,16 +1778,8 @@ class MailingService:
                                 )
                             if fallback_sent:
                                 # Same reasoning as the main send path above —
-                                # the fallback text was genuinely delivered;
-                                # a bookkeeping failure here must not abort
-                                # the cycle or risk a duplicate send next time.
-                                try:
-                                    await self.db.update_target_last_sent(target_obj.id, current_account_id)
-                                except Exception as book_e:
-                                    logger.error(
-                                        f"Mailing {mailing_id}: failed to record last_sent_at for target "
-                                        f"{target_obj.id} after a successful fallback send: {book_e}"
-                                    )
+                                # the fallback text was genuinely delivered.
+                                self._record_sent(target_obj.id, current_account_id)
                                 self._mark_target_working(mailing_id, target_obj.id)
                                 sent_any = True
                                 logger.info(f"Mailing {mailing_id}: media forbidden in '{target}', sent text-only fallback instead")
@@ -1793,13 +1842,7 @@ class MailingService:
                                     reply_to_id, add_sig, hidden_tag_user_ids,
                                 )
                                 if fallback_sent:
-                                    try:
-                                        await self.db.update_target_last_sent(target_obj.id, current_account_id)
-                                    except Exception as book_e:
-                                        logger.error(
-                                            f"Mailing {mailing_id}: failed to record last_sent_at for target "
-                                            f"{target_obj.id} after a successful fallback send: {book_e}"
-                                        )
+                                    self._record_sent(target_obj.id, current_account_id)
                                     self._mark_target_working(mailing_id, target_obj.id)
                                     sent_any = True
                                     logger.info(f"Mailing {mailing_id}: {type(e).__name__} in '{target}', sent text-only fallback instead")
@@ -2100,15 +2143,8 @@ class MailingService:
             # Same reasoning as the main send path in _mailing_loop — the
             # message was genuinely delivered, so a bookkeeping failure
             # here must not be misrouted into the except clauses below as
-            # a send failure (and must not risk a duplicate send next
-            # cycle from an unrecorded last_sent_at).
-            try:
-                await self.db.update_target_last_sent(target_obj.id, account_id)
-            except Exception as book_e:
-                logger.error(
-                    f"Mailing {mailing_id}: failed to record last_sent_at for target "
-                    f"{target_obj.id} after a successful auto-join send: {book_e}"
-                )
+            # a send failure — buffered like every other successful send.
+            self._record_sent(target_obj.id, account_id)
             logger.info(f"Mailing {mailing_id}: sent to '{target}' after auto-join")
             return True
         except _BAN_ERRORS as e:

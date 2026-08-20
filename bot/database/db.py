@@ -963,6 +963,14 @@ class Database:
     async def get_least_loaded_pool_proxy(
         self, exclude_id: Optional[int] = None, cap: Optional[int] = None
     ) -> Optional["PoolProxy"]:
+        """`cap` is a soft preference, not a hard refusal: an account left
+        with NO proxy at all (the old hard-cap behavior once every proxy hit
+        cap) connects through the bare server IP instead — a brand new
+        account doing mass messaging from an undisguised datacenter IP is a
+        far stronger spam-block trigger than merely sharing an already-loaded
+        pool proxy. So if every proxy is at/over cap, still return the
+        least-loaded one instead of None. Only a genuinely empty (or
+        all-inactive) pool returns None."""
         inner = (
             "SELECT p.id, p.proxy, p.is_active, p.added_by, p.created_at, "
             "(SELECT COUNT(*) FROM accounts a WHERE a.proxy_pool_id = p.id AND a.is_active = 1) as cnt "
@@ -972,19 +980,22 @@ class Database:
         if exclude_id is not None:
             inner += " AND p.id != ?"
             params.append(exclude_id)
-        query = f"SELECT * FROM ({inner}) WHERE 1=1"
+        base_query = f"SELECT * FROM ({inner}) WHERE 1=1"
+        row = None
         if cap is not None:
-            query += " AND cnt < ?"
-            params.append(cap)
-        query += " ORDER BY cnt ASC, id ASC LIMIT 1"
-        async with self._conn.execute(query, params) as cur:
-            row = await cur.fetchone()
-            if not row:
-                return None
-            return PoolProxy(
-                id=row["id"], proxy=row["proxy"], is_active=bool(row["is_active"]),
-                added_by=row["added_by"], created_at=self._parse_datetime(row["created_at"]),
-            )
+            async with self._conn.execute(
+                base_query + " AND cnt < ? ORDER BY cnt ASC, id ASC LIMIT 1", params + [cap]
+            ) as cur:
+                row = await cur.fetchone()
+        if not row:
+            async with self._conn.execute(base_query + " ORDER BY cnt ASC, id ASC LIMIT 1", params) as cur:
+                row = await cur.fetchone()
+        if not row:
+            return None
+        return PoolProxy(
+            id=row["id"], proxy=row["proxy"], is_active=bool(row["is_active"]),
+            added_by=row["added_by"], created_at=self._parse_datetime(row["created_at"]),
+        )
 
     async def find_own_proxy_with_room(self, user_id: int, cap: int = 3) -> Optional[str]:
         """A proxy the user already typed in themselves (not pool-assigned) that
@@ -1735,11 +1746,23 @@ class Database:
         ) as cur:
             return [dict(row) for row in await cur.fetchall()]
 
-    async def update_target_last_sent(self, target_id: int, account_id: Optional[int] = None):
+    async def flush_target_last_sent(self, updates: dict[int, tuple[datetime, Optional[int]]]):
+        """Batched write of mailing_targets.last_sent_at/last_account_id —
+        one commit for many targets instead of one commit per send. This is
+        the single highest-
+        frequency write in the app (one per successful send, across every
+        active mailing), and SQLite only allows one writer at a time, so
+        collapsing many small commits into periodic batches is what actually
+        raises the account/mailing count the fleet can sustain before write
+        contention causes "database is locked" errors — see
+        MailingService._flush_last_sent_loop, which calls this every few
+        seconds instead of on every single send."""
+        if not updates:
+            return
         async with self._transaction_lock:
-            await self._conn.execute(
+            await self._conn.executemany(
                 "UPDATE mailing_targets SET last_sent_at = ?, last_account_id = ? WHERE id = ?",
-                (now_moscow().isoformat(), account_id, target_id),
+                [(sent_at.isoformat(), account_id, target_id) for target_id, (sent_at, account_id) in updates.items()],
             )
             await self._conn.commit()
 
