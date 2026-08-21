@@ -381,7 +381,10 @@ async def process_parser_folder(message: Message, state: FSMContext, userbot_man
                 added += 1
         await state.update_data(chats=chats)
         await state.set_state(ParserSetupStates.waiting_chats)
-        await loading_msg.delete()
+        try:
+            await loading_msg.delete()
+        except Exception:
+            pass
         skipped = len(entities) - added
         summary = f"✅ Добавлено {added} чатов из папки! Всего: {len(chats)}"
         if skipped > 0:
@@ -394,7 +397,10 @@ async def process_parser_folder(message: Message, state: FSMContext, userbot_man
         )
     except Exception as e:
         logger.error(f"Parser folder import failed for slug {slug}: {e}")
-        await loading_msg.delete()
+        try:
+            await loading_msg.delete()
+        except Exception:
+            pass
         await state.set_state(ParserSetupStates.waiting_chats)
         await message.answer(
             pe(friendly_error(e, default="❌ Не удалось получить чаты из папки. Проверьте ссылку и попробуйте снова.")),

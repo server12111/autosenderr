@@ -879,7 +879,10 @@ async def _connect_and_send_code(message: Message, state: FSMContext, data: dict
         sent = await asyncio.wait_for(client.send_code_request(phone), timeout=30)
 
         await state.update_data(client=client, entered_code="", phone_code_hash=sent.phone_code_hash)
-        await status_msg.delete()
+        try:
+            await status_msg.delete()
+        except Exception:
+            pass
         code_message = await message.answer(
             pe("📱 Код отправлен!\n\n"
             "📲 Проверьте приложение Telegram на других ваших устройствах или Telegram Web — "
@@ -895,7 +898,10 @@ async def _connect_and_send_code(message: Message, state: FSMContext, data: dict
     except asyncio.TimeoutError:
         if client:
             await client.disconnect()
-        await status_msg.delete()
+        try:
+            await status_msg.delete()
+        except Exception:
+            pass
         if auto_proxy_pool_id:
             # A brand-new account has no DB row yet to route through the
             # normal dead-proxy-detection path — without this, the proxy
@@ -917,7 +923,10 @@ async def _connect_and_send_code(message: Message, state: FSMContext, data: dict
     except Exception as e:
         if client:
             await client.disconnect()
-        await status_msg.delete()
+        try:
+            await status_msg.delete()
+        except Exception:
+            pass
         if auto_proxy_pool_id and isinstance(e, (OSError, ConnectionError)):
             # Same reasoning as the TimeoutError branch above.
             asyncio.create_task(userbot_manager._handle_pool_proxy_failure(auto_proxy_pool_id, str(e)))

@@ -283,7 +283,10 @@ async def callback_cancel(callback: CallbackQuery, state: FSMContext, db: Databa
         try:
             await callback.message.edit_text(text, parse_mode="HTML", reply_markup=markup)
         except Exception:
-            await callback.message.delete()
+            try:
+                await callback.message.delete()
+            except Exception:
+                pass
             await callback.message.answer(text, parse_mode="HTML", reply_markup=markup)
 
     if not current_state:

@@ -1259,7 +1259,10 @@ async def process_edit_folder(
 
         chats = getattr(result, 'chats', [])
         if not chats:
-            await loading_msg.delete()
+            try:
+                await loading_msg.delete()
+            except Exception:
+                pass
             await message.answer(pe("❌ Папка пуста или не удалось получить чаты."), parse_mode="HTML")
             return
 
@@ -1281,7 +1284,10 @@ async def process_edit_folder(
         await state.clear()
         targets = await db.get_mailing_targets(mailing_id)
 
-        await loading_msg.delete()
+        try:
+            await loading_msg.delete()
+        except Exception:
+            pass
         await message.answer(
             pe(f"✅ Добавлено {added} чатов из папки! Всего чатов: {len(targets)}"),
             parse_mode="HTML",
@@ -1308,7 +1314,10 @@ async def process_edit_folder(
             )
             return
         logger.error(f"Error resolving folder {slug}: {e}")
-        await loading_msg.delete()
+        try:
+            await loading_msg.delete()
+        except Exception:
+            pass
         await message.answer(
             pe(friendly_error(e, default="❌ Не удалось получить чаты из папки. Проверьте ссылку и попробуйте снова.")),
             parse_mode="HTML",
@@ -2281,7 +2290,10 @@ async def process_create_folder(
 
         chats = getattr(result, 'chats', [])
         if not chats:
-            await loading_msg.delete()
+            try:
+                await loading_msg.delete()
+            except Exception:
+                pass
             await message.answer(pe("❌ Папка пуста или не удалось получить чаты."), parse_mode="HTML")
             return
 
@@ -2303,7 +2315,10 @@ async def process_create_folder(
         await state.set_state(CreateMailingStates.adding_targets)
         targets = await db.get_mailing_targets(mailing_id)
 
-        await loading_msg.delete()
+        try:
+            await loading_msg.delete()
+        except Exception:
+            pass
         await message.answer(
             pe(f"✅ Добавлено {added} чатов из папки! Всего чатов: {len(targets)}\n\nДобавьте ещё или нажмите «Готово»:"),
             parse_mode="HTML",
@@ -2326,7 +2341,10 @@ async def process_create_folder(
             )
             return
         logger.error(f"Error resolving folder {slug}: {e}")
-        await loading_msg.delete()
+        try:
+            await loading_msg.delete()
+        except Exception:
+            pass
         await message.answer(
             pe(friendly_error(e, default="❌ Не удалось получить чаты из папки. Проверьте ссылку и попробуйте снова.")),
             parse_mode="HTML",

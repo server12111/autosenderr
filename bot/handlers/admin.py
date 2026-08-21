@@ -243,7 +243,10 @@ async def _send_stats(callback: CallbackQuery, db: Database, period: str, bot):
     )
 
     keyboard = admin_stats_period_keyboard(active=period)
-    await callback.message.delete()
+    try:
+        await callback.message.delete()
+    except Exception:
+        pass
 
     if chart_buf:
         photo = BufferedInputFile(chart_buf.read(), filename="stats.png")
