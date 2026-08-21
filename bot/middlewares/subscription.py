@@ -35,6 +35,8 @@ class SubscriptionMiddleware(BaseMiddleware):
         "activate_free_tier",
         "activate_free_tier_confirm",
         "dm_mailing_info",
+        "tools",
+        "parser_intro",
     }
 
     EXEMPT_CALLBACK_PREFIXES = (

@@ -5,7 +5,7 @@ from typing import Optional
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
-from ..database.db import Account, Mailing, MailingMessage, MailingTarget, Promocode, RequiredChannel
+from ..database.db import Account, Mailing, MailingMessage, MailingTarget, ParserSettings, Promocode, RequiredChannel
 from ..utils.premium_emoji import EMOJI_MAP
 
 
@@ -57,7 +57,102 @@ def main_menu_keyboard() -> InlineKeyboardMarkup:
         _btn("💳 Подписка", callback_data="subscription", style="primary"),
         _btn("🤝 Рефералы", callback_data="referral", style="primary"),
     )
+    builder.row(_btn("🛠 Инструменты", callback_data="tools", style="primary"))
     builder.row(_btn("ℹ️ Помощь", callback_data="help", style="primary"))
+    return builder.as_markup()
+
+
+# === Tools / Parser ===
+
+def tools_menu_keyboard() -> InlineKeyboardMarkup:
+    builder = InlineKeyboardBuilder()
+    builder.row(_btn("🔎 Парсер сообщений", callback_data="parser_intro", style="primary"))
+    builder.row(_btn("◀️ Главное меню", callback_data="main_menu", style="primary"))
+    return builder.as_markup()
+
+
+def parser_intro_keyboard() -> InlineKeyboardMarkup:
+    builder = InlineKeyboardBuilder()
+    builder.row(_btn("▶️ Настроить парсер", callback_data="parser_configure", style="success"))
+    builder.row(_btn("📋 Мои парсеры", callback_data="parser_manage", style="primary"))
+    builder.row(_btn("◀️ Назад", callback_data="tools", style="primary"))
+    return builder.as_markup()
+
+
+def parser_manage_keyboard(parsers: list[tuple[ParserSettings, Account]], can_add: bool, page: int = 0) -> InlineKeyboardMarkup:
+    builder = InlineKeyboardBuilder()
+    total_pages = max(1, (len(parsers) + LIST_PAGE_SIZE - 1) // LIST_PAGE_SIZE)
+    page = max(0, min(page, total_pages - 1))
+    for settings, account in parsers[page * LIST_PAGE_SIZE:(page + 1) * LIST_PAGE_SIZE]:
+        status = "🟢" if settings.is_active else "⚫️"
+        builder.row(_btn(f"{status} {account.display_name}", callback_data=f"parser_view:{settings.account_id}", style="primary"))
+    _paginate_nav_row(builder, page, total_pages, "parser_manage_page")
+    if can_add:
+        builder.row(_btn("➕ Новый парсер", callback_data="parser_configure", style="success"))
+    builder.row(_btn("◀️ Назад", callback_data="parser_intro", style="primary"))
+    return builder.as_markup()
+
+
+def parser_view_keyboard(settings: ParserSettings) -> InlineKeyboardMarkup:
+    builder = InlineKeyboardBuilder()
+    toggle_text = "⏸ Остановить" if settings.is_active else "▶️ Запустить"
+    builder.row(_btn(toggle_text, callback_data=f"parser_toggle:{settings.account_id}", style="primary"))
+    builder.row(_btn("🗑️ Удалить", callback_data=f"parser_delete:{settings.account_id}", style="danger"))
+    builder.row(_btn("◀️ Назад", callback_data="parser_manage", style="primary"))
+    return builder.as_markup()
+
+
+def parser_delete_confirm_keyboard(account_id: int) -> InlineKeyboardMarkup:
+    builder = InlineKeyboardBuilder()
+    builder.row(
+        _btn("✅ Да, удалить", callback_data=f"parser_delete_confirm:{account_id}", style="danger"),
+        _btn("◀️ Отмена", callback_data=f"parser_view:{account_id}", style="primary"),
+    )
+    return builder.as_markup()
+
+
+def select_account_for_parser_keyboard(accounts: list[Account], page: int = 0) -> InlineKeyboardMarkup:
+    builder = InlineKeyboardBuilder()
+    total_pages = max(1, (len(accounts) + LIST_PAGE_SIZE - 1) // LIST_PAGE_SIZE)
+    page = max(0, min(page, total_pages - 1))
+    for acc in accounts[page * LIST_PAGE_SIZE:(page + 1) * LIST_PAGE_SIZE]:
+        builder.row(_btn(f"📱 {acc.display_name}", callback_data=f"parser_select_account:{acc.id}", style="primary"))
+    _paginate_nav_row(builder, page, total_pages, "parser_select_account_page")
+    builder.row(_btn("◀️ Назад", callback_data="parser_intro", style="primary"))
+    return builder.as_markup()
+
+
+def parser_chats_keyboard(chats: list[str]) -> InlineKeyboardMarkup:
+    builder = InlineKeyboardBuilder()
+    for i, chat in enumerate(chats):
+        builder.row(_btn(f"🗑️ {chat}", callback_data=f"parser_chat_del:{i}", style="danger"))
+    if chats:
+        builder.row(_btn("✅ Готово", callback_data="parser_chats_done", style="success"))
+    builder.row(_btn("❌ Отмена", callback_data="cancel", style="danger"))
+    return builder.as_markup()
+
+
+def parser_stopwords_keyboard() -> InlineKeyboardMarkup:
+    builder = InlineKeyboardBuilder()
+    builder.row(_btn("⏭ Пропустить", callback_data="parser_stopwords_skip", style="primary"))
+    builder.row(_btn("❌ Отмена", callback_data="cancel", style="danger"))
+    return builder.as_markup()
+
+
+def parser_autoreply_choice_keyboard() -> InlineKeyboardMarkup:
+    builder = InlineKeyboardBuilder()
+    builder.row(
+        _btn("✅ Да", callback_data="parser_autoreply_yes", style="success"),
+        _btn("🚫 Нет", callback_data="parser_autoreply_no", style="primary"),
+    )
+    builder.row(_btn("❌ Отмена", callback_data="cancel", style="danger"))
+    return builder.as_markup()
+
+
+def parser_notify_keyboard(sender_id: int, username: Optional[str]) -> InlineKeyboardMarkup:
+    builder = InlineKeyboardBuilder()
+    url = f"https://t.me/{username}" if username else f"tg://user?id={sender_id}"
+    builder.row(_btn("✉️ Написать", url=url, style="success"))
     return builder.as_markup()
 
 

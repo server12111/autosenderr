@@ -1,4 +1,5 @@
 import asyncio
+import hashlib
 import logging
 import html
 import json
@@ -65,7 +66,7 @@ import certifi
 
 from .config import config
 from .database.db import Database, is_safe_media_path
-from .keyboards.inline import subscription_expired_keyboard
+from .keyboards.inline import subscription_expired_keyboard, parser_notify_keyboard
 from .utils.time_utils import is_within_active_hours, now_moscow
 from .utils.delivery_journal import DeliveryJournal
 from .utils.premium_emoji import pe
@@ -889,6 +890,244 @@ _RESTORED_MAILING_MAX_START_DELAY_SECONDS = 30.0
 # How often buffered mailing_targets.last_sent_at writes are flushed to the
 # DB in one batch — see MailingService._pending_last_sent.
 _LAST_SENT_FLUSH_INTERVAL_SECONDS = 3.0
+
+# Message parser tool — see ParserService below.
+_PARSER_CACHE_CAP = 3000              # per-account, per-set hard cap (not TTL) —
+                                       # bounds memory regardless of chat traffic volume
+_PARSER_FLUSH_INTERVAL_SECONDS = 5.0
+_PARSER_MAX_MESSAGE_LEN = 200
+_PARSER_MAX_CHATS_PER_ACCOUNT = 20
+_PARSER_MAX_ACTIVE_PER_USER = 3
+
+
+class _BoundedSet:
+    """Fixed-capacity 'seen' set — insertion-order eviction once full.
+    Deliberately a hard cap, not a TTL: memory stays bounded no matter how
+    much traffic a watched chat produces (see ParserService)."""
+
+    def __init__(self, capacity: int):
+        self._capacity = capacity
+        self._data: dict = {}
+
+    def __contains__(self, item) -> bool:
+        return item in self._data
+
+    def add(self, item):
+        if item in self._data:
+            return
+        self._data[item] = None
+        if len(self._data) > self._capacity:
+            self._data.pop(next(iter(self._data)))
+
+
+class ParserService:
+    """Message parser tool: listens on chats the user configured (via the
+    already-connected Telethon clients in UserbotManager — no separate
+    connections), filters incoming messages through a funnel, and notifies
+    the owner + optionally sends a one-time auto-reply on a match.
+
+    Hot path (handle_message) never touches the DB — dedup state lives in
+    per-account in-memory _BoundedSet instances, persisted to bad_messages_cache/
+    parsed_users only as a periodic batch flush, mirroring MailingService's
+    _pending_last_sent."""
+
+    def __init__(self, db: Database, userbot_manager):
+        self.db = db
+        self.userbot_manager = userbot_manager
+        self._configs: dict[int, object] = {}          # account_id -> ParserSettings
+        self._seen_users: dict[int, _BoundedSet] = {}   # account_id -> set(sender_id)
+        self._seen_hashes: dict[int, _BoundedSet] = {}  # account_id -> set(text_hash)
+        self._pending_hashes: list[tuple[int, str, str]] = []
+        self._pending_users: list[tuple[int, int, str]] = []
+        self._flush_task: Optional[asyncio.Task] = None
+        self._running = False
+
+    async def start(self):
+        self._running = True
+        configs = await self.db.get_all_active_parser_settings()
+        for cfg in configs:
+            await self._load_config(cfg)
+        self.userbot_manager.set_parser_handler(self.handle_message)
+        self._flush_task = asyncio.create_task(self._flush_loop())
+        logger.info(f"Parser service started with {len(self._configs)} active parser(s)")
+
+    async def stop(self):
+        self._running = False
+        if self._flush_task:
+            self._flush_task.cancel()
+            try:
+                await self._flush_task
+            except asyncio.CancelledError:
+                pass
+            self._flush_task = None
+        await self._flush()
+
+    async def _load_config(self, cfg):
+        self._configs[cfg.account_id] = cfg
+        seen_users = _BoundedSet(_PARSER_CACHE_CAP)
+        for sender_id in await self.db.load_recent_parsed_users(cfg.account_id, _PARSER_CACHE_CAP):
+            seen_users.add(sender_id)
+        self._seen_users[cfg.account_id] = seen_users
+        seen_hashes = _BoundedSet(_PARSER_CACHE_CAP)
+        for text_hash in await self.db.load_recent_bad_hashes(cfg.account_id, _PARSER_CACHE_CAP):
+            seen_hashes.add(text_hash)
+        self._seen_hashes[cfg.account_id] = seen_hashes
+
+    async def reload_config(self, account_id: int):
+        """Called after the FSM saves/edits/toggles/deletes a parser config,
+        so a running bot picks up the change without a restart."""
+        cfg = await self.db.get_parser_settings(account_id)
+        if cfg and cfg.is_active:
+            await self._load_config(cfg)
+        else:
+            self._configs.pop(account_id, None)
+            self._seen_users.pop(account_id, None)
+            self._seen_hashes.pop(account_id, None)
+
+    async def join_chats(self, account_id: int, chats: list[str]) -> list[str]:
+        """Best-effort join for every configured chat so the account actually
+        receives NewMessage events for it. Returns the identifiers that
+        failed, so the setup wizard can tell the user which ones need manual
+        attention."""
+        client = await self.userbot_manager.get_client(account_id)
+        failed = []
+        if not client:
+            return list(chats)
+        for target in chats:
+            try:
+                if isinstance(target, str) and "t.me/+" in target:
+                    await client(ImportChatInviteRequest(target.rsplit("+", 1)[1]))
+                else:
+                    await client(JoinChannelRequest(target))
+                await asyncio.sleep(2)
+            except UserAlreadyParticipantError:
+                pass
+            except InviteRequestSentError:
+                failed.append(target)
+            except Exception as e:
+                logger.warning(f"Parser setup: account {account_id} failed to join '{target}': {e}")
+                failed.append(target)
+        return failed
+
+    async def _flush_loop(self):
+        while self._running:
+            await asyncio.sleep(_PARSER_FLUSH_INTERVAL_SECONDS)
+            await self._flush()
+
+    async def _flush(self):
+        if self._pending_hashes:
+            batch, self._pending_hashes = self._pending_hashes, []
+            try:
+                await self.db.flush_bad_message_hashes(batch)
+            except Exception:
+                logger.error("Failed to flush parser hash cache (%d entries)", len(batch), exc_info=True)
+                self._pending_hashes = batch + self._pending_hashes
+        if self._pending_users:
+            batch, self._pending_users = self._pending_users, []
+            try:
+                await self.db.flush_parsed_users(batch)
+            except Exception:
+                logger.error("Failed to flush parser seen-users cache (%d entries)", len(batch), exc_info=True)
+                self._pending_users = batch + self._pending_users
+
+    async def _ai_filter(self, text: str) -> bool:
+        return True
+
+    async def handle_message(self, event, account, me_id: int):
+        cfg = self._configs.get(account.id)
+        if not cfg:
+            return
+
+        text = (getattr(event, "raw_text", None) or "").strip()
+        if not text or len(text) > _PARSER_MAX_MESSAGE_LEN:
+            return
+
+        sender_id = event.sender_id
+        if sender_id is None or sender_id == me_id:
+            return
+
+        seen_users = self._seen_users.setdefault(account.id, _BoundedSet(_PARSER_CACHE_CAP))
+        if sender_id in seen_users:
+            return
+
+        text_hash = hashlib.md5(text.encode()).hexdigest()
+        seen_hashes = self._seen_hashes.setdefault(account.id, _BoundedSet(_PARSER_CACHE_CAP))
+        if text_hash in seen_hashes:
+            return
+
+        lower = text.lower()
+        stop_words = [w.strip().lower() for w in (cfg.stop_words or "").split(",") if w.strip()]
+        if any(w in lower for w in stop_words):
+            self._cache_bad_hash(account.id, text_hash, seen_hashes)
+            return
+
+        keywords = [w.strip().lower() for w in (cfg.keywords or "").split(",") if w.strip()]
+        if keywords and not any(w in lower for w in keywords):
+            self._cache_bad_hash(account.id, text_hash, seen_hashes)
+            return
+
+        if not await self._ai_filter(text):
+            self._cache_bad_hash(account.id, text_hash, seen_hashes)
+            return
+
+        # Mark seen BEFORE the notify/auto-reply side effects — the same
+        # gate that stops a second notification also guarantees the
+        # auto-reply fires at most once per sender, including against two
+        # near-simultaneous messages from them. The text hash is cached too
+        # (not just on rejection) so identical spam text blasted by several
+        # different senders only triggers one notification, not one per sender.
+        seen_users.add(sender_id)
+        self._pending_users.append((account.id, sender_id, now_moscow().isoformat()))
+        seen_hashes.add(text_hash)
+        self._pending_hashes.append((account.id, text_hash, now_moscow().isoformat()))
+
+        asyncio.create_task(self._on_match(event, account, cfg, sender_id, text))
+
+    def _cache_bad_hash(self, account_id: int, text_hash: str, seen_hashes: "_BoundedSet"):
+        seen_hashes.add(text_hash)
+        self._pending_hashes.append((account_id, text_hash, now_moscow().isoformat()))
+
+    async def _on_match(self, event, account, cfg, sender_id: int, text: str):
+        try:
+            sender = await event.get_sender()
+        except Exception:
+            sender = None
+        username = getattr(sender, "username", None)
+        first_name = (getattr(sender, "first_name", None) or "").strip()
+        last_name = (getattr(sender, "last_name", None) or "").strip()
+        display = f"@{username}" if username else ((f"{first_name} {last_name}").strip() or "Без имени")
+
+        chat_title = None
+        try:
+            chat = await event.get_chat()
+            chat_title = getattr(chat, "title", None)
+        except Exception:
+            pass
+        chat_title = chat_title or "чат"
+
+        notify = getattr(self.userbot_manager, "_bot_notify_callback", None)
+        if notify:
+            try:
+                user = await self.db.get_user_by_id(cfg.user_id)
+                if user:
+                    message_text = pe(
+                        f"🔎 <b>Парсер нашёл совпадение!</b>\n\n"
+                        f"{html.escape(text)}\n\n"
+                        f"Чат: {html.escape(chat_title)} | "
+                        f"Юзер: {html.escape(display)} (id: <code>{sender_id}</code>)"
+                    )
+                    await notify(
+                        user.telegram_id, message_text,
+                        parser_notify_keyboard(sender_id, username),
+                    )
+            except Exception:
+                logger.error("Failed to notify owner about parser match (account %s)", account.id, exc_info=True)
+
+        if cfg.auto_reply_enabled and cfg.auto_reply_text:
+            try:
+                await event.reply(cfg.auto_reply_text)
+            except Exception as e:
+                logger.warning(f"Parser auto-reply failed for account {account.id}: {e}")
 
 
 class MailingService:
@@ -2207,6 +2446,12 @@ class MailingService:
                     mailing_id=mailing_id,
                     chat_identifier=str(target),
                 )
+            if _FROZEN_ACCOUNT_MARKER in str(e).lower():
+                # Same reasoning as the join-step and main send-path checks —
+                # an account can also freeze exactly during this post-join
+                # retry send, not just at the join RPC itself.
+                await self._handle_mailing_ban(mailing_id, account_id, e)
+                return False
             logger.error(f"Mailing {mailing_id}: retry send to '{target}' failed after join: {e}")
             return False
 

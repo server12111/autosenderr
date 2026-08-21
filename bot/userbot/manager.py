@@ -74,7 +74,7 @@ _PHONE_LOCALE_PREFIXES = tuple(sorted(_PHONE_LOCALE, key=len, reverse=True))
 
 
 def _locale_for_phone(phone: Optional[str]) -> tuple[str, str]:
-    digits = (phone or "").lstrip("+").strip()
+    digits = (phone or "").strip().lstrip("+")
     for prefix in _PHONE_LOCALE_PREFIXES:
         if digits.startswith(prefix):
             return _PHONE_LOCALE[prefix]
@@ -142,6 +142,7 @@ class UserbotManager:
         self._monitor_task: Optional[asyncio.Task] = None
         self._startup_task: Optional[asyncio.Task] = None
         self._sponsor_check_handler: Optional[Callable] = None
+        self._parser_handler: Optional[Callable] = None
         self._client_locks: dict[int, asyncio.Lock] = {}
         self._proxy_failure_lock = asyncio.Lock()
         self._account_proxy_failure_callback: Optional[Callable] = None
@@ -164,6 +165,9 @@ class UserbotManager:
 
     def set_sponsor_check_handler(self, handler: Callable):
         self._sponsor_check_handler = handler
+
+    def set_parser_handler(self, handler: Callable):
+        self._parser_handler = handler
 
     async def start_client(self, account: Account) -> Optional[TelegramClient]:
         lock = self._client_locks.setdefault(account.id, asyncio.Lock())
@@ -257,6 +261,10 @@ class UserbotManager:
                     # Auto-subscribe to sponsor channels
                     if self._sponsor_check_handler and fresh_account.auto_subscribe_sponsors and not event.is_private:
                         await self._sponsor_check_handler(event, fresh_account, me_id)
+
+                    # Message parser tool
+                    if self._parser_handler and not event.is_private:
+                        await self._parser_handler(event, fresh_account, me_id)
 
                 except Exception as e:
                     logger.error(f"Error in message handler for account {account_id}: {e}", exc_info=True)
@@ -528,36 +536,51 @@ class UserbotManager:
             lock = self._client_locks.setdefault(account.id, asyncio.Lock())
             async with lock:
                 if account.id in self._clients:
-                    client = self._clients[account.id]
+                    # Pop before attempting logout — even if log_out() is
+                    # cancelled by the wait_for timeout below (CancelledError
+                    # is a BaseException, not caught by "except Exception"),
+                    # the entry is already gone so nothing else can pick up
+                    # a half-logged-out client, and the finally below still
+                    # guarantees disconnect() runs so the socket isn't leaked.
+                    client = self._clients.pop(account.id, None)
+                    self._me_ids.pop(account.id, None)
                     try:
                         await client.log_out()
                     except Exception:
                         pass
-                    await client.disconnect()
-                    del self._clients[account.id]
-                    self._me_ids.pop(account.id, None)
+                    finally:
+                        try:
+                            await client.disconnect()
+                        except Exception:
+                            pass
                 else:
-                    proxy = _parse_proxy(account.proxy)
-                    client = TelegramClient(
-                        StringSession(account.session_string), account.api_id, account.api_hash,
-                        proxy=proxy,
-                        connection_retries=3,
-                        retry_delay=5,
-                    )
+                    client = None
                     try:
+                        proxy = _parse_proxy(account.proxy)
+                        client = TelegramClient(
+                            StringSession(account.session_string), account.api_id, account.api_hash,
+                            proxy=proxy,
+                            connection_retries=3,
+                            retry_delay=5,
+                        )
                         await client.connect()
                         await client.log_out()
                     except Exception as e:
+                        # Covers bad proxy strings / client construction too,
+                        # not just connect()/log_out() — the DB-side deletion
+                        # proceeds regardless, so any failure here is fine to
+                        # just log and move on rather than propagate.
                         logger.warning(f"Failed to log out account {account.id}: {e}")
                     finally:
                         # connect()/log_out() can be cancelled by the
                         # wait_for timeout below (CancelledError is a
                         # BaseException, not caught above) — disconnect
                         # here unconditionally so the socket isn't leaked.
-                        try:
-                            await client.disconnect()
-                        except Exception:
-                            pass
+                        if client is not None:
+                            try:
+                                await client.disconnect()
+                            except Exception:
+                                pass
 
         try:
             # The account lock can be held for a long time by the daily

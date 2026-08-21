@@ -139,6 +139,27 @@ class PoolApiCredential:
 
 
 @dataclass
+class ParserSettings:
+    id: int
+    account_id: int
+    user_id: int
+    chats_list: str  # JSON array of chat identifiers
+    keywords: Optional[str]
+    stop_words: Optional[str]
+    auto_reply_enabled: bool
+    auto_reply_text: Optional[str]
+    is_active: bool
+    created_at: datetime
+
+    @property
+    def chats(self) -> list[str]:
+        try:
+            return json.loads(self.chats_list) or []
+        except (TypeError, ValueError):
+            return []
+
+
+@dataclass
 class Mailing:
     id: int
     user_id: int
@@ -457,6 +478,49 @@ class Database:
         )
         await self._conn.commit()
 
+        # Message parser tool
+        await self._conn.execute("""
+            CREATE TABLE IF NOT EXISTS parser_settings (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                account_id INTEGER NOT NULL UNIQUE REFERENCES accounts(id) ON DELETE CASCADE,
+                user_id INTEGER NOT NULL,
+                chats_list TEXT NOT NULL,
+                keywords TEXT,
+                stop_words TEXT,
+                auto_reply_enabled INTEGER NOT NULL DEFAULT 0,
+                auto_reply_text TEXT,
+                is_active INTEGER NOT NULL DEFAULT 1,
+                created_at DATETIME DEFAULT (datetime('now', '+3 hours'))
+            )
+        """)
+        await self._conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_parser_settings_user ON parser_settings (user_id)"
+        )
+        # Batched persistence for the parser's in-memory dedup caches (see
+        # ParserService) — not read/written on the hot path, only flushed
+        # periodically, so plain INSERT OR IGNORE + a lookup index is enough.
+        await self._conn.execute("""
+            CREATE TABLE IF NOT EXISTS bad_messages_cache (
+                account_id INTEGER NOT NULL,
+                text_hash TEXT NOT NULL,
+                created_at DATETIME DEFAULT (datetime('now', '+3 hours'))
+            )
+        """)
+        await self._conn.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_bad_msg_cache ON bad_messages_cache(account_id, text_hash)"
+        )
+        await self._conn.execute("""
+            CREATE TABLE IF NOT EXISTS parsed_users (
+                account_id INTEGER NOT NULL,
+                sender_id INTEGER NOT NULL,
+                created_at DATETIME DEFAULT (datetime('now', '+3 hours'))
+            )
+        """)
+        await self._conn.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_parsed_users ON parsed_users(account_id, sender_id)"
+        )
+        await self._conn.commit()
+
         # Seed default subscription prices if not set
         for plan_days, default_price in [(1, 0.3), (7, 1.0), (30, 3.0)]:
             key = f"price_{plan_days}d"
@@ -534,6 +598,20 @@ class Database:
             auto_subscribe_sponsors=bool(row["auto_subscribe_sponsors"]) if "auto_subscribe_sponsors" in keys and row["auto_subscribe_sponsors"] is not None else False,
             proxy_pool_id=row["proxy_pool_id"] if "proxy_pool_id" in keys else None,
             api_credential_pool_id=row["api_credential_pool_id"] if "api_credential_pool_id" in keys else None,
+        )
+
+    def _row_to_parser_settings(self, row) -> "ParserSettings":
+        return ParserSettings(
+            id=row["id"],
+            account_id=row["account_id"],
+            user_id=row["user_id"],
+            chats_list=row["chats_list"],
+            keywords=row["keywords"],
+            stop_words=row["stop_words"],
+            auto_reply_enabled=bool(row["auto_reply_enabled"]),
+            auto_reply_text=row["auto_reply_text"],
+            is_active=bool(row["is_active"]),
+            created_at=self._parse_datetime(row["created_at"]),
         )
 
     # === Users ===
@@ -1029,7 +1107,19 @@ class Database:
             return own_proxy, None, False
         pool = await self.get_least_loaded_pool_proxy(cap=cap)
         if pool:
-            return pool.proxy, pool.id, False
+            # get_least_loaded_pool_proxy(cap=...) itself falls back past the
+            # cap rather than returning None (see its docstring), so getting
+            # a pool proxy back here doesn't mean one was actually under cap
+            # — check directly so the admin alert below still fires when
+            # every proxy in the pool is at/over cap.
+            async with self._conn.execute(
+                """SELECT 1 FROM proxy_pool p WHERE p.is_active = 1
+                   AND (SELECT COUNT(*) FROM accounts a WHERE a.proxy_pool_id = p.id AND a.is_active = 1) < ?
+                   LIMIT 1""",
+                (cap,),
+            ) as cur:
+                under_cap_exists = (await cur.fetchone()) is not None
+            return pool.proxy, pool.id, not under_cap_exists
         any_pool = await self.get_least_loaded_pool_proxy()
         return None, None, any_pool is not None
 
@@ -1302,11 +1392,19 @@ class Database:
             ) as cur:
                 rows = await cur.fetchall()
             count = len(rows)
+            ids = [row["id"] for row in rows]
             await self._conn.execute(
                 "DELETE FROM accounts WHERE is_active = 0 "
                 "AND NOT EXISTS (SELECT 1 FROM mailings m WHERE m.account_id = accounts.id) "
                 "AND NOT EXISTS (SELECT 1 FROM mailing_accounts ma WHERE ma.account_id = accounts.id)"
             )
+            # parser_settings cascades via ON DELETE CASCADE, but the parser's
+            # dedup-cache tables have no FK (see ParserService) — clean them
+            # up here too so a purged account doesn't leave orphaned rows.
+            if ids:
+                placeholders = ",".join("?" * len(ids))
+                await self._conn.execute(f"DELETE FROM bad_messages_cache WHERE account_id IN ({placeholders})", ids)
+                await self._conn.execute(f"DELETE FROM parsed_users WHERE account_id IN ({placeholders})", ids)
             await self._conn.commit()
         for row in rows:
             async with self._conn.execute(
@@ -1343,6 +1441,11 @@ class Database:
         ) as cur:
             message_rows = await cur.fetchall()
         await self._conn.execute("DELETE FROM accounts WHERE id = ?", (account_id,))
+        # parser_settings cascades via ON DELETE CASCADE; the parser's
+        # dedup-cache tables have no FK (see ParserService) and need this
+        # explicit cleanup instead.
+        await self._conn.execute("DELETE FROM bad_messages_cache WHERE account_id = ?", (account_id,))
+        await self._conn.execute("DELETE FROM parsed_users WHERE account_id = ?", (account_id,))
         await self._conn.commit()
         if row:
             for path in (row["autoresponder_photo"], row["group_autoresponder_photo"]):
@@ -2549,3 +2652,109 @@ class Database:
             "active_mailings": active_mailings,
             "total_chats": total_chats,
         }
+
+    # === Message parser ===
+
+    async def count_active_parsers_for_user(self, user_id: int) -> int:
+        async with self._conn.execute(
+            "SELECT COUNT(*) as cnt FROM parser_settings WHERE user_id = ? AND is_active = 1", (user_id,)
+        ) as cur:
+            row = await cur.fetchone()
+            return int(row["cnt"] or 0)
+
+    async def create_parser_settings(
+        self, account_id: int, user_id: int, chats: list[str],
+        keywords: str, stop_words: Optional[str],
+        auto_reply_enabled: bool, auto_reply_text: Optional[str],
+    ) -> "ParserSettings":
+        async with self._transaction_lock:
+            # OR IGNORE: account_id is UNIQUE — a double-submit of the setup
+            # wizard (two sessions, or a retried final step) must not crash
+            # with an IntegrityError. The re-fetch below returns whichever
+            # row actually exists either way.
+            await self._conn.execute(
+                "INSERT OR IGNORE INTO parser_settings "
+                "(account_id, user_id, chats_list, keywords, stop_words, auto_reply_enabled, auto_reply_text, is_active) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, 1)",
+                (account_id, user_id, json.dumps(chats), keywords, stop_words,
+                 int(auto_reply_enabled), auto_reply_text),
+            )
+            await self._conn.commit()
+        return await self.get_parser_settings(account_id)
+
+    async def get_parser_settings(self, account_id: int) -> Optional["ParserSettings"]:
+        async with self._conn.execute(
+            "SELECT * FROM parser_settings WHERE account_id = ?", (account_id,)
+        ) as cur:
+            row = await cur.fetchone()
+            return self._row_to_parser_settings(row) if row else None
+
+    async def get_user_parser_settings(self, user_id: int) -> list["ParserSettings"]:
+        async with self._conn.execute(
+            "SELECT * FROM parser_settings WHERE user_id = ? ORDER BY created_at DESC", (user_id,)
+        ) as cur:
+            rows = await cur.fetchall()
+            return [self._row_to_parser_settings(r) for r in rows]
+
+    async def get_all_active_parser_settings(self) -> list["ParserSettings"]:
+        async with self._conn.execute(
+            "SELECT * FROM parser_settings WHERE is_active = 1"
+        ) as cur:
+            rows = await cur.fetchall()
+            return [self._row_to_parser_settings(r) for r in rows]
+
+    async def set_parser_active(self, account_id: int, is_active: bool):
+        async with self._transaction_lock:
+            await self._conn.execute(
+                "UPDATE parser_settings SET is_active = ? WHERE account_id = ?",
+                (int(is_active), account_id),
+            )
+            await self._conn.commit()
+
+    async def delete_parser_settings(self, account_id: int):
+        async with self._transaction_lock:
+            await self._conn.execute("DELETE FROM parser_settings WHERE account_id = ?", (account_id,))
+            await self._conn.execute("DELETE FROM bad_messages_cache WHERE account_id = ?", (account_id,))
+            await self._conn.execute("DELETE FROM parsed_users WHERE account_id = ?", (account_id,))
+            await self._conn.commit()
+
+    async def flush_bad_message_hashes(self, entries: list[tuple[int, str, str]]):
+        """entries: (account_id, text_hash, created_at_iso). Batched write —
+        see ParserService, mirrors flush_target_last_sent's reasoning."""
+        if not entries:
+            return
+        async with self._transaction_lock:
+            await self._conn.executemany(
+                "INSERT OR IGNORE INTO bad_messages_cache (account_id, text_hash, created_at) VALUES (?, ?, ?)",
+                entries,
+            )
+            await self._conn.commit()
+
+    async def flush_parsed_users(self, entries: list[tuple[int, int, str]]):
+        """entries: (account_id, sender_id, created_at_iso)."""
+        if not entries:
+            return
+        async with self._transaction_lock:
+            await self._conn.executemany(
+                "INSERT OR IGNORE INTO parsed_users (account_id, sender_id, created_at) VALUES (?, ?, ?)",
+                entries,
+            )
+            await self._conn.commit()
+
+    async def load_recent_bad_hashes(self, account_id: int, limit: int) -> list[str]:
+        """Warms ParserService's in-memory hash cache on startup so a restart
+        doesn't briefly re-notify about messages already seen and rejected."""
+        async with self._conn.execute(
+            "SELECT text_hash FROM bad_messages_cache WHERE account_id = ? ORDER BY created_at DESC LIMIT ?",
+            (account_id, limit),
+        ) as cur:
+            rows = await cur.fetchall()
+            return [r["text_hash"] for r in rows]
+
+    async def load_recent_parsed_users(self, account_id: int, limit: int) -> list[int]:
+        async with self._conn.execute(
+            "SELECT sender_id FROM parsed_users WHERE account_id = ? ORDER BY created_at DESC LIMIT ?",
+            (account_id, limit),
+        ) as cur:
+            rows = await cur.fetchall()
+            return [r["sender_id"] for r in rows]

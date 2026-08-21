@@ -22,7 +22,7 @@ from .handlers import setup_routers
 from .middlewares.subscription import SubscriptionMiddleware
 from .middlewares.album import AlbumMiddleware
 from .userbot.manager import UserbotManager
-from .services import CryptoBotService, TonPaymentService, PlategaService, AutoresponderService, MailingService, SubscriptionCheckerService, InactivityCleanupService, DeadAccountCleanupService
+from .services import CryptoBotService, TonPaymentService, PlategaService, AutoresponderService, MailingService, SubscriptionCheckerService, InactivityCleanupService, DeadAccountCleanupService, ParserService
 from .utils.time_utils import moscow_logging_converter
 
 
@@ -151,6 +151,8 @@ async def main():
 
     mailing_service = MailingService(db, userbot_manager)
 
+    parser_service = ParserService(db, userbot_manager)
+
     subscription_checker = SubscriptionCheckerService(db, mailing_service)
 
     inactivity_cleanup = InactivityCleanupService(db, userbot_manager)
@@ -159,7 +161,7 @@ async def main():
 
     notify_locks: dict[int, asyncio.Lock] = {}
 
-    async def notify_user(user_id: int, text: str):
+    async def notify_user(user_id: int, text: str, reply_markup=None):
         # Users with several accounts can have that many concurrent mailing
         # loops firing notifications (FloodWait, bans, proxy issues, ...) at
         # the same user chat_id around the same time. Telegram's per-chat
@@ -170,7 +172,7 @@ async def main():
         async with lock:
             for attempt in range(3):
                 try:
-                    await bot.send_message(user_id, text)
+                    await bot.send_message(user_id, text, reply_markup=reply_markup)
                     logger.info(f"Successfully sent notification to user {user_id}")
                     return
                 except TelegramRetryAfter as e:
@@ -229,6 +231,7 @@ async def main():
     dp["userbot_manager"] = userbot_manager
     dp["mailing_service"] = mailing_service
     dp["autoresponder_service"] = autoresponder_service
+    dp["parser_service"] = parser_service
 
     def _task_done_callback(task: asyncio.Task):
         if not task.cancelled():
@@ -251,6 +254,9 @@ async def main():
 
         await mailing_service.start()
         logger.info("Mailing service started")
+
+        await parser_service.start()
+        logger.info("Parser service started")
 
         subscription_checker.start(bot)
         if subscription_checker._task:
@@ -296,6 +302,8 @@ async def main():
                     await userbot_manager._monitor_task
         with contextlib.suppress(Exception):
             await mailing_service.stop()
+        with contextlib.suppress(Exception):
+            await parser_service.stop()
         with contextlib.suppress(Exception):
             await userbot_manager.stop_all_clients()
         with contextlib.suppress(Exception):
