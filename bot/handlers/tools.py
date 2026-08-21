@@ -1,3 +1,4 @@
+import asyncio
 import html
 import logging
 from typing import Optional
@@ -22,8 +23,10 @@ from ..keyboards.inline import (
 )
 from ..utils.tg import safe_answer, safe_edit
 from ..utils.premium_emoji import pe
+from ..utils.errors import friendly_error
 from ..services import ParserService, _PARSER_MAX_CHATS_PER_ACCOUNT, _PARSER_MAX_ACTIVE_PER_USER
-from .mailings import parse_chat_link
+from ..userbot.manager import UserbotManager
+from .mailings import parse_chat_link, parse_folder_slug, _parse_txt_targets, MAX_TXT_IMPORT_TARGETS
 
 logger = logging.getLogger(__name__)
 
@@ -33,6 +36,8 @@ router = Router()
 class ParserSetupStates(StatesGroup):
     waiting_account = State()
     waiting_chats = State()
+    waiting_folder = State()
+    waiting_txt_file = State()
     waiting_keywords = State()
     waiting_stopwords = State()
     waiting_autoreply_choice = State()
@@ -314,6 +319,168 @@ async def callback_parser_chat_del(callback: CallbackQuery, state: FSMContext):
         reply_markup=parser_chats_keyboard(chats),
     )
     await callback.answer()
+
+
+@router.callback_query(ParserSetupStates.waiting_chats, F.data == "parser_add_folder")
+async def callback_parser_add_folder(callback: CallbackQuery, state: FSMContext):
+    await state.set_state(ParserSetupStates.waiting_folder)
+    await safe_edit(
+        callback.message,
+        pe("📁 Отправьте ссылку на папку чатов:\n\n"
+           "Пример:\n"
+           "• https://t.me/addlist/xxxxx"),
+        parse_mode="HTML",
+        reply_markup=cancel_keyboard(),
+    )
+    await callback.answer()
+
+
+@router.message(ParserSetupStates.waiting_folder)
+async def process_parser_folder(message: Message, state: FSMContext, userbot_manager: UserbotManager):
+    text = (message.text or "").strip()
+    if not text:
+        await message.answer(pe("❌ Отправьте текстовое сообщение."), parse_mode="HTML", reply_markup=cancel_keyboard())
+        return
+    data = await state.get_data()
+    account_id = data.get("account_id")
+    chats = list(data.get("chats", []))
+    if not account_id:
+        await message.answer(pe("❌ Сессия устарела. Начните заново."), parse_mode="HTML", reply_markup=tools_menu_keyboard())
+        await state.clear()
+        return
+
+    slug = parse_folder_slug(text)
+    if not slug:
+        await message.answer(
+            pe("❌ Неверная ссылка. Отправьте ссылку в формате:\nhttps://t.me/addlist/xxxxx"),
+            parse_mode="HTML",
+            reply_markup=cancel_keyboard(),
+        )
+        return
+
+    client = await userbot_manager.get_client(account_id)
+    if not client:
+        await message.answer(pe("❌ Аккаунт не подключён."), parse_mode="HTML", reply_markup=parser_chats_keyboard(chats))
+        await state.set_state(ParserSetupStates.waiting_chats)
+        return
+
+    loading_msg = await message.answer(pe("⏳ Загружаем чаты из папки..."), parse_mode="HTML")
+    try:
+        from telethon.tl.functions.chatlists import CheckChatlistInviteRequest
+        result = await asyncio.wait_for(client(CheckChatlistInviteRequest(slug=slug)), timeout=90)
+        entities = getattr(result, "chats", [])
+        added = 0
+        for entity in entities:
+            if len(chats) >= _PARSER_MAX_CHATS_PER_ACCOUNT:
+                break
+            if type(entity).__name__ in ("ChannelForbidden", "ChatForbidden"):
+                continue
+            identifier = f"@{entity.username}" if getattr(entity, "username", None) else str(int(f"-100{entity.id}"))
+            if identifier not in chats:
+                chats.append(identifier)
+                added += 1
+        await state.update_data(chats=chats)
+        await state.set_state(ParserSetupStates.waiting_chats)
+        await loading_msg.delete()
+        skipped = len(entities) - added
+        summary = f"✅ Добавлено {added} чатов из папки! Всего: {len(chats)}"
+        if skipped > 0:
+            summary += f"\n({skipped} пропущено — лимит {_PARSER_MAX_CHATS_PER_ACCOUNT} чатов на аккаунт или уже добавлены)"
+        await safe_answer(
+            message,
+            pe(summary + "\n\nДобавьте ещё или нажмите «Готово»:"),
+            parse_mode="HTML",
+            reply_markup=parser_chats_keyboard(chats),
+        )
+    except Exception as e:
+        logger.error(f"Parser folder import failed for slug {slug}: {e}")
+        await loading_msg.delete()
+        await state.set_state(ParserSetupStates.waiting_chats)
+        await message.answer(
+            pe(friendly_error(e, default="❌ Не удалось получить чаты из папки. Проверьте ссылку и попробуйте снова.")),
+            parse_mode="HTML",
+            reply_markup=parser_chats_keyboard(chats),
+        )
+
+
+@router.callback_query(ParserSetupStates.waiting_chats, F.data == "parser_add_txt")
+async def callback_parser_add_txt(callback: CallbackQuery, state: FSMContext):
+    await state.set_state(ParserSetupStates.waiting_txt_file)
+    await safe_edit(
+        callback.message,
+        pe("📄 Отправьте .txt файл со списком чатов.\n\n"
+           "Формат: каждый чат на новой строке или через пробел.\n\n"
+           "Примеры:\n"
+           "• @username\n"
+           "• -1001234567890\n"
+           "• https://t.me/chatname"),
+        parse_mode="HTML",
+        reply_markup=cancel_keyboard(),
+    )
+    await callback.answer()
+
+
+@router.message(ParserSetupStates.waiting_txt_file, F.document | F.text)
+async def process_parser_txt_file(message: Message, state: FSMContext):
+    doc = message.document
+    if doc and (not doc.file_name or not doc.file_name.lower().endswith(".txt")):
+        await message.answer(pe("❌ Пожалуйста, отправьте файл с расширением .txt"), parse_mode="HTML", reply_markup=cancel_keyboard())
+        return
+    if doc and doc.file_size and doc.file_size > 500_000:
+        await message.answer(pe("❌ Файл слишком большой. Максимум 500 КБ."), parse_mode="HTML", reply_markup=cancel_keyboard())
+        return
+
+    data = await state.get_data()
+    account_id = data.get("account_id")
+    chats = list(data.get("chats", []))
+    if not account_id:
+        await message.answer(pe("❌ Сессия устарела. Начните заново."), parse_mode="HTML", reply_markup=tools_menu_keyboard())
+        await state.clear()
+        return
+
+    if doc:
+        file_io = await message.bot.download(doc)
+        try:
+            content = file_io.read().decode("utf-8")
+        except UnicodeDecodeError:
+            file_io.seek(0)
+            content = file_io.read().decode("cp1251", errors="replace")
+    else:
+        content = message.text or ""
+
+    identifiers = _parse_txt_targets(content)
+    if not identifiers:
+        await message.answer(pe("❌ В файле не найдено ни одного чата."), parse_mode="HTML", reply_markup=cancel_keyboard())
+        return
+    if len(identifiers) > MAX_TXT_IMPORT_TARGETS:
+        await message.answer(
+            pe(f"❌ В файле {len(identifiers)} чатов — максимум за раз {MAX_TXT_IMPORT_TARGETS}. "
+               "Разделите файл на несколько частей и загрузите по очереди."),
+            parse_mode="HTML",
+            reply_markup=cancel_keyboard(),
+        )
+        return
+
+    added = 0
+    for identifier in identifiers:
+        if len(chats) >= _PARSER_MAX_CHATS_PER_ACCOUNT:
+            break
+        if identifier not in chats:
+            chats.append(identifier)
+            added += 1
+    await state.update_data(chats=chats)
+    await state.set_state(ParserSetupStates.waiting_chats)
+
+    skipped = len(identifiers) - added
+    summary = f"✅ Добавлено {added} чатов из файла! Всего: {len(chats)}"
+    if skipped > 0:
+        summary += f"\n({skipped} пропущено — лимит {_PARSER_MAX_CHATS_PER_ACCOUNT} чатов на аккаунт или уже добавлены)"
+    await safe_answer(
+        message,
+        pe(summary + "\n\nДобавьте ещё или нажмите «Готово»:"),
+        parse_mode="HTML",
+        reply_markup=parser_chats_keyboard(chats),
+    )
 
 
 @router.callback_query(ParserSetupStates.waiting_chats, F.data == "parser_chats_done")

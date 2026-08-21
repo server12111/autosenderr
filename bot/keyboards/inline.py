@@ -126,6 +126,10 @@ def parser_chats_keyboard(chats: list[str]) -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
     for i, chat in enumerate(chats):
         builder.row(_btn(f"🗑️ {chat}", callback_data=f"parser_chat_del:{i}", style="danger"))
+    builder.row(
+        _btn("📁 Добавить папку", callback_data="parser_add_folder", style="primary"),
+        _btn("📄 Загрузить .txt", callback_data="parser_add_txt", style="primary"),
+    )
     if chats:
         builder.row(_btn("✅ Готово", callback_data="parser_chats_done", style="success"))
     builder.row(_btn("❌ Отмена", callback_data="cancel", style="danger"))
