@@ -125,9 +125,8 @@ async def callback_sub_plan(
     # any provider config — so the method-selection screen is always worth
     # showing now (previously skipped straight to CryptoBot when neither
     # TON nor Platega were configured, which would have hidden Stars too).
-    crypto_price = round(price * 1.03, 2)
     lines = [
-        f"💎 CryptoBot — {crypto_price:.2f} USDT (+3%)",
+        f"💎 CryptoBot — {price:.2f} USDT (+3%)",
         f"⭐️ Telegram Stars — {stars_price}",
     ]
     if has_ton or (show_platega and platega_service):
