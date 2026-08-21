@@ -1095,15 +1095,7 @@ class ParserService:
         username = getattr(sender, "username", None)
         first_name = (getattr(sender, "first_name", None) or "").strip()
         last_name = (getattr(sender, "last_name", None) or "").strip()
-        display = f"@{username}" if username else ((f"{first_name} {last_name}").strip() or "Без имени")
-
-        chat_title = None
-        try:
-            chat = await event.get_chat()
-            chat_title = getattr(chat, "title", None)
-        except Exception:
-            pass
-        chat_title = chat_title or "чат"
+        name = (f"{first_name} {last_name}").strip() or "Без имени"
 
         notify = getattr(self.userbot_manager, "_bot_notify_callback", None)
         if notify:
@@ -1111,10 +1103,11 @@ class ParserService:
                 user = await self.db.get_user_by_id(cfg.user_id)
                 if user:
                     message_text = pe(
-                        f"🔎 <b>Парсер нашёл совпадение!</b>\n\n"
-                        f"{html.escape(text)}\n\n"
-                        f"Чат: {html.escape(chat_title)} | "
-                        f"Юзер: {html.escape(display)} (id: <code>{sender_id}</code>)"
+                        f"📥 <b>Сообщение от:</b>\n"
+                        f"👤 Имя: {html.escape(name)}\n"
+                        f"🔗 Username: {('@' + html.escape(username)) if username else '—'}\n"
+                        f"🆔 ID: <code>{sender_id}</code>\n\n"
+                        f"💬 {html.escape(text)}"
                     )
                     await notify(
                         user.telegram_id, message_text,
