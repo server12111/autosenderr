@@ -800,7 +800,11 @@ async def process_api_hash(message: Message, state: FSMContext, db: Database, us
         await message.answer(pe("❌ API Hash слишком короткий. Попробуйте снова:"), parse_mode="HTML")
         return
 
-    await state.update_data(api_hash=api_hash)
+    # Manual entry always wins — clear any api_credential_pool_id a prior
+    # "skip" tap in this same session might have set, so the persisted
+    # account never ends up with pool bookkeeping pointing at credentials
+    # that don't match what was actually typed here.
+    await state.update_data(api_hash=api_hash, api_credential_pool_id=None)
     data = await state.get_data()
 
     if data.get("phone"):

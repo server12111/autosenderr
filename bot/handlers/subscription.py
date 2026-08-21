@@ -127,27 +127,41 @@ async def callback_sub_plan(
     # TON nor Platega were configured, which would have hidden Stars too).
     crypto_price = round(price * 1.03, 2)
     lines = [
-        f"💎 CryptoBot — {price:.2f} USDT (+3%)",
+        f"💎 CryptoBot — {crypto_price:.2f} USDT (+3%)",
         f"⭐️ Telegram Stars — {stars_price}",
     ]
     if has_ton or (show_platega and platega_service):
         await safe_edit(
             callback.message, pe("⏳ Загружаем способы оплаты..."), parse_mode="HTML", retries=0,
         )
-    if has_ton:
+    # TON and Platega rates hit two unrelated external APIs with no data
+    # dependency between them — run them concurrently so a cold cache on
+    # both doesn't add up to ~24s of sequential waiting.
+    async def _ton_amount_or_none():
         try:
-            ton_amount = await asyncio.wait_for(ton_service.calculate_ton_amount(price), timeout=12)
+            return await asyncio.wait_for(ton_service.calculate_ton_amount(price), timeout=12)
         except asyncio.TimeoutError:
-            ton_amount = None
+            return None
+
+    async def _rub_price_or_none():
+        try:
+            return await asyncio.wait_for(platega_service.calculate_rub_price(price), timeout=12)
+        except asyncio.TimeoutError:
+            return None
+
+    ton_task = asyncio.create_task(_ton_amount_or_none()) if has_ton else None
+    rub_task = asyncio.create_task(_rub_price_or_none()) if (show_platega and platega_service) else None
+    if ton_task or rub_task:
+        await asyncio.gather(*(t for t in (ton_task, rub_task) if t))
+
+    if has_ton:
+        ton_amount = ton_task.result()
         if ton_amount:
             lines.append(f"💠 GRAM(TON) — ~{ton_amount} GRAM(TON) (≈ {price} USDT)")
         else:
             lines.append(f"💠 GRAM(TON) — ≈ {price} USDT в GRAM(TON)")
     if show_platega and platega_service:
-        try:
-            rub_price = await asyncio.wait_for(platega_service.calculate_rub_price(price), timeout=12)
-        except asyncio.TimeoutError:
-            rub_price = None
+        rub_price = rub_task.result()
         if rub_price:
             lines.append(f"💳 СБП (рубли) — ~{rub_price:.0f} ₽")
     text = pe(f"💳 Способ оплаты ({plan_days} дней):\n\n" + "\n".join(lines))
